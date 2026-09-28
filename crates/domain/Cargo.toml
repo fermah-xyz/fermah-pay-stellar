@@ -1,0 +1,19 @@
+[package]
+name = "fermah-pay-stellar-domain"
+description = "Validated domain values shared by the Fermah Pay Stellar gateway and tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stellar-strkey.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

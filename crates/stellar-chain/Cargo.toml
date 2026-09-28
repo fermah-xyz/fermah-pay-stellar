@@ -1,0 +1,31 @@
+[package]
+name = "fermah-pay-stellar-chain"
+description = "Stellar XDR, signing and RPC access for the Fermah Pay Stellar gateway"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fermah-pay-stellar-domain.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+stellar-strkey.workspace = true
+stellar-xdr.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

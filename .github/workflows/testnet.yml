@@ -1,0 +1,37 @@
+name: testnet
+
+# Exercises the live Stellar testnet. Manual and weekly rather than per push:
+# it depends on public infrastructure (RPC, Friendbot) outside this repository.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  onboarding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test -p fermah-pay-stellar-chain --test testnet_onboarding --locked -- --ignored
+      - name: Record sponsored onboarding evidence
+        run: |
+          mkdir -p evidence
+          cargo run -q --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-testnet -- \
+            onboard-buyer --buyer-secret-out "$RUNNER_TEMP/buyer.secret" \
+            > evidence/buyer-onboarding.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: testnet-evidence
+          path: evidence/

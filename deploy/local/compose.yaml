@@ -1,0 +1,19 @@
+# Local development and test database. Not a production deployment.
+name: fermah-pay-stellar
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: pay_stellar_owner
+      POSTGRES_PASSWORD: local-development-only
+      POSTGRES_DB: pay_stellar
+    ports:
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pay_stellar_owner -d pay_stellar"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data

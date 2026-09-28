@@ -1,0 +1,150 @@
+name: Rust
+
+# Runs only when an input that can change a verdict below changed: Rust
+# sources, protobuf definitions (compiled by build.rs), the schema and query
+# cache the database suite reads, manifests, lockfile, toolchain, lint and
+# dependency policy.
+on:
+  push:
+    branches: [main]
+    paths: &rust-inputs
+      - crates/**
+      - proto/**
+      - db/**
+      - .sqlx/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - clippy.toml
+      - deny.toml
+      - .github/workflows/ci-rust.yml
+  pull_request:
+    paths: *rust-inputs
+
+# Build scripts and proc macros from the PR run here: read-only token, never
+# persisted into .git/config.
+permissions:
+  contents: read
+
+# A superseded PR run is cancelled; every commit on main still gets a verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Line tables keep test backtraces readable at a fraction of full debuginfo,
+  # which shrinks the target directory each cache save and restore moves.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  # Every gate that needs no compilation, in one job: each job pays runner
+  # queue time, which exceeds the work of any of these on its own.
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Format
+        run: cargo fmt --all -- --check
+      # Explicit tripwire before any build could rewrite the lockfile.
+      - name: Lockfile is up to date
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      # Release binaries pinned by version and SHA-256, instead of compiling
+      # the tools on every run.
+      - name: Install cargo-machete and cargo-deny
+        run: |
+          set -euo pipefail
+          fetch() {
+            curl -fsSL --retry 5 --retry-delay 2 "$1" -o "$RUNNER_TEMP/tool.tar.gz"
+            echo "$2  $RUNNER_TEMP/tool.tar.gz" | sha256sum --check --strict
+            tar -xzf "$RUNNER_TEMP/tool.tar.gz" -C "$RUNNER_TEMP" --strip-components=1 --wildcards "*/$3"
+            install -m 0755 "$RUNNER_TEMP/$3" "$HOME/.cargo/bin/$3"
+          }
+          fetch https://github.com/bnjbvr/cargo-machete/releases/download/v0.9.2/cargo-machete-v0.9.2-x86_64-unknown-linux-musl.tar.gz \
+            48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9 cargo-machete
+          fetch https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+            9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f cargo-deny
+      - name: Unused dependencies
+        run: cargo machete
+      - name: Licenses, sources, bans and advisories
+        run: cargo deny --locked check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Offline: proves the committed query cache covers every query.
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # PRs restore main's cache but never save their own, so short-lived
+      # branches cannot evict it from the repository's cache quota.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: pay_stellar_owner
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: pay_stellar
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U pay_stellar_owner -d pay_stellar"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
+      # sqlx-cli publishes no release binaries. Cached by exact version so it
+      # is compiled once, not on every run; the version matches Cargo.lock so
+      # the CLI describes queries the way the compiled macros do.
+      - id: sqlx-cli
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/bin/sqlx
+            ~/.cargo/bin/cargo-sqlx
+          key: sqlx-cli-0.9.0-rustls-postgres-${{ runner.os }}
+      - if: steps.sqlx-cli.outputs.cache-hit != 'true'
+        run: cargo install sqlx-cli --version 0.9.0 --no-default-features --features rustls,postgres --locked
+      # The migrator operators run, so the queries below are described against
+      # the schema production gets.
+      - name: Build the migrator
+        run: SQLX_OFFLINE=true cargo build --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin
+      - name: Migrate an empty database
+        run: ./target/debug/fermah-pay-stellar-admin --database-url "$DATABASE_URL" migrate
+      # Every deployment re-runs the migrator on start; recorded versions must
+      # be skipped.
+      - name: Re-running the migrator is a no-op
+        run: ./target/debug/fermah-pay-stellar-admin --database-url "$DATABASE_URL" migrate
+      - name: Query cache matches the schema
+        run: cargo sqlx prepare --workspace --check -- --all-targets --all-features
+      - name: Test
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo test --workspace --all-features --locked
