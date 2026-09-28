@@ -1,0 +1,42 @@
+[package]
+name = "fermah-pay-stellar-gateway"
+description = "Fermah Pay Stellar gateway daemon: authenticated seller API over PostgreSQL"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fermah-pay-stellar-gateway"
+path = "src/main.rs"
+
+[dependencies]
+fermah-pay-stellar-domain.workspace = true
+fermah-pay-stellar-proto.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+http.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+stellar-strkey.workspace = true
