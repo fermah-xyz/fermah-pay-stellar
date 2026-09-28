@@ -11,6 +11,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "fermah-pay-stellar-admin"
 path = "src/bin/admin.rs"
@@ -25,6 +28,8 @@ fermah-pay-stellar-chain.workspace = true
 fermah-pay-stellar-gateway.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+getrandom.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true

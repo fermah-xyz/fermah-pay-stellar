@@ -7,11 +7,16 @@
 #![forbid(unsafe_code)]
 
 pub mod authorization;
+pub mod deploy;
 pub mod friendbot;
 pub mod keys;
 pub mod onboarding;
+pub mod payments;
 pub mod prepaid;
 pub mod rpc;
+pub mod soroban;
+pub mod sponsored;
+pub mod submission;
 pub mod transaction;
 pub mod usdc;
 

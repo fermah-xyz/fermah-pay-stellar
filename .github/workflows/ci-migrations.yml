@@ -9,6 +9,7 @@ on:
     paths: &migration-inputs
       - db/**
       - crates/cli/src/bin/admin.rs
+      - crates/cli/build.rs
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/ci-migrations.yml
@@ -143,22 +144,27 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The migrator embeds its migrations at compile time, so each side is
-      # built from its own tree. Both builds share one target directory, so
-      # the second only recompiles what differs.
+      # The head's migrator is built twice: once embedding the comparison
+      # point's migrations, once embedding the head's. Only one source tree is
+      # compiled, so no build can mix code from the two commits.
       - name: Apply the comparison point's migrations
         env:
           BASE_SHA: ${{ needs.base.outputs.sha }}
         run: |
           set -euo pipefail
-          git worktree add "$RUNNER_TEMP/base" "$BASE_SHA"
-          if ! ls "$RUNNER_TEMP"/base/db/migrations/*.sql >/dev/null 2>&1; then
-            echo "The comparison point has no migrations: the upgrade equals a fresh install."
-            exit 0
+          rm -rf db/migrations
+          mkdir -p db/migrations
+          if git cat-file -e "$BASE_SHA:db/migrations" 2>/dev/null; then
+            git archive "$BASE_SHA" db/migrations | tar -x -C .
           fi
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo run --locked \
-            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" \
-            -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin -- --database-url "$DATABASE_URL" migrate
+          if ! ls db/migrations/*.sql >/dev/null 2>&1; then
+            echo "The comparison point has no migrations: the upgrade equals a fresh install."
+          else
+            cargo run --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin -- \
+              --database-url "$DATABASE_URL" migrate
+          fi
+          git checkout -- db/migrations
+          git clean -fdq db/migrations
       - name: Apply head's migrations on top
         run: >-
           cargo run --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin --

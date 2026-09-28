@@ -14,6 +14,8 @@ use stellar_xdr::{
 
 use sha2::{Digest, Sha256};
 
+use fermah_pay_stellar_domain::AccountAddress;
+
 use crate::keys::SecretKey;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -135,6 +137,100 @@ fn signature_map(public_key: [u8; 32], signature: [u8; 64]) -> Result<ScVal, Aut
     Ok(ScVal::Map(Some(ScMap(entries))))
 }
 
+/// Why a buyer-returned authorization entry was refused. Every check runs
+/// before any fee is spent; a distinct reason per defect lets the caller
+/// report exactly what the wallet got wrong.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SignedEntryRefusal {
+    #[error("entry carries no address credentials")]
+    NotAnAddressEntry,
+    #[error("entry is signed for a different account than the expected signer")]
+    WrongSigner,
+    #[error("entry authorizes a different call than the one prepared")]
+    InvocationMismatch,
+    #[error("entry expired at ledger {expiration}; current ledger is {current}")]
+    Expired { expiration: u32, current: u32 },
+    #[error("entry stays valid until ledger {expiration}, beyond the allowed {latest}")]
+    ValidityTooLong { expiration: u32, latest: u32 },
+    #[error("entry must carry exactly one Ed25519 signature by the account's own key")]
+    UnsupportedSignature,
+    #[error("signature does not verify for the entry's payload")]
+    BadSignature,
+}
+
+/// Checks an authorization entry a signer returned against the call that was
+/// prepared for them: same account, byte-identical invocation tree, a live
+/// but bounded expiration, and a valid signature by the account's own key.
+///
+/// Accounts that authorize through other signers or thresholds are refused
+/// here rather than accepted and left to fail on-chain; the network still has
+/// the final word through enforcing simulation before submission.
+pub fn verify_signed_entry(
+    entry: &SorobanAuthorizationEntry,
+    signer: &AccountAddress,
+    invocation: &SorobanAuthorizedInvocation,
+    network_id: [u8; 32],
+    current_ledger: u32,
+    max_validity_ledgers: u32,
+) -> Result<(), SignedEntryRefusal> {
+    let creds = match &entry.credentials {
+        SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds) => creds,
+        SorobanCredentials::SourceAccount | SorobanCredentials::AddressWithDelegates(_) => {
+            return Err(SignedEntryRefusal::NotAnAddressEntry);
+        }
+    };
+    match &creds.address {
+        ScAddress::Account(account) if crate::transaction::address_of(account) == *signer => {}
+        _ => return Err(SignedEntryRefusal::WrongSigner),
+    }
+    if entry.root_invocation != *invocation {
+        return Err(SignedEntryRefusal::InvocationMismatch);
+    }
+    let expiration = creds.signature_expiration_ledger;
+    if expiration < current_ledger {
+        return Err(SignedEntryRefusal::Expired { expiration, current: current_ledger });
+    }
+    let latest = current_ledger.saturating_add(max_validity_ledgers);
+    if expiration > latest {
+        return Err(SignedEntryRefusal::ValidityTooLong { expiration, latest });
+    }
+
+    let (public_key, signature) =
+        single_signature(&creds.signature).ok_or(SignedEntryRefusal::UnsupportedSignature)?;
+    if public_key != *signer.public_key() {
+        return Err(SignedEntryRefusal::UnsupportedSignature);
+    }
+    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)
+        .map_err(|_| SignedEntryRefusal::NotAnAddressEntry)?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| SignedEntryRefusal::BadSignature)?;
+    key.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&signature))
+        .map_err(|_| SignedEntryRefusal::BadSignature)
+}
+
+/// The `(public_key, signature)` of a signature value holding exactly one
+/// `{ public_key, signature }` map.
+fn single_signature(value: &ScVal) -> Option<([u8; 32], [u8; 64])> {
+    let ScVal::Vec(Some(ScVec(items))) = value else { return None };
+    let [ScVal::Map(Some(ScMap(fields)))] = items.as_slice() else { return None };
+    let field = |name: &str| {
+        fields.iter().find_map(|entry| match (&entry.key, &entry.val) {
+            (ScVal::Symbol(key), ScVal::Bytes(ScBytes(bytes)))
+                if key.0.as_slice() == name.as_bytes() =>
+            {
+                Some(bytes.as_slice().to_vec())
+            }
+            _ => None,
+        })
+    };
+    if fields.len() != 2 {
+        return None;
+    }
+    let public_key = <[u8; 32]>::try_from(field("public_key")?).ok()?;
+    let signature = <[u8; 64]>::try_from(field("signature")?).ok()?;
+    Some((public_key, signature))
+}
+
 #[cfg(test)]
 mod tests {
     use stellar_xdr::{
@@ -246,5 +342,127 @@ mod tests {
                 &unsigned.root_invocation
             )
         );
+    }
+
+    fn prepared(key: &SecretKey) -> SorobanAuthorizationEntry {
+        let mut e = entry(key, true);
+        if let SorobanCredentials::AddressV2(creds) = &mut e.credentials {
+            creds.signature_expiration_ledger = 1_100;
+        }
+        sign_entry(&e, [1; 32], &[key]).unwrap()
+    }
+
+    fn check(
+        entry: &SorobanAuthorizationEntry,
+        signer: &SecretKey,
+    ) -> Result<(), SignedEntryRefusal> {
+        verify_signed_entry(entry, &signer.address(), &invocation("deposit"), [1; 32], 1_000, 200)
+    }
+
+    #[test]
+    fn test_correctly_signed_entry_is_accepted() {
+        let key = SecretKey::generate().unwrap();
+        assert_eq!(check(&prepared(&key), &key), Ok(()));
+    }
+
+    #[test]
+    fn test_entry_for_another_account_is_refused() {
+        let (buyer, other) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+        assert_eq!(check(&prepared(&other), &buyer), Err(SignedEntryRefusal::WrongSigner));
+    }
+
+    #[test]
+    fn test_entry_for_another_call_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let mut signed = prepared(&key);
+        signed.root_invocation = invocation("withdraw");
+        assert_eq!(check(&signed, &key), Err(SignedEntryRefusal::InvocationMismatch));
+    }
+
+    #[test]
+    fn test_expired_entry_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let result = verify_signed_entry(
+            &prepared(&key),
+            &key.address(),
+            &invocation("deposit"),
+            [1; 32],
+            1_101,
+            200,
+        );
+        assert_eq!(result, Err(SignedEntryRefusal::Expired { expiration: 1_100, current: 1_101 }));
+    }
+
+    #[test]
+    fn test_entry_valid_beyond_window_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let result = verify_signed_entry(
+            &prepared(&key),
+            &key.address(),
+            &invocation("deposit"),
+            [1; 32],
+            1_000,
+            99,
+        );
+        assert_eq!(
+            result,
+            Err(SignedEntryRefusal::ValidityTooLong { expiration: 1_100, latest: 1_099 })
+        );
+    }
+
+    #[test]
+    fn test_signature_over_another_network_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let mut e = entry(&key, true);
+        if let SorobanCredentials::AddressV2(creds) = &mut e.credentials {
+            creds.signature_expiration_ledger = 1_100;
+        }
+        let other_network = sign_entry(&e, [2; 32], &[&key]).unwrap();
+        assert_eq!(check(&other_network, &key), Err(SignedEntryRefusal::BadSignature));
+    }
+
+    #[test]
+    fn test_raised_expiration_after_signing_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let mut signed = prepared(&key);
+        if let SorobanCredentials::AddressV2(creds) = &mut signed.credentials {
+            creds.signature_expiration_ledger = 1_150;
+        }
+        assert_eq!(check(&signed, &key), Err(SignedEntryRefusal::BadSignature));
+    }
+
+    #[test]
+    fn test_unsigned_entry_is_refused() {
+        let key = SecretKey::generate().unwrap();
+        let mut unsigned = entry(&key, true);
+        if let SorobanCredentials::AddressV2(creds) = &mut unsigned.credentials {
+            creds.signature_expiration_ledger = 1_100;
+        }
+        assert_eq!(check(&unsigned, &key), Err(SignedEntryRefusal::UnsupportedSignature));
+    }
+
+    #[test]
+    fn test_valid_signature_by_another_key_is_refused() {
+        let (buyer, stranger) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+        let mut forged = entry(&buyer, true);
+        if let SorobanCredentials::AddressV2(creds) = &mut forged.credentials {
+            creds.signature_expiration_ledger = 1_100;
+        }
+        // The stranger signs the buyer's exact payload and presents its own
+        // public key: a signature that verifies, by the wrong key.
+        let payload =
+            signature_payload([1; 32], &forged.credentials, &forged.root_invocation).unwrap();
+        let signature = ScVal::Vec(Some(ScVec(
+            vec![
+                signature_map(*stranger.address().public_key(), stranger.sign_raw(&payload))
+                    .unwrap(),
+            ]
+            .try_into()
+            .unwrap(),
+        )));
+        if let SorobanCredentials::AddressV2(creds) = &mut forged.credentials {
+            creds.signature = signature;
+        }
+        assert_eq!(check(&forged, &buyer), Err(SignedEntryRefusal::UnsupportedSignature));
     }
 }
