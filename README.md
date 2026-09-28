@@ -1,31 +1,19 @@
 # Fermah Pay for Stellar
 
-Prepaid USDC accounts and seller-side billing on Stellar. The target design:
-a buyer funds a prepaid balance once; a seller charges it per use through an
-authenticated API; an operator submits the transactions and pays the XLM
-fees. USDC is held by a separate treasury account, and a Soroban contract
-records each buyer's balance. The [status](#status) table below separates
-what is implemented from what is planned.
+Prepaid USDC accounts and seller-side billing on Stellar.
 
 This repository is self-contained: it builds, tests and runs from public
 sources only, under the Apache License 2.0.
 
-## Status
+It provides:
 
-Work is delivered in vertical slices. What exists today:
-
-| Capability | State |
-|---|---|
-| Tenancy: products, seller deployments, network-pinned API keys | Implemented and tested |
-| Buyer registration API (`BuyerService`, gRPC) | Implemented and tested |
-| Buyer onboarding on Stellar with sponsored reserves (buyer holds 0 XLM) | Implemented; verified on testnet ([evidence](docs/evidence/README.md)) |
-| Prepaid ledger contract (`deposit`, `charge`, `charge_batch`, `get_balance`, `withdraw`) | Planned |
-| Buyer-signed authorization with operator fee bump | Planned |
-| Charge settlement, event observation and reconciliation | Planned |
-| Recurring charges with bounded SAC allowances | Planned |
-| TypeScript SDK | Planned |
-
-Nothing in the "Planned" rows should be read as available.
+- **Tenancy**: products, seller deployments pinned to one Stellar network,
+  and API keys scoped to a single deployment.
+- **Buyer API**: a gRPC service to register buyers and link their Stellar
+  wallets ([reference](docs/api/buyer.md)).
+- **Buyer onboarding without XLM**: one transaction creates a buyer account
+  with a Circle USDC trustline and a zero XLM balance, while a sponsor pays
+  the fee and every reserve ([testnet evidence](docs/evidence/README.md)).
 
 ## Layout
 

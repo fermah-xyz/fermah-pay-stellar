@@ -1,28 +1,24 @@
 # Architecture overview
 
-This page describes the target system and marks which parts exist. Anything
-labelled *planned* is design, not a description of running code.
-
 ## Roles
 
 | Role | What it is | Holds |
 |---|---|---|
-| Buyer | A classic Stellar `G...` account owned by an end user | Its own key; USDC before depositing |
+| Buyer | A classic Stellar `G...` account owned by an end user | Its own key and USDC |
 | Seller | A product that bills buyers, identified by a seller deployment | API keys for the gateway |
-| Operator | Whoever runs the gateway and its workers | Fee-paying and submission keys |
-| Treasury | A separate `G...` account that holds deposited USDC (*planned*) | USDC |
+| Operator | Whoever runs the gateway | Sponsor key that pays onboarding fees and reserves |
 
-Paying a transaction fee on someone's behalf, paying their account reserves,
-and authorizing a contract call are three different things on Stellar. The
-system keeps them separate, and its evidence shows each one separately.
+Paying a transaction fee on someone's behalf and paying their account
+reserves are different things on Stellar. The system keeps them separate,
+and its evidence shows each one separately.
 
 ## Components
 
 ```text
-seller / facilitator ──gRPC + API key──> gateway ──> PostgreSQL
-                                            │
-                                            └──> Stellar RPC (reads, submission)
-buyer wallet ── signs ──> onboarding / (planned) deposit authorization
+seller ──gRPC + API key──> gateway ──> PostgreSQL
+
+operator tools ──> Stellar RPC (reads, submission)
+buyer key ── signs ──> onboarding transaction
 ```
 
 - **Gateway** (`crates/gateway`): the authenticated gRPC API. It resolves each
@@ -34,8 +30,6 @@ buyer wallet ── signs ──> onboarding / (planned) deposit authorization
 - **Operator tools** (`crates/cli`): schema migration and tenant provisioning
   (`fermah-pay-stellar-admin`), and testnet onboarding
   (`fermah-pay-stellar-testnet`).
-- **Prepaid ledger contract**, **submission workers**, **event observer** and
-  **reconciler**: *planned*.
 
 ## Tenancy
 
@@ -80,12 +74,3 @@ and the trustline. After inclusion, the tooling reads the buyer's account and
 trustline entries back from the ledger and reports who pays each reserve.
 The success check is on the ledger state, not on the transaction the tool
 built.
-
-## Custody (*planned*)
-
-Deposited USDC moves to a separate treasury `G...` account; the prepaid
-contract records each buyer's balance and holds no USDC. The treasury key
-can move USDC without calling the contract, so solvency (treasury USDC
-balance at least buyer balances plus unwithdrawn seller revenue) is a
-monitored property, not one the contract can enforce. This will be
-documented in the threat model before any deposit path ships.

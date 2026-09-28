@@ -1,8 +1,8 @@
 //! Stellar protocol access for the gateway: key handling, transaction
 //! signing, asset identities, RPC reads/submission and account onboarding.
 //!
-//! Everything here is chain-specific and business-agnostic; the gateway
-//! decides what to sign and when.
+//! Everything here is chain-specific and business-agnostic; callers decide
+//! what to sign and when.
 
 #![forbid(unsafe_code)]
 
