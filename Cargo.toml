@@ -1,0 +1,64 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domain",
+    "crates/proto",
+    "crates/stellar-chain",
+    "crates/gateway",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+repository = "https://github.com/fermah-xyz/fermah-pay-stellar"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
+[workspace.dependencies]
+fermah-pay-stellar-domain = { path = "crates/domain" }
+fermah-pay-stellar-proto = { path = "crates/proto" }
+fermah-pay-stellar-chain = { path = "crates/stellar-chain" }
+fermah-pay-stellar-gateway = { path = "crates/gateway" }
+
+anyhow = "1.0.104"
+base64 = "0.23.1"
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"] }
+getrandom = "0.4.3"
+hex = "0.4.3"
+http = "1.5.0"
+proptest = "1.11.0"
+prost = "0.14.4"
+protox = "0.9.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls-no-provider", "http2"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "macros", "migrate", "uuid", "time"] }
+stellar-strkey = "0.0.18"
+stellar-xdr = { version = "28.0.0", default-features = false, features = ["std", "base64"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["formatting"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time", "net"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tonic = "0.14.6"
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
+tower = "0.5.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid = { version = "1.26.1", features = ["v7"] }
+webpki-roots = "1.0.9"
+zeroize = "1.9.0"

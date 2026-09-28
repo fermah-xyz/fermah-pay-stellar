@@ -1,0 +1,23 @@
+{
+  "asset": {
+    "code": "USDC",
+    "contract_id": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    "issuer": "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5"
+  },
+  "buyer": "GDH2YFRTJZATBGAMV7OAKQK6WMXQO5SZ3GW67SOMGAFM3PYM3TD2RDYT",
+  "criterion": "buyer-onboarding-sponsored-reserves",
+  "expected": "buyer created with 0 XLM; transaction fee, account reserve and USDC trustline reserve paid by fee_source",
+  "fee_charged_stroops": 400,
+  "fee_source": "GCMURUSFDAUARCBSXK2AIYTK7HCDSO57XYXNVXD2GC4JJUNJTQYGBRKF",
+  "ledger": 4920245,
+  "network": "stellar:testnet",
+  "observed": {
+    "account_reserve_paid_by": "GCMURUSFDAUARCBSXK2AIYTK7HCDSO57XYXNVXD2GC4JJUNJTQYGBRKF",
+    "buyer_native_balance_stroops": 0,
+    "trustline_reserve_paid_by": "GCMURUSFDAUARCBSXK2AIYTK7HCDSO57XYXNVXD2GC4JJUNJTQYGBRKF",
+    "violations": []
+  },
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/5f4dfbb3f170841f480a959c9b10048b25e6492b24293334e9d6812509a54d46",
+  "recorded_at": "2026-09-28T19:46:52.85167272Z",
+  "transaction_hash": "5f4dfbb3f170841f480a959c9b10048b25e6492b24293334e9d6812509a54d46"
+}

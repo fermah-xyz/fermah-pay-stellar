@@ -1,0 +1,165 @@
+name: Migrations
+
+# Schema history safety: rules about how the migration set may change, and an
+# upgrade rehearsal. Applying migrations to an empty database is done by the
+# Test job of the Rust workflow, which every change here also triggers.
+on:
+  push:
+    branches: [main]
+    paths: &migration-inputs
+      - db/**
+      - crates/cli/src/bin/admin.rs
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/ci-migrations.yml
+  pull_request:
+    paths: *migration-inputs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SQLX_OFFLINE: "true"
+  DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+
+jobs:
+  # The tree to compare against: the PR base, or the previous tip of main on a
+  # push, so a direct push is held to the same rules as a pull request.
+  base:
+    name: Resolve comparison point
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: resolve
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          candidate="${PR_BASE:-$PUSH_BEFORE}"
+          if [ -z "$candidate" ] || [ "$candidate" = "0000000000000000000000000000000000000000" ]; then
+            echo "No previous tree: the checks below are skipped."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "$candidate^{commit}" 2>/dev/null; then
+            echo "::error::Comparison point $candidate is not in this clone; the history checks cannot run." >&2
+            exit 1
+          fi
+          echo "sha=$candidate" >> "$GITHUB_OUTPUT"
+
+  history:
+    name: Migration history rules
+    needs: base
+    if: needs.base.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_SHA: ${{ needs.base.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # A merged migration may already be applied somewhere; editing it makes
+      # the recorded checksum disagree with the code and the migrator refuses
+      # to run.
+      - name: Merged migrations are append-only
+        run: |
+          set -euo pipefail
+          # No `|| true`: a git failure must fail the job, not read as "no changes".
+          changed=$(git diff --name-status --diff-filter=MDRT "$BASE_SHA" HEAD -- db/migrations/)
+          if [ -n "$changed" ]; then
+            printf 'Merged migrations were changed:\n%s\nAdd a new numbered migration instead.\n' "$changed" >&2
+            exit 1
+          fi
+      - name: Versions are unique
+        run: |
+          set -euo pipefail
+          dupes=$(ls db/migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            printf 'Migration versions used more than once: %s\n' "$dupes" >&2
+            exit 1
+          fi
+      # A migration numbered below one a database already applied runs after
+      # it there and before it on a fresh database: one tree, two schemas.
+      - name: Added migrations are numbered above the comparison point
+        run: |
+          set -euo pipefail
+          base_max=$(git ls-tree --name-only -r "$BASE_SHA" -- db/migrations/ \
+            | sed -n 's|.*/\([0-9]\{4\}\)_.*\.sql$|\1|p' | sort -n | tail -1)
+          if [ -z "$base_max" ]; then
+            echo "The comparison point has no migrations."
+            exit 0
+          fi
+          bad=""
+          for f in $(git diff --name-only --diff-filter=A "$BASE_SHA" HEAD -- db/migrations/); do
+            v=$(basename "$f" | cut -d_ -f1)
+            if [ "$((10#$v))" -le "$((10#$base_max))" ]; then bad="$bad $f"; fi
+          done
+          if [ -n "$bad" ]; then
+            printf 'Added at or below version %s:%s\n' "$base_max" "$bad" >&2
+            exit 1
+          fi
+
+  # Catches a migration that succeeds on an empty database but fails against
+  # the schema the comparison point already has.
+  upgrade:
+    name: Upgrade comparison point to head
+    needs: base
+    if: needs.base.outputs.sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: pay_stellar_owner
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: pay_stellar
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U pay_stellar_owner -d pay_stellar"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The migrator embeds its migrations at compile time, so each side is
+      # built from its own tree. Both builds share one target directory, so
+      # the second only recompiles what differs.
+      - name: Apply the comparison point's migrations
+        env:
+          BASE_SHA: ${{ needs.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git worktree add "$RUNNER_TEMP/base" "$BASE_SHA"
+          if ! ls "$RUNNER_TEMP"/base/db/migrations/*.sql >/dev/null 2>&1; then
+            echo "The comparison point has no migrations: the upgrade equals a fresh install."
+            exit 0
+          fi
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo run --locked \
+            --manifest-path "$RUNNER_TEMP/base/Cargo.toml" \
+            -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin -- --database-url "$DATABASE_URL" migrate
+      - name: Apply head's migrations on top
+        run: >-
+          cargo run --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin --
+          --database-url "$DATABASE_URL" migrate

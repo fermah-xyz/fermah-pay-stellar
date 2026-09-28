@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package fermah.pay.stellar.v1;
+
+// Buyer accounts of one seller deployment.
+//
+// The caller's API key selects the product, the seller deployment and the
+// Stellar network. No request field can select or override them, and a
+// resource belonging to another deployment is reported exactly like a
+// resource that does not exist.
+//
+// Refusals carry a gRPC status code and, as the status message, one stable
+// reason token documented in docs/api/buyer.md.
+service BuyerService {
+  // Registers a buyer and links its Stellar wallet. Registering the same
+  // external reference again with the same wallet returns the existing buyer
+  // with `created = false`; any other reuse of the reference or the wallet is
+  // refused.
+  rpc CreateBuyer(CreateBuyerRequest) returns (CreateBuyerResponse);
+
+  // Looks up a buyer of the caller's deployment.
+  rpc GetBuyer(GetBuyerRequest) returns (GetBuyerResponse);
+}
+
+message Buyer {
+  // Gateway-assigned UUID.
+  string buyer_id = 1;
+  // The seller's identifier for this buyer, unique within the deployment.
+  string external_ref = 2;
+  // Canonical classic Stellar account address (`G...`). Immutable.
+  string wallet_address = 3;
+  // CAIP-2 network of the deployment, e.g. `stellar:testnet`.
+  string network = 4;
+  // RFC 3339 UTC timestamp.
+  string created_at = 5;
+}
+
+message CreateBuyerRequest {
+  // 1-128 characters of [A-Za-z0-9._:@+-].
+  string external_ref = 1;
+  // Classic `G...` address. Muxed (`M...`) and contract (`C...`) addresses
+  // are refused.
+  string wallet_address = 2;
+}
+
+message CreateBuyerResponse {
+  Buyer buyer = 1;
+  // False when an identical earlier registration was returned.
+  bool created = 2;
+}
+
+message GetBuyerRequest {
+  oneof lookup {
+    string buyer_id = 1;
+    string external_ref = 2;
+  }
+}
+
+message GetBuyerResponse {
+  Buyer buyer = 1;
+}
