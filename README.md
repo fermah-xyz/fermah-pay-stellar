@@ -11,6 +11,10 @@ It provides:
   and API keys scoped to a single deployment.
 - **Buyer API**: a gRPC service to register buyers and link their Stellar
   wallets ([reference](docs/api/buyer.md)).
+- **Prepaid ledger contract** (Soroban): buyer credit and seller revenue over
+  USDC held in a separate treasury, with per-account replay protection and
+  batches of up to 100 charges in one call
+  ([design](docs/architecture/prepaid-contract.md)).
 - **Buyer onboarding without XLM**: one transaction creates a buyer account
   with a Circle USDC trustline and a zero XLM balance, while a sponsor pays
   the fee and every reserve ([testnet evidence](docs/evidence/README.md)).
@@ -18,6 +22,7 @@ It provides:
 ## Layout
 
 ```text
+contracts/prepaid     Soroban prepaid ledger contract
 crates/domain         validated values (network, account address, external reference)
 crates/stellar-chain  keys, transaction signing, USDC identity, Stellar RPC client, onboarding
 crates/gateway        gRPC API daemon, authentication, PostgreSQL store, key issuance

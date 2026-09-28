@@ -6,9 +6,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod authorization;
 pub mod friendbot;
 pub mod keys;
 pub mod onboarding;
+pub mod prepaid;
 pub mod rpc;
 pub mod transaction;
 pub mod usdc;
