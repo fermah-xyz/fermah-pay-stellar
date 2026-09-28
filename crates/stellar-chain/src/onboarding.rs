@@ -8,18 +8,19 @@
 //! actually pays each reserve, so evidence never rests on the builder's
 //! intent.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use stellar_xdr::{
     Asset, BeginSponsoringFutureReservesOp, ChangeTrustAsset, ChangeTrustOp, CreateAccountOp,
     LedgerEntryData, LedgerEntryExt, LedgerKey, LedgerKeyAccount, LedgerKeyTrustLine, Memo,
     Operation, OperationBody, Preconditions, SequenceNumber, TimeBounds, TimePoint, Transaction,
-    TransactionExt, TransactionResult, TrustLineAsset, VecM,
+    TransactionExt, TrustLineAsset, VecM,
 };
 
 use crate::keys::SecretKey;
-use crate::rpc::{RpcClient, RpcError, SendOutcome, TransactionStatus};
+use crate::rpc::{RpcClient, RpcError};
+use crate::submission::{SubmissionError, submit_and_wait};
 use crate::transaction::{self, SigningError, account_id, address_of, muxed_account};
 
 /// Who funds one reserve of the buyer's ledger entries.
@@ -171,8 +172,65 @@ pub fn sponsored_onboarding_transaction(
     fee_stroops: u32,
     valid_until_unix: u64,
 ) -> Transaction {
+    let mut tx = sponsored_onboarding_batch_transaction(
+        sponsor,
+        sponsor_next_sequence,
+        std::slice::from_ref(buyer),
+        asset,
+        0,
+        valid_until_unix,
+    )
+    .expect("invariant: one buyer fits a batch");
+    tx.fee = fee_stroops;
+    tx
+}
+
+/// A transaction signs with at most 20 keys: the sponsor and 19 buyers.
+pub const MAX_BUYERS_PER_TRANSACTION: usize = 19;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error(
+    "between 1 and {MAX_BUYERS_PER_TRANSACTION} buyers fit one onboarding transaction, got {0}"
+)]
+pub struct BatchSizeError(pub usize);
+
+/// Onboards several buyers in one transaction: one sponsorship sandwich per
+/// buyer, all paid by `sponsor`. The fee is `fee_per_operation` for each of
+/// the four operations per buyer.
+pub fn sponsored_onboarding_batch_transaction(
+    sponsor: &AccountAddress,
+    sponsor_next_sequence: i64,
+    buyers: &[AccountAddress],
+    asset: &Asset,
+    fee_per_operation: u32,
+    valid_until_unix: u64,
+) -> Result<Transaction, BatchSizeError> {
+    if buyers.is_empty() || buyers.len() > MAX_BUYERS_PER_TRANSACTION {
+        return Err(BatchSizeError(buyers.len()));
+    }
+    let operations: Vec<Operation> =
+        buyers.iter().flat_map(|buyer| sponsorship_operations(buyer, asset)).collect();
+    let count = u32::try_from(operations.len()).expect("invariant: at most 76 operations");
+    Ok(Transaction {
+        source_account: muxed_account(sponsor),
+        fee: fee_per_operation.saturating_mul(count),
+        seq_num: SequenceNumber(sponsor_next_sequence),
+        // A finite upper bound gives a submitter a point after which a
+        // not-yet-included envelope can never land.
+        cond: Preconditions::Time(TimeBounds {
+            min_time: TimePoint(0),
+            max_time: TimePoint(valid_until_unix),
+        }),
+        memo: Memo::None,
+        operations: VecM::try_from(operations)
+            .expect("invariant: 19 buyers need 76 operations, within the 100-operation limit"),
+        ext: TransactionExt::V0,
+    })
+}
+
+fn sponsorship_operations(buyer: &AccountAddress, asset: &Asset) -> [Operation; 4] {
     let as_buyer = Some(muxed_account(buyer));
-    let operations = vec![
+    [
         Operation {
             source_account: None,
             body: OperationBody::BeginSponsoringFutureReserves(BeginSponsoringFutureReservesOp {
@@ -194,22 +252,7 @@ pub fn sponsored_onboarding_transaction(
             }),
         },
         Operation { source_account: as_buyer, body: OperationBody::EndSponsoringFutureReserves },
-    ];
-    Transaction {
-        source_account: muxed_account(sponsor),
-        fee: fee_stroops,
-        seq_num: SequenceNumber(sponsor_next_sequence),
-        // A finite upper bound gives a submitter a point after which a
-        // not-yet-included envelope can never land.
-        cond: Preconditions::Time(TimeBounds {
-            min_time: TimePoint(0),
-            max_time: TimePoint(valid_until_unix),
-        }),
-        memo: Memo::None,
-        operations: VecM::try_from(operations)
-            .expect("invariant: four operations fit the 100-operation limit"),
-        ext: TransactionExt::V0,
-    }
+    ]
 }
 
 #[derive(Debug)]
@@ -230,18 +273,10 @@ pub enum OnboardingError {
     SponsorMissing(AccountAddress),
     #[error("signing the onboarding transaction")]
     Signing(#[source] SigningError),
-    #[error("RPC failure while transaction {hash} may be in flight; resolve by hash", hash = crate::rpc::hex_lower(.hash))]
-    InFlight {
-        hash: [u8; 32],
-        #[source]
-        source: RpcError,
-    },
-    #[error("network rejected the onboarding transaction before inclusion: {0:?}")]
-    Rejected(Box<TransactionResult>),
-    #[error("onboarding transaction was included but failed: {0:?}")]
-    Failed(Box<TransactionResult>),
-    #[error("transaction {hash} not found after its validity window; resolve by hash", hash = crate::rpc::hex_lower(.hash))]
-    NotIncluded { hash: [u8; 32] },
+    #[error(transparent)]
+    BatchSize(BatchSizeError),
+    #[error("submitting the onboarding transaction")]
+    Submission(#[source] SubmissionError),
     #[error("reading buyer entries after inclusion")]
     ProvenanceLookup(#[source] RpcError),
     #[error("classifying buyer entries after inclusion")]
@@ -269,7 +304,7 @@ pub async fn onboard_buyer(
     let sponsor_address = sponsor.address();
     let buyer_address = buyer.address();
     let sequence = current_sequence(rpc, &sponsor_address).await?;
-    let valid_until = unix_now().saturating_add(policy.validity.as_secs());
+    let valid_until = crate::submission::unix_now().saturating_add(policy.validity.as_secs());
     let tx = sponsored_onboarding_transaction(
         &sponsor_address,
         sequence + 1,
@@ -281,7 +316,9 @@ pub async fn onboard_buyer(
     let hash = transaction::transaction_hash(&tx, network).map_err(OnboardingError::Signing)?;
     let envelope =
         transaction::sign(tx, network, &[sponsor, buyer]).map_err(OnboardingError::Signing)?;
-    let included = submit_and_wait(rpc, &envelope, hash, valid_until, policy.poll_interval).await?;
+    let included = submit_and_wait(rpc, &envelope, hash, valid_until, policy.poll_interval)
+        .await
+        .map_err(OnboardingError::Submission)?;
 
     let keys = provenance_keys(&buyer_address, asset);
     let records = rpc.get_ledger_entries(&keys).await.map_err(OnboardingError::ProvenanceLookup)?;
@@ -293,9 +330,70 @@ pub async fn onboard_buyer(
     .map_err(OnboardingError::Provenance)?;
 
     Ok(OnboardingReceipt {
-        transaction_hash: included.0,
-        ledger: included.1,
-        fee_charged_stroops: included.2.fee_charged,
+        transaction_hash: included.envelope_hash,
+        ledger: included.transaction.ledger,
+        fee_charged_stroops: included.transaction.result.fee_charged,
+        fee_source: sponsor_address,
+        provenance,
+    })
+}
+
+/// Result of onboarding several buyers in one transaction.
+#[derive(Debug)]
+pub struct BatchOnboardingReceipt {
+    pub transaction_hash: [u8; 32],
+    pub ledger: u32,
+    pub fee_charged_stroops: i64,
+    pub fee_source: AccountAddress,
+    pub provenance: Vec<ReserveProvenance>,
+}
+
+/// Creates up to [`MAX_BUYERS_PER_TRANSACTION`] buyers in one transaction and
+/// reads each one's reserve provenance back from the ledger.
+pub async fn onboard_buyers(
+    rpc: &RpcClient,
+    network: Network,
+    sponsor: &SecretKey,
+    buyers: &[&SecretKey],
+    asset: &Asset,
+    policy: SubmissionPolicy,
+) -> Result<BatchOnboardingReceipt, OnboardingError> {
+    let sponsor_address = sponsor.address();
+    let addresses: Vec<AccountAddress> = buyers.iter().map(|b| b.address()).collect();
+    let sequence = current_sequence(rpc, &sponsor_address).await?;
+    let valid_until = crate::submission::unix_now().saturating_add(policy.validity.as_secs());
+    let tx = sponsored_onboarding_batch_transaction(
+        &sponsor_address,
+        sequence + 1,
+        &addresses,
+        asset,
+        policy.fee_stroops,
+        valid_until,
+    )
+    .map_err(OnboardingError::BatchSize)?;
+    let hash = transaction::transaction_hash(&tx, network).map_err(OnboardingError::Signing)?;
+    let mut signers: Vec<&SecretKey> = vec![sponsor];
+    signers.extend_from_slice(buyers);
+    let envelope = transaction::sign(tx, network, &signers).map_err(OnboardingError::Signing)?;
+    let included = submit_and_wait(rpc, &envelope, hash, valid_until, policy.poll_interval)
+        .await
+        .map_err(OnboardingError::Submission)?;
+
+    let mut provenance = Vec::with_capacity(addresses.len());
+    for buyer in &addresses {
+        let records = rpc
+            .get_ledger_entries(&provenance_keys(buyer, asset))
+            .await
+            .map_err(OnboardingError::ProvenanceLookup)?;
+        provenance.push(
+            reserve_provenance(buyer, asset, records.iter().map(|r| (&r.data, &r.ext)))
+                .map_err(OnboardingError::Provenance)?,
+        );
+    }
+    Ok(BatchOnboardingReceipt {
+        transaction_hash: included.envelope_hash,
+        ledger: included.transaction.ledger,
+        fee_charged_stroops: included.transaction.result.fee_charged,
         fee_source: sponsor_address,
         provenance,
     })
@@ -316,57 +414,12 @@ async fn current_sequence(
         .ok_or_else(|| OnboardingError::SponsorMissing(account.clone()))
 }
 
-/// Resubmits only these exact bytes and resolves by their hash; a lost
-/// response never leads to a second, different transaction.
-async fn submit_and_wait(
-    rpc: &RpcClient,
-    envelope: &stellar_xdr::TransactionEnvelope,
-    hash: [u8; 32],
-    valid_until_unix: u64,
-    poll_interval: Duration,
-) -> Result<([u8; 32], u32, TransactionResult), OnboardingError> {
-    let mut accepted = false;
-    loop {
-        if !accepted {
-            match rpc.send_transaction(envelope).await {
-                Ok(SendOutcome::Pending { .. } | SendOutcome::Duplicate { .. }) => accepted = true,
-                Ok(SendOutcome::TryAgainLater { .. }) => {}
-                Ok(SendOutcome::Rejected { result, .. }) => {
-                    return Err(OnboardingError::Rejected(result));
-                }
-                Err(source) => return Err(OnboardingError::InFlight { hash, source }),
-            }
-        }
-        if accepted {
-            match rpc.get_transaction(&hash).await {
-                Ok(TransactionStatus::Success(tx)) => return Ok((hash, tx.ledger, tx.result)),
-                Ok(TransactionStatus::Failed(tx)) => {
-                    return Err(OnboardingError::Failed(Box::new(tx.result)));
-                }
-                // Past the upper time bound plus a margin for ledger close
-                // and RPC ingestion, the envelope can no longer be included.
-                Ok(TransactionStatus::NotFound) if unix_now() > valid_until_unix + 30 => {
-                    return Err(OnboardingError::NotIncluded { hash });
-                }
-                Ok(TransactionStatus::NotFound) => {}
-                Err(source) => return Err(OnboardingError::InFlight { hash, source }),
-            }
-        } else if unix_now() > valid_until_unix {
-            return Err(OnboardingError::NotIncluded { hash });
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use stellar_xdr::{
-        AccountEntry, AccountEntryExt, LedgerEntryExtensionV1, LedgerEntryExtensionV1Ext,
-        SponsorshipDescriptor, String32, Thresholds, TrustLineEntry, TrustLineEntryExt,
+        AccountEntry, AccountEntryExt, AccountId, LedgerEntryExtensionV1,
+        LedgerEntryExtensionV1Ext, SponsorshipDescriptor, String32, Thresholds, TrustLineEntry,
+        TrustLineEntryExt,
     };
 
     use super::*;
@@ -590,5 +643,60 @@ mod tests {
             tx.cond,
             Preconditions::Time(TimeBounds { max_time: TimePoint(1_900_000_000), .. })
         ));
+    }
+
+    fn buyers(n: usize) -> Vec<AccountAddress> {
+        (0..n).map(|_| address()).collect()
+    }
+
+    fn batch(n: usize) -> Result<Transaction, BatchSizeError> {
+        sponsored_onboarding_batch_transaction(
+            &address(),
+            1,
+            &buyers(n),
+            &circle_usdc(Network::Testnet),
+            100,
+            1_900_000_000,
+        )
+    }
+
+    #[test]
+    fn test_batch_at_signature_limit_is_built() {
+        let tx = batch(MAX_BUYERS_PER_TRANSACTION).unwrap();
+        assert_eq!((tx.operations.len(), tx.fee), (76, 7_600));
+    }
+
+    #[test]
+    fn test_batch_above_signature_limit_is_refused() {
+        assert_eq!(batch(MAX_BUYERS_PER_TRANSACTION + 1), Err(BatchSizeError(20)));
+    }
+
+    #[test]
+    fn test_empty_batch_is_refused() {
+        assert_eq!(batch(0), Err(BatchSizeError(0)));
+    }
+
+    #[test]
+    fn test_batch_gives_each_buyer_its_own_sandwich() {
+        let sponsor = address();
+        let group = buyers(2);
+        let tx = sponsored_onboarding_batch_transaction(
+            &sponsor,
+            1,
+            &group,
+            &circle_usdc(Network::Testnet),
+            100,
+            1_900_000_000,
+        )
+        .unwrap();
+        let sponsored: Vec<AccountId> = tx
+            .operations
+            .iter()
+            .filter_map(|op| match &op.body {
+                OperationBody::BeginSponsoringFutureReserves(b) => Some(b.sponsored_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sponsored, group.iter().map(account_id).collect::<Vec<_>>());
     }
 }

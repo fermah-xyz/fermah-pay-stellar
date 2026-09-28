@@ -17,6 +17,7 @@ use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
     ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, WithdrawIntent,
 };
+use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{self, ScErrorCode, ScErrorType};
 use soroban_sdk::{Event as _, IntoVal, Symbol, TryIntoVal, Val};
@@ -42,6 +43,8 @@ struct World {
     seller: Party,
     treasury: Party,
     nonce: Cell<i64>,
+    /// Test label -> buyer account, so tests can name accounts by number.
+    owners: std::cell::RefCell<std::collections::BTreeMap<u8, Address>>,
 }
 
 fn account_xdr_id(key: &SecretKey) -> xdr::AccountId {
@@ -142,6 +145,7 @@ fn world_with(wasm: Option<&[u8]>) -> World {
         seller,
         treasury,
         nonce: Cell::new(1),
+        owners: std::cell::RefCell::new(std::collections::BTreeMap::new()),
     }
 }
 
@@ -171,10 +175,6 @@ fn deploy(
     usdc: &Address,
 ) -> Address {
     env.register(PrepaidLedger, constructor_args(admin, operator, seller, treasury, usdc))
-}
-
-fn account(n: u8) -> [u8; 16] {
-    [n; 16]
 }
 
 fn id32(n: u8) -> [u8; 32] {
@@ -285,22 +285,33 @@ impl World {
             .expect("a failed invocation records its error in the diagnostic events")
     }
 
+    /// The account labelled `n`: the buyer registered under it, or a fresh
+    /// account that never deposited.
+    fn owner_address(&self, n: u8) -> Address {
+        self.owners.borrow_mut().entry(n).or_insert_with(|| self.party(0).address).clone()
+    }
+
+    fn owner_of(&self, n: u8) -> AccountAddress {
+        let address = self.owner_address(n);
+        let xdr::ScAddress::Account(account) = xdr::ScAddress::from(&address) else {
+            panic!("buyer accounts are classic accounts")
+        };
+        let xdr::AccountId(xdr::PublicKey::PublicKeyTypeEd25519(xdr::Uint256(key))) = account;
+        AccountAddress::from_public_key(key)
+    }
+
+    fn charge(&self, n: u8, seq: u64, amount: i128) -> ChargeRequest {
+        ChargeRequest { owner: self.owner_of(n), seq, amount }
+    }
+
     fn deposit_intent(&self, buyer: &Party, n: u8, amount: i128, deposit: u8) -> DepositIntent {
-        DepositIntent {
-            owner: buyer.key.address(),
-            account_id: account(n),
-            amount,
-            deposit_id: id32(deposit),
-        }
+        let registered = self.owners.borrow_mut().entry(n).or_insert(buyer.address.clone()).clone();
+        assert_eq!(registered, buyer.address, "test label {n} names another buyer");
+        DepositIntent { owner: buyer.key.address(), amount, deposit_id: id32(deposit) }
     }
 
     fn deposit_args(&self, intent: &DepositIntent, owner: &Address) -> soroban_sdk::Vec<Val> {
-        (
-            owner.clone(),
-            BytesN::from_array(&self.env, &intent.account_id),
-            intent.amount,
-            BytesN::from_array(&self.env, &intent.deposit_id),
-        )
+        (owner.clone(), intent.amount, BytesN::from_array(&self.env, &intent.deposit_id))
             .into_val(&self.env)
     }
 
@@ -326,7 +337,7 @@ impl World {
         let mut entries = soroban_sdk::Vec::new(&self.env);
         for c in charges {
             entries.push_back(Charge(
-                BytesN::from_array(&self.env, &c.account_id),
+                Address::from_str(&self.env, c.owner.as_str()),
                 c.seq,
                 c.amount,
             ));
@@ -334,17 +345,9 @@ impl World {
         self.invoke("charge_batch", (entries,).into_val(&self.env), &[auth])
     }
 
-    fn withdraw_intent(
-        &self,
-        buyer: &Party,
-        n: u8,
-        amount: i128,
-        to: &Party,
-        id: u8,
-    ) -> WithdrawIntent {
+    fn withdraw_intent(&self, buyer: &Party, amount: i128, to: &Party, id: u8) -> WithdrawIntent {
         WithdrawIntent {
             owner: buyer.key.address(),
-            account_id: account(n),
             amount,
             destination: to.key.address(),
             withdrawal_id: id32(id),
@@ -359,7 +362,6 @@ impl World {
     ) -> soroban_sdk::Vec<Val> {
         (
             owner.clone(),
-            BytesN::from_array(&self.env, &intent.account_id),
             intent.amount,
             to.clone(),
             BytesN::from_array(&self.env, &intent.withdrawal_id),
@@ -368,15 +370,11 @@ impl World {
     }
 
     fn balance(&self, n: u8) -> i128 {
-        self.client().get_balance(&BytesN::from_array(&self.env, &account(n)))
+        self.client().get_balance(&self.owner_address(n))
     }
 }
 
 const DEPOSIT: &str = "deposit";
-
-fn charge(n: u8, seq: u64, amount: i128) -> ChargeRequest {
-    ChargeRequest { account_id: account(n), seq, amount }
-}
 
 // ---- deposit: custody and authorization ----------------------------------
 
@@ -522,12 +520,25 @@ fn test_duplicate_deposit_id_is_refused_without_moving_usdc() {
 }
 
 #[test]
-fn test_deposit_into_account_bound_to_another_owner_is_refused() {
+fn test_depositing_first_cannot_claim_another_buyers_account() {
+    // Accounts are keyed by their owner: an attacker who deposits before a
+    // buyer only ever credits its own account.
     let w = world();
-    let first = w.party(10 * USDC);
-    let second = w.party(10 * USDC);
-    w.deposit(&first, 1, USDC, 1).unwrap();
-    assert_eq!(w.deposit(&second, 1, USDC, 2), Err(contract_error(Error::OwnerMismatch)));
+    let attacker = w.party(10 * USDC);
+    let buyer = w.party(10 * USDC);
+    w.deposit(&attacker, 1, USDC, 1).unwrap();
+    w.deposit(&buyer, 2, 2 * USDC, 2).unwrap();
+    assert_eq!((w.balance(1), w.balance(2)), (USDC, 2 * USDC));
+}
+
+#[test]
+fn test_deposit_id_used_by_another_owner_does_not_block_a_deposit() {
+    let w = world();
+    let attacker = w.party(10 * USDC);
+    let buyer = w.party(10 * USDC);
+    // The attacker copies the buyer's deposit id before the buyer's deposit.
+    w.deposit(&attacker, 1, USDC, 7).unwrap();
+    assert_eq!((w.deposit(&buyer, 2, USDC, 7), w.balance(2)), (Ok(()), USDC));
 }
 
 #[test]
@@ -567,8 +578,8 @@ fn funded(w: &World, n: u8, amount: i128) -> Party {
 fn test_same_charge_submitted_twice_debits_once() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let first = w.charge_batch(&[charge(1, 1, USDC)]);
-    let second = w.charge_batch(&[charge(1, 1, USDC)]);
+    let first = w.charge_batch(&[w.charge(1, 1, USDC)]);
+    let second = w.charge_batch(&[w.charge(1, 1, USDC)]);
     assert_eq!(
         (first.unwrap(), second.unwrap(), w.balance(1)),
         (
@@ -584,7 +595,7 @@ fn test_single_charge_duplicate_is_rejected() {
     let w = world();
     funded(&w, 1, 10 * USDC);
     let call = |w: &World| {
-        let request = charge(1, 1, USDC);
+        let request = w.charge(1, 1, USDC);
         let auth = w.signed(
             &w.operator,
             xdr::SorobanAuthorizedInvocation {
@@ -599,7 +610,7 @@ fn test_single_charge_duplicate_is_rejected() {
             },
         );
         let args: soroban_sdk::Vec<Val> =
-            (Charge(BytesN::from_array(&w.env, &request.account_id), 1, USDC),).into_val(&w.env);
+            (Charge(Address::from_str(&w.env, request.owner.as_str()), 1, USDC),).into_val(&w.env);
         w.invoke::<()>("charge", args, &[auth])
     };
     assert_eq!(call(&w), Ok(()));
@@ -612,8 +623,7 @@ fn test_refused_single_charge_consumes_nothing() {
     let w = world();
     let buyer = w.party(10 * USDC);
     w.deposit(&buyer, 1, USDC, 1).unwrap();
-    let args: soroban_sdk::Vec<Val> =
-        (Charge(BytesN::from_array(&w.env, &account(1)), 1, 2 * USDC),).into_val(&w.env);
+    let args: soroban_sdk::Vec<Val> = (Charge(w.owner_address(1), 1, 2 * USDC),).into_val(&w.env);
     let scargs: std::vec::Vec<xdr::ScVal> =
         args.iter().map(|v| v.try_into_val(&w.env).unwrap()).collect();
     let auth = w.signed(
@@ -631,7 +641,7 @@ fn test_refused_single_charge_consumes_nothing() {
     );
     let refused: Result<(), _> = w.invoke("charge", args, &[auth]);
     // The same sequence is still available afterwards.
-    let later = w.charge_batch(&[charge(1, 1, USDC / 2)]).unwrap();
+    let later = w.charge_batch(&[w.charge(1, 1, USDC / 2)]).unwrap();
     assert_eq!(
         (refused, later),
         (
@@ -643,7 +653,7 @@ fn test_refused_single_charge_consumes_nothing() {
 
 fn charge_scval(env: &Env, request: &ChargeRequest) -> xdr::ScVal {
     let val: Val =
-        Charge(BytesN::from_array(env, &request.account_id), request.seq, request.amount)
+        Charge(Address::from_str(env, request.owner.as_str()), request.seq, request.amount)
             .into_val(env);
     val.try_into_val(env).unwrap()
 }
@@ -653,24 +663,71 @@ fn test_batch_encoding_matches_contract_type() {
     // The gateway builds charge arguments without the contract's Rust types;
     // this pins its encoding to the contract's own.
     let w = world();
-    let request = charge(3, 7, 123);
+    let request = w.charge(3, 7, 123);
     let built = w.deployment().charge_batch_call(core::slice::from_ref(&request)).args[0].clone();
     let xdr::ScVal::Vec(Some(items)) = built else { panic!("batch must be a vector") };
     assert_eq!(items[0], charge_scval(&w.env, &request));
 }
 
 #[test]
+fn test_constructor_encoding_matches_contract_types() {
+    let w = world();
+    let roles = fermah_pay_stellar_chain::prepaid::Roles {
+        admin: w.admin.key.address(),
+        operator: w.operator.key.address(),
+        seller: w.seller.key.address(),
+        treasury: w.treasury.key.address(),
+        usdc: contract_bytes(&w.usdc),
+    };
+    let built =
+        fermah_pay_stellar_chain::prepaid::constructor_args(&roles, MIN_DEPOSIT, MAX_CHARGE);
+    let args = constructor_args(&w.admin, &w.operator, &w.seller, &w.treasury, &w.usdc);
+    let expected: soroban_sdk::Vec<Val> = args.into_val(&w.env);
+    let expected: std::vec::Vec<xdr::ScVal> =
+        expected.iter().map(|v| v.try_into_val(&w.env).unwrap()).collect();
+    assert_eq!(built, expected);
+}
+
+#[test]
+fn test_error_codes_never_coincide_with_usdc_contract_codes() {
+    // The Stellar Asset Contract's error codes run from 1 to 15 and pass
+    // through calls into this contract; ours must be distinguishable.
+    let lowest = [
+        Error::InvalidLimits,
+        Error::Paused,
+        Error::InvalidAmount,
+        Error::BelowMinimumDeposit,
+        Error::DepositAlreadyProcessed,
+        Error::UnknownAccount,
+        Error::InsufficientBalance,
+        Error::ChargeAboveLimit,
+        Error::DuplicateCharge,
+        Error::OutOfOrderCharge,
+        Error::EmptyBatch,
+        Error::BatchTooLarge,
+        Error::WithdrawalAlreadyProcessed,
+        Error::InsufficientRevenue,
+        Error::Overflow,
+    ]
+    .iter()
+    .map(|e| *e as u32)
+    .min()
+    .unwrap();
+    assert!(lowest > 15, "lowest contract error code {lowest}");
+}
+
+#[test]
 fn test_charge_signed_by_non_operator_is_refused() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let charges = [charge(1, 1, USDC)];
+    let charges = [w.charge(1, 1, USDC)];
     let stranger = w.party(0);
     let mut auth = w.signed(&stranger, w.deployment().charge_batch_authorization(&charges));
     if let xdr::SorobanCredentials::AddressV2(creds) = &mut auth.credentials {
         creds.address = xdr::ScAddress::Account(account_xdr_id(&w.operator.key));
     }
     let mut entries = soroban_sdk::Vec::new(&w.env);
-    entries.push_back(Charge(BytesN::from_array(&w.env, &account(1)), 1, USDC));
+    entries.push_back(Charge(w.owner_address(1), 1, USDC));
     let result: Result<soroban_sdk::Vec<Outcome>, _> =
         w.invoke("charge_batch", (entries,).into_val(&w.env), &[auth]);
     assert_eq!(result, Err(auth_failure()));
@@ -682,7 +739,7 @@ fn test_charge_at_limit_is_charged_and_above_is_refused() {
     let w = world();
     funded(&w, 1, 10 * USDC);
     let outcomes =
-        w.charge_batch(&[charge(1, 1, MAX_CHARGE), charge(1, 2, MAX_CHARGE + 1)]).unwrap();
+        w.charge_batch(&[w.charge(1, 1, MAX_CHARGE), w.charge(1, 2, MAX_CHARGE + 1)]).unwrap();
     assert_eq!(
         (outcomes, w.balance(1)),
         (soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::AboveLimit], 10 * USDC - MAX_CHARGE)
@@ -694,11 +751,11 @@ fn test_refused_charge_is_not_charged_after_top_up() {
     let w = world();
     let buyer = w.party(10 * USDC);
     w.deposit(&buyer, 1, USDC, 1).unwrap();
-    let refused = w.charge_batch(&[charge(1, 1, 2 * USDC)]).unwrap();
+    let refused = w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     // After the buyer adds funds, retrying the refused charge must still not
     // debit: the refusal consumed its sequence.
     w.deposit(&buyer, 1, 5 * USDC, 2).unwrap();
-    let retried = w.charge_batch(&[charge(1, 1, 2 * USDC)]).unwrap();
+    let retried = w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     assert_eq!(
         (refused, retried, w.balance(1)),
         (
@@ -713,7 +770,7 @@ fn test_refused_charge_is_not_charged_after_top_up() {
 fn test_out_of_order_charge_consumes_nothing() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let outcomes = w.charge_batch(&[charge(1, 2, USDC), charge(1, 1, USDC)]).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(1, 2, USDC), w.charge(1, 1, USDC)]).unwrap();
     assert_eq!(
         (outcomes, w.balance(1)),
         (soroban_sdk::vec![&w.env, Outcome::OutOfOrder, Outcome::Charged], 9 * USDC)
@@ -724,7 +781,7 @@ fn test_out_of_order_charge_consumes_nothing() {
 fn test_duplicate_inside_one_batch_debits_once() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let outcomes = w.charge_batch(&[charge(1, 1, USDC), charge(1, 1, USDC)]).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(1, 1, USDC), w.charge(1, 1, USDC)]).unwrap();
     assert_eq!(
         (outcomes, w.balance(1)),
         (soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::Duplicate], 9 * USDC)
@@ -734,7 +791,7 @@ fn test_duplicate_inside_one_batch_debits_once() {
 #[test]
 fn test_charge_to_unknown_account_changes_nothing() {
     let w = world();
-    let outcomes = w.charge_batch(&[charge(9, 1, USDC)]).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(9, 1, USDC)]).unwrap();
     assert_eq!(
         (outcomes, w.client().get_totals()),
         (soroban_sdk::vec![&w.env, Outcome::UnknownAccount], Totals { liabilities: 0, revenue: 0 })
@@ -745,7 +802,7 @@ fn test_charge_to_unknown_account_changes_nothing() {
 fn test_non_positive_charge_amount_reverts_the_whole_batch() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let result = w.charge_batch(&[charge(1, 1, USDC), charge(1, 2, 0)]);
+    let result = w.charge_batch(&[w.charge(1, 1, USDC), w.charge(1, 2, 0)]);
     assert_eq!((result, w.balance(1)), (Err(contract_error(Error::InvalidAmount)), 10 * USDC));
 }
 
@@ -759,7 +816,7 @@ fn test_empty_batch_is_refused() {
 fn test_batch_above_maximum_is_refused() {
     let w = world();
     let charges: std::vec::Vec<_> =
-        (0..=MAX_BATCH).map(|i| charge(1, u64::from(i) + 1, 1)).collect();
+        (0..=MAX_BATCH).map(|i| w.charge(1, u64::from(i) + 1, 1)).collect();
     assert_eq!(w.charge_batch(&charges), Err(contract_error(Error::BatchTooLarge)));
 }
 
@@ -770,10 +827,10 @@ fn test_mixed_batch_settles_each_entry_independently() {
     funded(&w, 2, USDC);
     let outcomes = w
         .charge_batch(&[
-            charge(1, 1, USDC),
-            charge(2, 1, 2 * USDC),
-            charge(3, 1, USDC),
-            charge(2, 2, USDC / 2),
+            w.charge(1, 1, USDC),
+            w.charge(2, 1, 2 * USDC),
+            w.charge(3, 1, USDC),
+            w.charge(2, 2, USDC / 2),
         ])
         .unwrap();
     assert_eq!(
@@ -797,12 +854,12 @@ fn test_mixed_batch_settles_each_entry_independently() {
 fn test_batch_event_reports_every_outcome() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    w.charge_batch(&[charge(1, 1, USDC), charge(1, 1, USDC)]).unwrap();
+    w.charge_batch(&[w.charge(1, 1, USDC), w.charge(1, 1, USDC)]).unwrap();
     let expected = Charges {
         settled: soroban_sdk::vec![
             &w.env,
-            Settled(BytesN::from_array(&w.env, &account(1)), 1, USDC, Outcome::Charged),
-            Settled(BytesN::from_array(&w.env, &account(1)), 1, USDC, Outcome::Duplicate),
+            Settled(w.owner_address(1), 1, USDC, Outcome::Charged),
+            Settled(w.owner_address(1), 1, USDC, Outcome::Duplicate),
         ],
     };
     assert_eq!(
@@ -827,7 +884,7 @@ fn withdraw_with(
 fn test_withdraw_with_owner_and_treasury_approval_returns_usdc() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
-    let intent = w.withdraw_intent(&buyer, 1, 4 * USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, 4 * USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
         w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
@@ -843,7 +900,7 @@ fn test_withdraw_with_owner_and_treasury_approval_returns_usdc() {
 fn test_withdraw_without_treasury_approval_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
-    let intent = w.withdraw_intent(&buyer, 1, USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent))];
     assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), Err(auth_failure()));
     assert_eq!(w.balance(1), 10 * USDC);
@@ -853,7 +910,7 @@ fn test_withdraw_without_treasury_approval_is_refused() {
 fn test_withdraw_without_owner_approval_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
-    let intent = w.withdraw_intent(&buyer, 1, USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent))];
     assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), Err(auth_failure()));
     assert_eq!(w.balance(1), 10 * USDC);
@@ -864,12 +921,12 @@ fn test_withdraw_to_destination_other_than_signed_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
     let thief = w.party(0);
-    let signed = w.withdraw_intent(&buyer, 1, USDC, &buyer, 1);
+    let signed = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&signed)),
         w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&signed)),
     ];
-    let redirected = w.withdraw_intent(&buyer, 1, USDC, &thief, 1);
+    let redirected = w.withdraw_intent(&buyer, USDC, &thief, 1);
     assert_eq!(withdraw_with(&w, &redirected, &buyer, &thief, &auths), Err(auth_failure()));
     assert_eq!(w.usdc_balance(&thief), 0);
 }
@@ -879,14 +936,16 @@ fn test_withdraw_by_non_owner_is_refused() {
     let w = world();
     funded(&w, 1, 10 * USDC);
     let stranger = w.party(0);
-    let intent = w.withdraw_intent(&stranger, 1, USDC, &stranger, 1);
+    let intent = w.withdraw_intent(&stranger, USDC, &stranger, 1);
     let auths = [
         w.signed(&stranger, w.deployment().owner_withdraw_authorization(&intent)),
         w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
     ];
+    // A withdrawal names its owner, whose own account is the only one it can
+    // debit; the stranger has none, and the buyer's credit is untouched.
     assert_eq!(
-        withdraw_with(&w, &intent, &stranger, &stranger, &auths),
-        Err(contract_error(Error::OwnerMismatch))
+        (withdraw_with(&w, &intent, &stranger, &stranger, &auths), w.balance(1)),
+        (Err(contract_error(Error::UnknownAccount)), 10 * USDC)
     );
 }
 
@@ -894,7 +953,7 @@ fn test_withdraw_by_non_owner_is_refused() {
 fn test_withdraw_more_than_credit_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, USDC);
-    let intent = w.withdraw_intent(&buyer, 1, 2 * USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, 2 * USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
         w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
@@ -911,7 +970,7 @@ fn test_withdraw_from_drained_treasury_leaves_credit_intact() {
     let buyer = funded(&w, 1, 10 * USDC);
     // The treasury key moved the USDC out without calling the contract.
     set_trustline(&w.env, &w.treasury.key, &w.asset, 0);
-    let intent = w.withdraw_intent(&buyer, 1, USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
         w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
@@ -928,7 +987,7 @@ fn test_duplicate_withdrawal_id_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
     let run = |id: u8| {
-        let intent = w.withdraw_intent(&buyer, 1, USDC, &buyer, id);
+        let intent = w.withdraw_intent(&buyer, USDC, &buyer, id);
         let auths = [
             w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
             w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
@@ -971,7 +1030,7 @@ fn test_pause_by_admin_stops_charges() {
     let w = world();
     funded(&w, 1, 10 * USDC);
     admin_call(&w, &w.admin, "pause", soroban_sdk::Vec::new(&w.env)).unwrap();
-    assert_eq!(w.charge_batch(&[charge(1, 1, USDC)]), Err(contract_error(Error::Paused)));
+    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]), Err(contract_error(Error::Paused)));
 }
 
 #[test]
@@ -1006,7 +1065,7 @@ fn test_operator_rotation_revokes_old_operator() {
     let replacement = w.party(0);
     admin_call(&w, &w.admin, "set_operator", (replacement.address.clone(),).into_val(&w.env))
         .unwrap();
-    assert_eq!(w.charge_batch(&[charge(1, 1, USDC)]), Err(auth_failure()));
+    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]), Err(auth_failure()));
 }
 
 #[test]
@@ -1040,7 +1099,7 @@ fn withdraw_revenue(w: &World, amount: i128, id: u8) -> Result<(), soroban_sdk::
 fn test_revenue_withdrawal_pays_seller_from_treasury() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    w.charge_batch(&[charge(1, 1, 2 * USDC)]).unwrap();
+    w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     withdraw_revenue(&w, 2 * USDC, 1).unwrap();
     assert_eq!(
         (w.usdc_balance(&w.seller), w.usdc_balance(&w.treasury), w.client().get_totals()),
@@ -1052,7 +1111,7 @@ fn test_revenue_withdrawal_pays_seller_from_treasury() {
 fn test_revenue_withdrawal_is_capped_by_earned_revenue() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    w.charge_batch(&[charge(1, 1, 2 * USDC)]).unwrap();
+    w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     assert_eq!(
         withdraw_revenue(&w, 2 * USDC + 1, 1),
         Err(contract_error(Error::InsufficientRevenue))
@@ -1102,11 +1161,11 @@ fn measure_full_batch(mixed: bool) -> Measured {
     for i in 1..=n {
         funded(&w, i, USDC);
         let amount = if mixed && i % 4 == 0 { 2 * USDC } else { USDC / 10 };
-        charges.push(charge(i, 1, amount));
+        charges.push(w.charge(i, 1, amount));
     }
     if mixed {
         let consumed: std::vec::Vec<_> =
-            (1..=n).filter(|i| i % 5 == 0).map(|i| charge(i, 1, USDC / 10)).collect();
+            (1..=n).filter(|i| i % 5 == 0).map(|i| w.charge(i, 1, USDC / 10)).collect();
         w.charge_batch(&consumed).unwrap();
     }
     let outcomes = w.charge_batch(&charges).unwrap();
@@ -1169,7 +1228,7 @@ fn test_full_mixed_failure_batch_fits_one_transaction() {
 fn test_revenue_withdrawal_without_seller_approval_is_refused() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    w.charge_batch(&[charge(1, 1, 2 * USDC)]).unwrap();
+    w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     let intent = RevenueWithdrawIntent {
         destination: w.seller.key.address(),
         amount: USDC,
@@ -1186,7 +1245,7 @@ fn test_revenue_withdrawal_without_seller_approval_is_refused() {
 fn test_treasury_approval_of_a_bare_transfer_cannot_fund_a_withdrawal() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
-    let intent = w.withdraw_intent(&buyer, 1, USDC, &buyer, 1);
+    let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     // The treasury approved only a transfer of the same amount to the same
     // destination, e.g. for an unrelated payout; it did not approve this
     // withdrawal from this account.

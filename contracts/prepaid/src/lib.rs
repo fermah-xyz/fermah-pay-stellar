@@ -12,6 +12,12 @@
 //! recorded liabilities; it records the totals so that property can be
 //! monitored.
 //!
+//! Accounts are keyed by the owner's address: one account per owner, which
+//! only a deposit authorized by that owner can create. There is no
+//! caller-chosen account identifier another party could claim first, and
+//! deposit and withdrawal identifiers are scoped to their owner for the same
+//! reason.
+//!
 //! Charge idempotency: every charge names its account and a per-account
 //! sequence number, and the account entry stores the last sequence consumed.
 //! A charge must carry exactly the next sequence; an already-consumed sequence
@@ -40,8 +46,6 @@ const MAX_TRANSFER: i128 = i64::MAX as i128;
 const TTL_THRESHOLD: u32 = 120_960;
 const TTL_EXTEND_TO: u32 = 518_400;
 
-pub type AccountId = BytesN<16>;
-
 /// Codes start at 101 so they never coincide with the USDC Stellar Asset
 /// Contract's own error codes, which propagate through calls into this
 /// contract: a refusal can always be attributed to the contract that made it.
@@ -54,7 +58,6 @@ pub enum Error {
     InvalidAmount = 103,
     BelowMinimumDeposit = 104,
     DepositAlreadyProcessed = 105,
-    OwnerMismatch = 106,
     UnknownAccount = 107,
     InsufficientBalance = 108,
     ChargeAboveLimit = 109,
@@ -100,17 +103,16 @@ pub struct Totals {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Account {
-    /// Bound at the first deposit and never reassigned.
-    pub owner: Address,
     pub balance: i128,
     /// Last consumed charge sequence; the next charge must carry this plus one.
     pub charge_seq: u64,
 }
 
-/// One charge: account, its next sequence number, and the amount.
+/// One charge: the account owner, the account's next sequence number, and
+/// the amount.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Charge(pub AccountId, pub u64, pub i128);
+pub struct Charge(pub Address, pub u64, pub i128);
 
 /// Outcome of one charge in a batch. `Charged`, `InsufficientBalance` and
 /// `AboveLimit` consume the sequence number, so retrying the same charge can
@@ -127,26 +129,26 @@ pub enum Outcome {
     UnknownAccount = 5,
 }
 
-/// Per-charge result in an event: account, sequence, amount, outcome.
+/// Per-charge result in an event: account owner, sequence, amount, outcome.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Settled(pub AccountId, pub u64, pub i128, pub Outcome);
+pub struct Settled(pub Address, pub u64, pub i128, pub Outcome);
 
 #[contracttype]
 #[derive(Clone)]
 enum Key {
     Config,
     Totals,
-    Account(AccountId),
-    Deposit(BytesN<32>),
-    Withdrawal(BytesN<32>),
+    Account(Address),
+    Deposit(Address, BytesN<32>),
+    Withdrawal(Address, BytesN<32>),
+    RevenueWithdrawal(BytesN<32>),
 }
 
 #[contractevent(topics = ["deposit"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Deposited {
     #[topic]
-    pub account_id: AccountId,
     pub owner: Address,
     pub amount: i128,
     pub deposit_id: BytesN<32>,
@@ -165,7 +167,7 @@ pub struct Charges {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Withdrawn {
     #[topic]
-    pub account_id: AccountId,
+    pub owner: Address,
     pub destination: Address,
     pub amount: i128,
     pub withdrawal_id: BytesN<32>,
@@ -201,15 +203,9 @@ impl PrepaidLedger {
         env.storage().instance().set(&Key::Totals, &Totals { liabilities: 0, revenue: 0 });
     }
 
-    /// Moves `amount` USDC from `owner` to the treasury and credits it to
-    /// `account_id`. The first deposit binds the account to `owner`.
-    pub fn deposit(
-        env: Env,
-        owner: Address,
-        account_id: AccountId,
-        amount: i128,
-        deposit_id: BytesN<32>,
-    ) {
+    /// Moves `amount` USDC from `owner` to the treasury and credits the
+    /// owner's account, creating it on the first deposit.
+    pub fn deposit(env: Env, owner: Address, amount: i128, deposit_id: BytesN<32>) {
         owner.require_auth();
         let config = active_config(&env);
         if amount <= 0 || amount > MAX_TRANSFER {
@@ -218,19 +214,17 @@ impl PrepaidLedger {
         if amount < config.limits.min_deposit {
             panic_with_error!(&env, Error::BelowMinimumDeposit);
         }
-        let deposit_key = Key::Deposit(deposit_id.clone());
+        let deposit_key = Key::Deposit(owner.clone(), deposit_id.clone());
         if env.storage().persistent().has(&deposit_key) {
             panic_with_error!(&env, Error::DepositAlreadyProcessed);
         }
 
-        let account_key = Key::Account(account_id.clone());
-        let mut account = match env.storage().persistent().get::<Key, Account>(&account_key) {
-            Some(existing) if existing.owner != owner => {
-                panic_with_error!(&env, Error::OwnerMismatch)
-            }
-            Some(existing) => existing,
-            None => Account { owner: owner.clone(), balance: 0, charge_seq: 0 },
-        };
+        let account_key = Key::Account(owner.clone());
+        let mut account = env
+            .storage()
+            .persistent()
+            .get::<Key, Account>(&account_key)
+            .unwrap_or(Account { balance: 0, charge_seq: 0 });
         account.balance = checked_add(&env, account.balance, amount);
         let mut totals = totals(&env);
         totals.liabilities = checked_add(&env, totals.liabilities, amount);
@@ -241,7 +235,7 @@ impl PrepaidLedger {
         extend_instance(&env);
 
         token::Client::new(&env, &config.usdc).transfer(&owner, &config.treasury, &amount);
-        Deposited { account_id, owner, amount, deposit_id }.publish(&env);
+        Deposited { owner, amount, deposit_id }.publish(&env);
     }
 
     /// Settles one charge; any refusal reverts the call with its reason.
@@ -295,7 +289,6 @@ impl PrepaidLedger {
     pub fn withdraw(
         env: Env,
         owner: Address,
-        account_id: AccountId,
         amount: i128,
         destination: Address,
         withdrawal_id: BytesN<32>,
@@ -306,19 +299,16 @@ impl PrepaidLedger {
         if amount <= 0 || amount > MAX_TRANSFER {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        let withdrawal_key = Key::Withdrawal(withdrawal_id.clone());
+        let withdrawal_key = Key::Withdrawal(owner.clone(), withdrawal_id.clone());
         if env.storage().persistent().has(&withdrawal_key) {
             panic_with_error!(&env, Error::WithdrawalAlreadyProcessed);
         }
-        let account_key = Key::Account(account_id.clone());
+        let account_key = Key::Account(owner.clone());
         let mut account: Account = env
             .storage()
             .persistent()
             .get(&account_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::UnknownAccount));
-        if account.owner != owner {
-            panic_with_error!(&env, Error::OwnerMismatch);
-        }
         if account.balance < amount {
             panic_with_error!(&env, Error::InsufficientBalance);
         }
@@ -332,7 +322,7 @@ impl PrepaidLedger {
         extend_instance(&env);
 
         token::Client::new(&env, &config.usdc).transfer(&config.treasury, &destination, &amount);
-        Withdrawn { account_id, destination, amount, withdrawal_id }.publish(&env);
+        Withdrawn { owner, destination, amount, withdrawal_id }.publish(&env);
     }
 
     /// Pays earned revenue out of the treasury. Needs the seller's and the
@@ -349,7 +339,7 @@ impl PrepaidLedger {
         if amount <= 0 || amount > MAX_TRANSFER {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        let withdrawal_key = Key::Withdrawal(withdrawal_id.clone());
+        let withdrawal_key = Key::RevenueWithdrawal(withdrawal_id.clone());
         if env.storage().persistent().has(&withdrawal_key) {
             panic_with_error!(&env, Error::WithdrawalAlreadyProcessed);
         }
@@ -367,15 +357,15 @@ impl PrepaidLedger {
         RevenueWithdrawn { destination, amount, withdrawal_id }.publish(&env);
     }
 
-    pub fn get_balance(env: Env, account_id: AccountId) -> i128 {
+    pub fn get_balance(env: Env, owner: Address) -> i128 {
         env.storage()
             .persistent()
-            .get::<Key, Account>(&Key::Account(account_id))
+            .get::<Key, Account>(&Key::Account(owner))
             .map_or(0, |account| account.balance)
     }
 
-    pub fn get_account(env: Env, account_id: AccountId) -> Option<Account> {
-        env.storage().persistent().get(&Key::Account(account_id))
+    pub fn get_account(env: Env, owner: Address) -> Option<Account> {
+        env.storage().persistent().get(&Key::Account(owner))
     }
 
     pub fn get_config(env: Env) -> Config {
@@ -426,8 +416,8 @@ impl PrepaidLedger {
 }
 
 fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Settled {
-    let Charge(account_id, seq, amount) = charge;
-    let key = Key::Account(account_id.clone());
+    let Charge(owner, seq, amount) = charge;
+    let key = Key::Account(owner.clone());
     let outcome = match env.storage().persistent().get::<Key, Account>(&key) {
         None => Outcome::UnknownAccount,
         Some(account) if seq <= account.charge_seq => Outcome::Duplicate,
@@ -453,7 +443,7 @@ fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Se
             outcome
         }
     };
-    Settled(account_id, seq, amount, outcome)
+    Settled(owner, seq, amount, outcome)
 }
 
 fn config(env: &Env) -> Config {

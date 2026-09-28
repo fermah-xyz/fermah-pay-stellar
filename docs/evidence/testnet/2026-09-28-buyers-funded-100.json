@@ -1,0 +1,521 @@
+{
+  "buyers": [
+    {
+      "buyer": "GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCBD53TBX6VDTD7M34MYDLFBFX4G7WZRSO6T24CMGVVXV3X52DQOZ4MV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDQR76BPL4DSYQXKHEARXNCJM4JDGJYKNPBPLLQSHJJVNGVSKP32SWRR",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GB2RRXAKKVJFZTXA5H6TJ6HXBYJF2KVHOUV7ITJV3PJPIF4NRD44DXTG",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA43KG7KJMN6ZGPA5YWM7TDZ5NNV4LFGNJM7JD2DQYGTLJ2Z5BTL46WG",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDRV2G7ERWJMJWKRAMBJAWTBSBBGFND4TQFJL5GZTPXOADHVTYP2SFTE",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBW7YNPZLZEYFF5CSQNGI5CHMZJKJFAT2TR7VSETK7AEDMCFCLULVCVC",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAKRF6FI5Z5OJVMDBDQMLXNEK2OJTDZ66XIPQ5LUJC2QDBPX3PLAJ3T3",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDSDHL2UBHRHH7PGZGAYWGEFC34DTMS2Z4E7RWKVDT77NAVOD2733YKZ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GALE7E3RYAT6QWGPTNOCZTLTOKFQKEX36JVH7U6OVWS4Z655ENH6DQHI",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBWZGWKGHD7AXPEOUNLRSL4WVTB7IHDBCEVH3J4LIRJKKQFQ7NNTVWH6",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA57RAKAGFL7TTJ52AVNYZRZBVCV36LQLVZEPBNHHDVJWJCFDRMETGKV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GARVRFPDJEHUDOR2MWCG7JXVXFMOT5JOW7FLE7ISOM32S7FFTGJ23DER",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD4H2UMOMCHLWCKSU74XBZJZ6KXH7ACZZGYFS7IKCWV3MJZSY7NFBBDC",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCVXKHHEW67GKJYK6KRWXUSWBVUH6PCU7ORMSPT3YVS3CWLCI4YODHKV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCVB5B6AHPNUV66VBSXPT6CXPZ4ZJSJ4VIKKMYZYCTY2ZTAGFAE7VYCH",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAB4Y6RN3CEKAB7K3QYJAO7OIM5ICSLYITMBZULDCMLAT2VPOM7ORAUG",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCTEMOCRGHR4BVFSM4HDQXRTSPVR46GMHYGE47OMVCC4KY7B4HCIYGM6",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCEAYJP6OQLY765DRHCZVZTYGFKZKWSHTTUKCPWTAVO4VKMBJLR3PBTA",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAWILMYBEIFERRGFM7G63F5XDF2CBXNEUDM2JFODXJ7NQBXPJRL67QDG",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCGZVNHUTB7XG3PQFFPCD7SQDBNL66CO3VPQPO7MZT6OIM6BJYXP7RPZ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAY3OV3RPHKMDNMXFULPSRLY3M7HLAB2RJP3NCBZH7G2RPCAX5QFEUUT",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDN4B6ZRCGGIGUC3S435756R3XPTLG7FWO5BFIRYAWAECGBRB4MVFMOS",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBGTC4ZQX2FXA7ENOBS43VQ6KNH3UKT3BQ7GQCXRCCFCOGXTKWXRFLO7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GADXYJCNVISHBL2JHIC5QXKARSI2RCYVEWY2ZC4SPMDGG5UTTQKMDMM7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBXKICAGVZLS33PTLBTBM7WM7QG6YVKGFX5PPP4CC6KUT5UZJZODNDW7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAX7CENSNLMYDVVIQ662VAWUCZAKSKE4YXXAVXBVC5J5S5KSFG5HTIRU",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCDWVYXNY3MKIKTCR5PMLM5FUPXOXHS4FQEGZ2REPGHU6ZTOCL7RRGKT",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCZ4FMS25U5ZAW4CA7AVEXEYC2QW2BJC2ZLQPP7TY4QEAZPEJ32NQCII",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBC33LPBFVDJBDAOCQSXBYXQEHXHIX3WZE74MY5GZJ76NVT2VBNTC3GQ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD3HH2FC73CP3Y64LOXBM2N27J3BGHG24KJ7VIATFNDSCAVQ2PNDKKSS",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GATMJDZW5I5ZEWNH5JWC6BXMOZJTSPCX4JRGPRX6MSQXJUVZ2VVVR27R",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBN3SIIVZID5UAVGTLHM4ZTCM573UT6SDTLO2BAJDZQFAJ4Q3COHGD6C",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAKR7GKLNQJMXVL7TB7LC2JHBNOFICOTAKTWVH57X4BBF7HPFQRKBLMF",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBQ5W3APIQU3563OSHOZ7LDZCMMVVZ43WXJM4MNWBKME3JU6FODEBFF5",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GB3UGOERAVZ5AXMOO3JRGLQSNS3CYEM3FYRJA5L4YYD2LTDO72XQWDE7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCJYTQC7EOBISH3PTHN4MSLHH55ITZOFNSUFCOQL4EPBR3Y6A4WSAFDO",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCIB7ODTWBZ3NAZW6OZYRKW75FNT7LGTJX3FXAWYRDZ6FZGZ6PSZPXB4",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCGPYGTXYXNZW6VQJ4ROL5VLCFILV3CDEY4E2B42G556G2FIBZY6EODP",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBU2FNTT7UAQDQAPEBPFI4AVRADSAKY2F3ICREC7RFBV3EVLXMQ4S6X6",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCCGH3VFEJEXQ2TTF3JFLYBJCURQIBMGOJVARHOBWYWGZYXS73AL6ABW",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA7C5GKP5AGE3VT6TJLEEP3ZLB4U6VC5TWBDXCNZ2U2VZGQRPGEKIPIV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBBX3YA3F37DKTFUP2HCOUUZVKKAE3FMX3VIDU5WUQJNHPRRI7YTEGFL",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCIM2IA5ADADBBNOXIE5PWO7SAIRW4LWQNMFYE4IVFPJUD22LSKPWPYJ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAXK27Z47RJJRDCGWSG5D2PKUVZEVXR2DXEH3MPOQK43Y7TYTNKBD2RY",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA7G4KLBHZVU4IFOQHT7M5YQNGTSAW4MPXCQJD4AKXMYRVIZ5RVHU3HU",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD4265BZFBSVRRTA7XVVI5KAG5JS6GNQSYL3MWVJN3AMDGV3WKKWETQL",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GARJX6CKMF7IDZVSBYYZRO6OVSZ6H4AJDWMFHYW6NJ5ECBYIESDWRXJT",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBYR3R6FV3T2AXNE3VGZGCD3ZDVFHGMXFRC5SKUE22WNOVUXFCC6MZJI",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBF6UG4LXUQWZY7XNNEELZOZA6XGJLP7K4OFZUOGGRUAVQYGWBCIMZTW",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GANXOWVW4LNJD7PTVO23QJQHM34Y3DQ65YFKDRRPYIH7GGDVQU3NRMBO",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCVWSINFCLBNZSBYKRZ2GK4EL4NFWJ5OXWZE3KA7XVVKDXJSQ7Y76NYP",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA2Z4R4FQ4VCSKIBKY6J7AFRLAKUCOTASNQ6YSCG5CC6SZJ3DI54MPC3",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDZZ7ZCUQSKTDSXIYJ5CJ25EIQ6GTPCTOHKNAC6CNKVCOZOXKKRFCWNJ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDE6MBD4WEWWIVP7PG57HSXXU76NJYO2SMWRSP6UU6RQHGJEYQWHPID5",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAHTVZT2L7DOBLEQK2PHRMUDKPH6KZ6UIKHXNJ2WJHDIJGMST5LVQFHC",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAR57PBKA24VMHZAPMTZHTT5SYCMSJMQWHYIROH2AA2CALAS2THBYUH5",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAMGQ6AL6CDEF4U24IBFYXXK24RPYOKGGWOZ74KZLLICFY4NMFGWPYY2",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBNAXPDGVLUMGMZC77SYOMYS7EUFVN3QUDMDGKEYE2MINDKQI64B7P7E",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDB7YP2XNJH37PXSVHGIF7JZZ2CTVOJU2OQ25S6BOUPG3NHT4GL24PI4",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD3AYP7STMTHZQ4Q6YO7KHK27UJPIADSWGAM74WNO2U2KUML74422G56",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD3MNTM4JOIEMRXWYLNKQAAAQMSIMEU3FYDENW2CQ5JYD7YIECVB6LDR",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBVUQL2BJH5A7WNFOWDANX3KJRPS2V4OAELDKLP2UQWWKAVE6QNXNJM7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDFISBR7D4I3UHXBXSGIBJEWAVZ4EQFWOGYPLIV5ORWNJYNL4SXWECQE",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCRIA6Q57HLI3QTP5IVKXIQZYKENDYTFQKVLOUBTRHREK6F6DPE4REVZ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBEGGP7EL2JWKDHIWP6Y24ET7ZTSQEQHSLKELLNPIDA2POPA5ULIUBT4",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAW5ESQZDBZN6ZF2MNVIAY4GQOTCWNH2DCGPLPUTPMGZ6VUZPEKPMGOI",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAQ3LKLWXZOALVLFNJLA6ZE5Y5AVVWJKZGWNPKAAWNMAU763PJTDNPTN",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD66QBCUM53NQC2ACAPXWW352MUUWNKIBFMMS6QMGZMM5DUA7HDREM2V",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDDCFD53FIBNVTXMKSIJXP5RQFJ7KO7RMAFQHXF3E4IIFXPRCJAUL4L2",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GD37EZNFK45KWWASFQDBNMTIF26GMEV3YZRM45JDVFQBA5MBQFZWWDPQ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAVJQMDUREXNIFWG2OORCVIEZ4JTYRMI7DFKUCUILLL6MEHL4LQRTS74",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GA3ZCUQPPCT7KD5URZPZIBKCQLWJ42Y43KCLJDOFNPR6WGLNSM6FPZ73",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GASF6OKPBAC3FJMEE7Z4EO5QYCWPAH2YPNA2DGGACE73QPRN4YZSFAE7",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBILXGIMPOZPSVCGNBIFAFKMOWHLRHN3SNKGX5D3PP7WWWG4CL57FM6A",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAAO5YMBTZFCASTECQQK6EM3JTX22MJNSUYQMJEZZNQLRMDO2H5IJGP3",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GC5D5XU4JAE5J3JDOQ3RKODJEEPEM5MWIAM55M6MPOVFUHG73T7HBAFV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBFYXVVVA6FFQFHIXBOUQWF4NX4E7L2DRB5GOEOP632H3TZGDTHTCIXV",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDAFFBTZHCTKPWRZZ4WDDWUXW7JVIMLDTF2Z5NFKQYLCNOKZLVHZP6ZP",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDB6PANKVZWJ5PWX2QP5VSZMUHDB2V7WC3ZIIDMGTT5OGIYML5K3XWQH",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAEXETF5ZFGPAFO2TGXLSSLMWFSVRANXARNVYGDXQAYVP73X2G6MAHHR",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCP3OF3PLX5WHAVCVKFMAJYPDM2IEFUGYOKONYIL7ZC3QGQ25Z5SZAK6",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCWAZIU7OBK27K5BIALYWQZE3NMPZD25TYZ26SHFGAIZE4CTUEK5KW2U",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GACGJWRFATFTTQB6ZUL62BJCAHQ7FIR7PUA2JQFK4VWYWVUHRIWT2XNJ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBPJWHL6QSHTWO6PZMMNNVVHC7QY4BONZ4KZRJROEN6AZXFPRSGKVF5K",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBCFPAT7EX4WTMHISXN4I2YTF2NBCEUCGB2CHKSZND7PCZSFTFG7LKPI",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDOI45IVI26YWBV4ARNWPXPNLAMKYF2IHMWELPMVOG7TZP4QFMTGZLUZ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDFMUBADMTM5BIXCH3XBD36XGLBN45VWOJ2G7QV76GBHFQTKL56SBEWQ",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBA4ZZYWYAALQAYMGPYRIDZ5W2AY46RXP4YRCPTCXGMZ5CPCHEQALGCS",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBULOEVOGUNSGQAL6MTDSAUOUA4K4FMEEEPTS2AI2XVYIRA7C5TEYERI",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCQZWITYCZEE5JFMJBVB6CECX6XTBNGQKUMCOOI43CLFM2NWFLAXOAWC",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GCCSUTTK3ZPUTOUUAIKO3NGJLNEQCGAUFNHRJYVRNACMNF7MPCPOFRFF",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GB54AYSSUS7ANJZFZ22AY3EMINQNHCV4G5WEA3EKDJPRPKWJNQ3QCO2N",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GC2NWQVFLYDHDJ3F7WUS6QQC5JZ22OFRLC3RQO3GCEWP2XY42RES34CF",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GAEHWV7SZEYGS6GJ6MS7U4JTET6ODKP7SEA7KSBC2JVWCFS4NOJZ6NYC",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GABGDDTNFJKDZ3JNRSAUTMTFDWB22RUJPSZYZDOYF5NADZ3SHH2BJ4CD",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GC5QYR23ZAATVOTKOCDP4SQF65LJJHRPDKJSFTHST4NGCODRIFMGODAB",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBZA62PN56IPNAZZBI4JP5FGS2ZTGD3JLGREFRRXLNVTITH5UHS46J4M",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GBMPKMPIJYY6G6EKCAGCJN6X7FQOFBF73DVXPZGXDUSAQ7GD6R4HIO5L",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    },
+    {
+      "buyer": "GDOIT6BMS5FBNVTR6YSMJTC2VLXNHW5FPU3PWG3E7OTMP46JBJU5TGKY",
+      "usdc": 1000000,
+      "xlm_stroops": 0
+    }
+  ],
+  "criterion": "buyers-funded-without-xlm",
+  "expected": "each buyer exists with 0 XLM, sponsored reserves and a Circle USDC balance of at least the requested amount",
+  "network": "stellar:testnet",
+  "onboarding_transactions": [
+    "6cacfc163f99ff7c11ff86350a3ac7cd2b12d2ff9b6733eed0f96af0e3e01190",
+    "fb80a508bf0c08d1d7dade256e7b9697517977d38b5046402ee7236164ea8e71",
+    "ac7ce6ebbae5f5efd981d8458b6b0fc0492898a07751523ba98ed414b0a0668b",
+    "5484f6fcbd096eaf701234869aeef138413b6636909dc10e792a1f45ddfb93c2",
+    "ba1717eef6d784b05ee7b1f08567d6209b4ebf1d9bac757c2d4596490da830c3",
+    "9b423303129919489f35dd6a222e088d1001531b0eb6ceffa219ed1c09b8041f"
+  ],
+  "payment_transactions": [
+    "f07f2c485de706b0e9162d016a4749d1517e995e45c02072cd254edc33612429"
+  ],
+  "recorded_at": "2026-09-28T22:51:53.085611604Z",
+  "sponsor": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+  "usdc_reserve": "GAMZ4E2INHPZ767IFZYU55ZAK75RXY3CWCRCTU6H5ERVWGFXNMK32J3W"
+}

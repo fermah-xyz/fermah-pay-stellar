@@ -15,6 +15,12 @@ It provides:
   USDC held in a separate treasury, with per-account replay protection and
   batches of up to 100 charges in one call
   ([design](docs/architecture/prepaid-contract.md)).
+- **Sponsored submission**: buyers sign only an authorization entry for the
+  exact call; a submitter signs the transaction and a separate account pays
+  through a fee bump
+  ([design](docs/architecture/transactions.md)). Deposits, a 100-buyer batch,
+  withdrawals and treasury solvency are recorded on testnet with Circle USDC
+  ([evidence](docs/evidence/README.md#prepaid-ledger-on-testnet)).
 - **Buyer onboarding without XLM**: one transaction creates a buyer account
   with a Circle USDC trustline and a zero XLM balance, while a sponsor pays
   the fee and every reserve ([testnet evidence](docs/evidence/README.md)).

@@ -9,7 +9,10 @@ use clap::{Parser, Subcommand};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::onboarding::{ReservePayer, SubmissionPolicy, onboard_buyer};
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
+use fermah_pay_stellar_chain::sponsored::Policy;
 use fermah_pay_stellar_chain::{friendbot, usdc};
+use fermah_pay_stellar_cli::testnet::prepaid::Context as Testnet;
+use fermah_pay_stellar_cli::testnet::profile::Profile;
 use fermah_pay_stellar_domain::Network;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -26,12 +29,81 @@ struct Cli {
         default_value = "https://soroban-testnet.stellar.org"
     )]
     rpc_url: String,
+    /// Directory holding testnet keys and deployment state. Never inside a
+    /// repository.
+    #[arg(long, env = "PAY_STELLAR_TESTNET_PROFILE")]
+    profile_dir: Option<PathBuf>,
+    /// Where evidence records are written.
+    #[arg(long, default_value = "docs/evidence/testnet")]
+    evidence_dir: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create any missing role account: sponsor, submitter and fee source
+    /// funded by Friendbot; admin, operator, seller, treasury and USDC reserve
+    /// sponsored with zero XLM.
+    InitRoles,
+    /// Upload the prepaid ledger Wasm and create an instance pinned to the
+    /// profile's roles and Circle testnet USDC.
+    DeployPrepaid {
+        #[arg(long)]
+        wasm: PathBuf,
+        /// Minimum deposit, USDC base units (1 USDC = 10,000,000).
+        #[arg(long)]
+        min_deposit: i128,
+        /// Maximum single charge, USDC base units.
+        #[arg(long)]
+        max_charge: i128,
+    },
+    /// Create buyers 1..=COUNT with zero XLM and top each up to USDC_EACH
+    /// base units from the USDC reserve.
+    OnboardBuyers {
+        #[arg(long)]
+        count: u32,
+        #[arg(long)]
+        usdc_each: i64,
+    },
+    /// Deposit AMOUNT base units for buyers FIRST..=LAST.
+    Deposit {
+        #[arg(long)]
+        first: u32,
+        #[arg(long)]
+        last: u32,
+        #[arg(long)]
+        amount: i128,
+    },
+    /// Charge buyers FIRST..=LAST in one charge_batch transaction.
+    ChargeBatch {
+        #[arg(long)]
+        first: u32,
+        #[arg(long)]
+        last: u32,
+        #[arg(long)]
+        seq: u64,
+        #[arg(long)]
+        amount: i128,
+    },
+    /// Submit a single charge for BUYER.
+    Charge {
+        #[arg(long)]
+        buyer: u32,
+        #[arg(long)]
+        seq: u64,
+        #[arg(long)]
+        amount: i128,
+    },
+    /// Compare the treasury's USDC with the ledger's liabilities and revenue.
+    Solvency,
+    /// Withdraw AMOUNT of BUYER's credit back to the buyer.
+    Withdraw {
+        #[arg(long)]
+        buyer: u32,
+        #[arg(long)]
+        amount: i128,
+    },
     /// Create a new buyer account holding zero XLM, with a Circle testnet
     /// USDC trustline, whose fee and reserves a sponsor pays. Prints a JSON
     /// evidence record and exits non-zero if the ledger does not show the
@@ -58,7 +130,41 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let rpc = RpcClient::new(&cli.rpc_url, Duration::from_secs(30))?;
     let info = rpc.verify_network(NETWORK).await?;
+    let profile_dir = match cli.profile_dir {
+        Some(dir) => dir,
+        None => PathBuf::from(std::env::var("HOME").context("HOME is not set")?)
+            .join(".config/fermah-pay-stellar/testnet"),
+    };
+    let context = || -> anyhow::Result<Testnet> {
+        Ok(Testnet {
+            rpc: rpc.clone(),
+            profile: Profile::open(&profile_dir)?,
+            evidence_dir: cli.evidence_dir.clone(),
+            policy: Policy {
+                inclusion_fee: 1_000,
+                resource_fee_margin_percent: 15,
+                validity: Duration::from_secs(120),
+                poll_interval: Duration::from_secs(2),
+            },
+        })
+    };
     match cli.command {
+        Command::InitRoles => context()?.init_roles().await?,
+        Command::DeployPrepaid { wasm, min_deposit, max_charge } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            context()?.deploy_prepaid(&code, min_deposit, max_charge).await?;
+        }
+        Command::OnboardBuyers { count, usdc_each } => {
+            context()?.onboard_buyers(count, usdc_each).await?
+        }
+        Command::Deposit { first, last, amount } => context()?.deposit(first, last, amount).await?,
+        Command::ChargeBatch { first, last, seq, amount } => {
+            context()?.charge_batch(first, last, seq, amount).await?;
+        }
+        Command::Charge { buyer, seq, amount } => context()?.charge(buyer, seq, amount).await?,
+        Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
+        Command::Solvency => context()?.solvency().await?,
         Command::OnboardBuyer {
             sponsor_secret_file,
             sponsor_secret_out,

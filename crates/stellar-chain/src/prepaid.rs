@@ -7,8 +7,9 @@
 
 use fermah_pay_stellar_domain::AccountAddress;
 use stellar_xdr::{
-    BytesM, ContractId, Hash, Int128Parts, InvokeContractArgs, ScAddress, ScBytes, ScSymbol, ScVal,
-    ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM, VecM,
+    BytesM, ContractId, Hash, Int128Parts, InvokeContractArgs, ScAddress, ScBytes, ScMap,
+    ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation,
+    StringM, VecM,
 };
 
 use crate::transaction::account_id;
@@ -21,10 +22,48 @@ pub struct PrepaidDeployment {
     pub treasury: AccountAddress,
 }
 
-/// One charge: the buyer account, its next sequence number, the amount.
+/// The accounts a ledger instance is pinned to at construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Roles {
+    pub admin: AccountAddress,
+    pub operator: AccountAddress,
+    pub seller: AccountAddress,
+    pub treasury: AccountAddress,
+    pub usdc: [u8; 32],
+}
+
+/// Constructor arguments, in the contract's order: roles, USDC contract and
+/// the `Limits` struct, which encodes as a map keyed by field name.
+#[must_use]
+pub fn constructor_args(roles: &Roles, min_deposit: i128, max_charge: i128) -> Vec<ScVal> {
+    let limits = ScVal::Map(Some(ScMap(
+        VecM::try_from(vec![
+            ScMapEntry { key: symbol_val("max_charge"), val: i128_val(max_charge) },
+            ScMapEntry { key: symbol_val("min_deposit"), val: i128_val(min_deposit) },
+        ])
+        .expect("invariant: two entries fit a map"),
+    )));
+    vec![
+        account_val(&roles.admin),
+        account_val(&roles.operator),
+        account_val(&roles.seller),
+        account_val(&roles.treasury),
+        ScVal::Address(ScAddress::Contract(ContractId(Hash(roles.usdc)))),
+        limits,
+    ]
+}
+
+fn symbol_val(name: &str) -> ScVal {
+    ScVal::Symbol(ScSymbol(
+        StringM::try_from(name).expect("invariant: field names are valid symbols"),
+    ))
+}
+
+/// One charge: the buyer (account owner), the account's next sequence
+/// number, the amount.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChargeRequest {
-    pub account_id: [u8; 16],
+    pub owner: AccountAddress,
     pub seq: u64,
     pub amount: i128,
 }
@@ -32,7 +71,6 @@ pub struct ChargeRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositIntent {
     pub owner: AccountAddress,
-    pub account_id: [u8; 16],
     pub amount: i128,
     pub deposit_id: [u8; 32],
 }
@@ -47,7 +85,6 @@ pub struct RevenueWithdrawIntent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawIntent {
     pub owner: AccountAddress,
-    pub account_id: [u8; 16],
     pub amount: i128,
     pub destination: AccountAddress,
     pub withdrawal_id: [u8; 32],
@@ -61,7 +98,6 @@ impl PrepaidDeployment {
             "deposit",
             vec![
                 account_val(&intent.owner),
-                bytes_val(&intent.account_id),
                 i128_val(intent.amount),
                 bytes_val(&intent.deposit_id),
             ],
@@ -85,7 +121,6 @@ impl PrepaidDeployment {
             "withdraw",
             vec![
                 account_val(&intent.owner),
-                bytes_val(&intent.account_id),
                 i128_val(intent.amount),
                 account_val(&intent.destination),
                 bytes_val(&intent.withdrawal_id),
@@ -155,6 +190,27 @@ impl PrepaidDeployment {
                 vec![],
             )],
         )
+    }
+
+    #[must_use]
+    pub fn get_balance_call(&self, owner: &AccountAddress) -> InvokeContractArgs {
+        call(self.contract, "get_balance", vec![account_val(owner)])
+    }
+
+    #[must_use]
+    pub fn get_totals_call(&self) -> InvokeContractArgs {
+        call(self.contract, "get_totals", vec![])
+    }
+
+    #[must_use]
+    pub fn charge_call(&self, charge: &ChargeRequest) -> InvokeContractArgs {
+        call(self.contract, "charge", vec![charge_val(charge)])
+    }
+
+    /// What the operator signs for a single charge.
+    #[must_use]
+    pub fn charge_authorization(&self, charge: &ChargeRequest) -> SorobanAuthorizedInvocation {
+        invocation(self.charge_call(charge), vec![])
     }
 
     #[must_use]
@@ -228,7 +284,7 @@ fn vec_val(items: Vec<ScVal>) -> ScVal {
 
 /// The contract's `Charge` tuple struct, which encodes as a vector of fields.
 fn charge_val(charge: &ChargeRequest) -> ScVal {
-    vec_val(vec![bytes_val(&charge.account_id), ScVal::U64(charge.seq), i128_val(charge.amount)])
+    vec_val(vec![account_val(&charge.owner), ScVal::U64(charge.seq), i128_val(charge.amount)])
 }
 
 #[cfg(test)]

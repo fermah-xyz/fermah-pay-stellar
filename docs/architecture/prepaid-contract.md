@@ -45,8 +45,8 @@ Authorization binds a signer to the exact call and its sub-calls:
 
 | Operation | Signer | Signed tree |
 |---|---|---|
-| `deposit(owner, account, amount, deposit_id)` | buyer | the call, and under it `usdc.transfer(buyer, treasury, amount)` |
-| `withdraw(owner, account, amount, destination, id)` | buyer | the call only |
+| `deposit(owner, amount, deposit_id)` | buyer | the call, and under it `usdc.transfer(buyer, treasury, amount)` |
+| `withdraw(owner, amount, destination, id)` | buyer | the call only |
 | `withdraw(...)` | treasury | the call, and under it `usdc.transfer(treasury, destination, amount)` |
 | `charge_batch(charges)` | operator | the call only |
 
@@ -59,13 +59,17 @@ keys and have the Soroban host verify them.
 
 ## Accounts
 
-An account is identified by 16 bytes chosen by the caller. The first deposit binds it to its owner, and it cannot be rebound. Amounts are
+An account is keyed by its owner's address: one account per owner per
+contract, created by the owner's first deposit. Only a deposit the owner
+authorizes can create or credit it, so no one can claim a buyer's account
+ahead of the buyer. Deposit and withdrawal identifiers are likewise scoped to
+their owner: reusing another owner's identifier affects nothing. Amounts are
 USDC base units (seven decimals). Deposits and withdrawals are limited to the
 range a classic trustline can hold (at most `i64::MAX`).
 
 ## Charges and replay protection
 
-A charge is `(account, sequence, amount)`. Each account stores the last
+A charge is `(owner, sequence, amount)`. Each account stores the last
 sequence it consumed, and a charge must carry exactly the next one:
 
 | Outcome | Meaning | Sequence consumed |
@@ -103,9 +107,9 @@ Measured in the Soroban VM with the built Wasm, one `charge_batch` call for
 | CPU instructions | 23.0 M | 20.1 M | 400 M |
 | Memory | 6.1 MB | 5.3 MB | 40 MB |
 | Ledger-entry writes | 102 | 82 | 200 |
-| Bytes written | 25.6 KB | 20.6 KB | 132 KB |
+| Bytes written | 21.6 KB | 17.4 KB | 132 KB |
 | Footprint entries | 104 | 104 | 400 |
-| Event bytes | 7,680 | 7,680 | 16,384 |
+| Event bytes | 9,680 | 9,680 | 16,384 |
 
 These are local VM measurements, reproduced by `just contract-resources` and
 by the `Contract` CI job; they are not network evidence.
@@ -123,7 +127,6 @@ this contract.
 | 103 | `InvalidAmount` |
 | 104 | `BelowMinimumDeposit` |
 | 105 | `DepositAlreadyProcessed` |
-| 106 | `OwnerMismatch` |
 | 107 | `UnknownAccount` |
 | 108 | `InsufficientBalance` |
 | 109 | `ChargeAboveLimit` |

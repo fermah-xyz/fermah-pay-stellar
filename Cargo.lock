@@ -1101,6 +1101,8 @@ dependencies = [
  "fermah-pay-stellar-chain",
  "fermah-pay-stellar-domain",
  "fermah-pay-stellar-gateway",
+ "getrandom 0.4.3",
+ "serde",
  "serde_json",
  "sqlx",
  "time",

@@ -44,3 +44,34 @@ curl -s https://horizon-testnet.stellar.org/accounts/<buyer>
 
 The same property is re-checked by the weekly `testnet` workflow and by
 `just testnet`.
+
+### Prepaid ledger on testnet
+
+Produced by the commands in the [testnet walkthrough](../quickstart/testnet.md)
+against Circle testnet USDC. Every buyer, the treasury, the operator and the
+seller hold 0 XLM throughout; a submitter account signs and sequences the
+transactions and a separate fee account pays through fee bumps. Each record
+lists the outer (fee-bump) and inner transaction hashes.
+
+| Record | Shows |
+|---|---|
+| [`prepaid-deployment`](testnet/2026-09-28-prepaid-deployment.json) | Wasm upload and contract creation; the deployed code hash equals the Wasm built in CI from the same source |
+| [`buyers-funded-100`](testnet/2026-09-28-buyers-funded-100.json) | 100 buyers created with 0 XLM and sponsored reserves, each funded with Circle USDC |
+| [`deposits-1-100`](testnet/2026-09-28-deposits-1-100.json) | 100 deposits: USDC moves from each buyer to the separate treasury and the ledger credits the buyer's account; the buyer only signs its authorization entry and pays no fee |
+| [`charge-batch-100-seq1`](testnet/2026-09-28T234208-charge-batch-100-seq1.json) | **one transaction charging 100 distinct buyers**, all `Charged` |
+| [`charge-buyer-1-seq2` (23:42:13)](testnet/2026-09-28T234213-charge-buyer-1-seq2.json) | a single charge |
+| [`charge-buyer-1-seq2` (23:42:15)](testnet/2026-09-28T234215-charge-buyer-1-seq2.json) | the same charge again: refused as `DuplicateCharge` (contract error 110) before submission; the balance is unchanged |
+| [`withdraw-buyer-2`](testnet/2026-09-28T234223-withdraw-buyer-2.json) | a withdrawal authorized by the buyer and the treasury: credit debited and USDC moved from the treasury back to the buyer in one invocation |
+| [`charge-batch-100-seq2`](testnet/2026-09-28T234233-charge-batch-100-seq2.json) | one 100-entry transaction with mixed outcomes: 98 `Charged`, 1 `Duplicate`, 1 `InsufficientBalance` |
+| [`treasury-solvency`](testnet/2026-09-28T234234-treasury-solvency.json) | the treasury's USDC covers buyer liabilities plus unwithdrawn revenue, read from the network; the surplus of 4.965 USDC is exactly what the treasury owes under an earlier deployment of the contract that shares the same treasury account |
+
+Measured fees for a charge on testnet:
+
+| Charges | Transactions | Fee charged | Per charge |
+|---:|---:|---:|---:|
+| 1 (`charge`) | 1 | 20,305 stroops | 20,305 stroops |
+| 100 (`charge_batch`) | 1 | 479,589 stroops | 4,796 stroops |
+
+Batching settles 100 charges in one transaction instead of 100, and costs
+about a quarter of the per-charge fee of single charges: most of a charge's
+fee is for the ledger entry it writes, which a batch cannot share.
