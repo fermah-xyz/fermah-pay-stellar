@@ -1,0 +1,22 @@
+[package]
+name = "fermah-pay-stellar-prepaid"
+description = "Soroban prepaid ledger: buyer credit and seller revenue over USDC held in a separate treasury"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "28.0.0"
+
+[dev-dependencies]
+fermah-pay-stellar-chain.workspace = true
+fermah-pay-stellar-domain.workspace = true
+proptest.workspace = true
+soroban-sdk = { version = "28.0.0", features = ["testutils"] }

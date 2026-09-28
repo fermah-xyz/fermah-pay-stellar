@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste` is unmaintained, not vulnerable. It is a compile-time proc macro
+    # reached only through the Soroban host and SDK, so none of its code is in
+    # the contract Wasm or the gateway binary, and no maintained replacement
+    # is available to those upstream crates.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc macro required by the Soroban host" },
+]
 
 [licenses]
 version = 2

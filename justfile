@@ -29,3 +29,15 @@ gate: db-up
 # Checks against the live Stellar testnet (needs network access and Friendbot).
 testnet:
     cargo test -p fermah-pay-stellar-chain --test testnet_onboarding --locked -- --ignored
+
+stellar_cli := "stellar"
+contract_out := "target/contract-wasm"
+
+# Build the prepaid ledger Wasm with the stellar CLI (required by soroban-sdk).
+contract-build:
+    {{stellar_cli}} contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir {{contract_out}}
+
+# Measure a full batch of distinct buyers in one invocation against the
+# network's per-transaction limits, using the built Wasm.
+contract-resources: contract-build
+    PREPAID_WASM={{justfile_directory()}}/{{contract_out}}/fermah_pay_stellar_prepaid.wasm cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture

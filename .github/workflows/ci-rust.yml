@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths: &rust-inputs
       - crates/**
+      - contracts/**
       - proto/**
       - db/**
       - .sqlx/**
@@ -92,6 +93,38 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  # The contract Wasm as deployed: built by the stellar CLI (soroban-sdk
+  # refuses any other build system), then measured in the Soroban VM with a
+  # full batch of distinct buyers against the per-transaction limits.
+  contract:
+    name: Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install stellar CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-delay 2 \
+            https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            -o "$RUNNER_TEMP/stellar.tar.gz"
+          echo "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462  $RUNNER_TEMP/stellar.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/stellar.tar.gz" -C "$HOME/.cargo/bin" stellar
+      - name: Build Wasm
+        run: |
+          set -euo pipefail
+          stellar contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir target/contract-wasm
+          echo "prepaid Wasm sha256: $(sha256sum target/contract-wasm/fermah_pay_stellar_prepaid.wasm | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Full batch fits one transaction
+        env:
+          PREPAID_WASM: ${{ github.workspace }}/target/contract-wasm/fermah_pay_stellar_prepaid.wasm
+        run: cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture
 
   test:
     name: Test

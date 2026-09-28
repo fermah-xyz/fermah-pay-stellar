@@ -6,6 +6,7 @@ members = [
     "crates/stellar-chain",
     "crates/gateway",
     "crates/cli",
+    "contracts/prepaid",
 ]
 
 [workspace.package]
@@ -62,3 +63,16 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.26.1", features = ["v7"] }
 webpki-roots = "1.0.9"
 zeroize = "1.9.0"
+
+# Contract Wasm: smallest code, and arithmetic overflow aborts the invocation
+# rather than wrapping, so a ledger total can never silently wrap around.
+[profile.contract]
+inherits = "release"
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

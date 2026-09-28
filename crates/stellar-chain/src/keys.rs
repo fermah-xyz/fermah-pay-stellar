@@ -46,13 +46,19 @@ impl SecretKey {
         AccountAddress::from_public_key(self.0.verifying_key().to_bytes())
     }
 
+    /// Raw Ed25519 signature over a 32-byte payload hash.
+    #[must_use]
+    pub fn sign_raw(&self, payload_hash: &[u8; 32]) -> [u8; 64] {
+        self.0.sign(payload_hash).to_bytes()
+    }
+
     /// Signs a 32-byte Stellar signature payload hash and decorates it with
     /// the hint (last four public-key bytes) the network uses to match
     /// signatures to signers.
     #[must_use]
     pub fn sign_payload(&self, payload_hash: &[u8; 32]) -> DecoratedSignature {
         let public = self.0.verifying_key().to_bytes();
-        let signature = self.0.sign(payload_hash).to_bytes();
+        let signature = self.sign_raw(payload_hash);
         DecoratedSignature {
             hint: SignatureHint([public[28], public[29], public[30], public[31]]),
             signature: Signature(
