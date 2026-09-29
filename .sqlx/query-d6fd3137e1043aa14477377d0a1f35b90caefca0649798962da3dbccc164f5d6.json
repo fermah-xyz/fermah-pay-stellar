@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT state, source_address, sequence, valid_until, outer_hash, envelope_xdr,\n                   ledger, fee_charged, return_value_xdr\n            FROM pay_stellar.submissions\n            WHERE id = $1 AND network = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "source_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "source_address"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "valid_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "valid_until"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "outer_hash",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "outer_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "envelope_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "envelope_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "ledger",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "fee_charged",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "fee_charged"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "return_value_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "return_value_xdr"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d6fd3137e1043aa14477377d0a1f35b90caefca0649798962da3dbccc164f5d6"
+}

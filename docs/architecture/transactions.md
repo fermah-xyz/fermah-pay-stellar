@@ -52,6 +52,38 @@ Implemented in
 Every receipt records both the inner and the outer transaction hash, the
 submitter and the fee source.
 
+## Durable submission in the gateway
+
+The gateway's submission engine runs the same steps, with every envelope
+recorded before it is sent
+([`crates/gateway/src/submission`](../../crates/gateway/src/submission/mod.rs),
+schema in [`0002_submissions.sql`](../../db/migrations/0002_submissions.sql)):
+
+- **Install before send.** The complete signed fee-bump envelope, its inner and
+  outer hashes, the source sequence and the validity window are written in one
+  row before any broadcast. The worker's database role cannot change those
+  columns afterwards. A crash at any point leaves either nothing (nothing was
+  sent) or the exact bytes to resend.
+- **One envelope in flight per source.** A unique index allows at most one
+  submission per source account whose outcome is unknown, because the network
+  accepts only the next sequence number.
+- **Outcomes come only from the hash.** A `sendTransaction` answer, including
+  a refusal, never settles a submission: resending an envelope that already
+  landed is refused as a stale sequence. A submission is final only when:
+
+| State | Evidence |
+|---|---|
+| `succeeded` / `failed` | the network returns the transaction for the envelope's hash |
+| `expired` | the validity window has passed (plus an ingestion margin), the hash is not found, and the source's sequence never reached the envelope's sequence: it can never be included |
+| `quarantined` | the window has passed and the hash is not found, but the source's sequence was consumed: the evidence contradicts itself and an operator decides |
+
+- **Final means final.** A database trigger refuses any change to a submission
+  that is no longer in flight, so a later RPC answer cannot rewrite an
+  outcome.
+- **Recovery.** After a restart the engine resends the in-flight envelope's
+  bytes unchanged and resolves it by hash. After `expired`, the next envelope
+  reuses the sequence that was never consumed.
+
 ## Credentials
 
 Authorization entries can use legacy `Address` credentials or `AddressV2`,

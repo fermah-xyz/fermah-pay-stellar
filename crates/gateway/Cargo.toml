@@ -16,6 +16,7 @@ name = "fermah-pay-stellar-gateway"
 path = "src/main.rs"
 
 [dependencies]
+fermah-pay-stellar-chain.workspace = true
 fermah-pay-stellar-domain.workspace = true
 fermah-pay-stellar-proto.workspace = true
 anyhow.workspace = true
