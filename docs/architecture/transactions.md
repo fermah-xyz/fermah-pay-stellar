@@ -89,6 +89,82 @@ therefore judged at the ledger the node has actually ingested.
   bytes unchanged and resolves it by hash. After `expired`, the next envelope
   reuses the sequence that was never consumed.
 
+### Inclusion fees
+
+An envelope's inclusion bid is fixed when it is built, like the rest of its
+bytes. Each new envelope bids, per operation:
+
+```
+min(cap, max(floor, market, 2 × the previous bid if the previous envelope expired))
+```
+
+- **Market.** A percentile (the 90th by default) of the Soroban inclusion
+  fees the RPC node reports through `getFeeStats` for its recent window of
+  ledgers (50 by default in Stellar RPC). The node records each
+  transaction's whole inclusion fee, the fee charged less the resource fee
+  charged ([`feewindow.go`](https://github.com/stellar/stellar-rpc/blob/397ea6eb1b1471ef15a8d4d98c329ce10425e33b/cmd/stellar-rpc/internal/feewindow/feewindow.go#L164-L233));
+  for a fee bump that covers two operations, so reading it as a
+  per-operation bid errs high. If the statistics cannot be read, the bid
+  rests on the floor and the escalation, and a warning is logged.
+- **Escalation.** If the source's latest submission `expired`, proven never
+  included, the next envelope from that source bids twice what it bid,
+  whatever work it carries. Consecutive expiries double the bid up to the
+  cap; once an envelope is included, bids follow the market again. `failed`
+  and `quarantined` submissions do not escalate: the first was included, and
+  the second's fate is unknown. The previous bid is read back from the
+  recorded envelope, so a restart does not reset the escalation.
+- **What is paid.** The network charges each operation the ledger's base
+  fee or, when the transaction's lane was full, the lowest per-operation bid
+  it let into the ledger, and never more than the bid
+  ([`TxSetFrame.cpp`](https://github.com/stellar/stellar-core/blob/947aad8413c189d85504acf72207e85eeda9b021/src/herder/TxSetFrame.cpp#L436-L477),
+  [`FeeBumpTransactionFrame.cpp`](https://github.com/stellar/stellar-core/blob/947aad8413c189d85504acf72207e85eeda9b021/src/transactions/FeeBumpTransactionFrame.cpp#L592-L616)).
+  A bid above the market therefore costs nothing extra outside congestion.
+  The cap bounds the fee source's spend during it: at most `2 × cap` stroops
+  of inclusion fee per envelope (the inner operation and the fee bump), plus
+  the declared resource fee, whose unused part is refunded.
+
+Every bid is logged at `info` with the market reading, the percentile, the
+bid it escalated from, the floor and the cap; a bid held at the cap is
+logged at `warn`. The settings are in the
+[configuration table](../self-hosting/database.md#configuration); setting
+the cap equal to the floor gives a fixed bid.
+
+The engine never replaces an envelope in flight with a higher fee bump of
+the same inner transaction. Stellar Core accepts such a replacement only at
+ten times the queued inclusion fee per operation or more
+([`FEE_MULTIPLIER`](https://github.com/stellar/stellar-core/blob/947aad8413c189d85504acf72207e85eeda9b021/src/herder/TransactionQueue.cpp#L51),
+[`canReplaceByFee`](https://github.com/stellar/stellar-core/blob/947aad8413c189d85504acf72207e85eeda9b021/src/herder/TransactionQueue.cpp#L242-L276), applied
+[here](https://github.com/stellar/stellar-core/blob/947aad8413c189d85504acf72207e85eeda9b021/src/herder/TransactionQueue.cpp#L403-L433)), a step that from the
+default floor jumps to 100 000 stroops per operation at once. A replacement
+is also a second envelope for the same sequence: each would need its own
+record before it is sent, and either could land, so resolution would have to
+follow both hashes. Rebuilding with a doubled bid keeps one recorded
+envelope per submission, resolved by its one hash, and leaves the expiry
+proof as it is. The price is delay: a charge batch whose envelope expired
+waits for its validity window (60 seconds by default) and then for the
+operator's authorization to lapse (24 ledgers, about two minutes) before
+its charges are sent again, well within the charges' own window (720 ledgers,
+about an hour by default).
+
+### Local clock
+
+The upper time bound of an envelope is the local clock plus the validity
+window. Before building one, the engine reads the latest ledger's close time
+(`getLatestLedger`) and builds nothing while the two are further apart than
+`PAY_STELLAR_MAX_CLOCK_SKEW_SECS` (20 seconds by default, and required to be
+below the validity window): a clock that far behind would build envelopes
+the network already considers expired, and one that far ahead would keep
+work waiting longer than intended. The worker logs the refusal and tries
+again on its next step; what is already in flight is still sent and
+resolved. A ledger closes about every five seconds, so the latest close time
+trails the true time by a few seconds; a node lagging behind the network
+looks like a clock running ahead, and also stops new envelopes until it
+catches up.
+
+The check only gates building. Whether an envelope expired is still decided
+from the ledger close times the node reports, never from the local clock.
+Keep the host clock synchronized (for example with NTP).
+
 ## Settlement
 
 The worker ([`crates/gateway/src/worker.rs`](../../crates/gateway/src/worker.rs))
@@ -149,6 +225,21 @@ Authorization entries can use legacy `Address` credentials or `AddressV2`,
 which also commits the signed payload to the signer's address. Both are
 signed and verified by the same code and are accepted by the Soroban host;
 Stellar testnet accepted `AddressV2` entries for the recorded deposits.
+
+The gateway prepares deposit authorizations, and the worker signs its batch
+authorizations, with `AddressV2` credentials. They exist from network
+protocol 27 ([CAP-71 XDR](https://github.com/stellar/stellar-xdr/blob/68fa1ac55692f68ad2a2ca549d0a283273554439/Stellar-transaction.x#L585-L603), absent
+before), and settlement also relies on archived entries being restored
+inside the invocation that touches them, which protocol 23 introduced. So
+the gateway and the worker refuse to start unless their RPC endpoint reports
+`protocolVersion` 27 or later from `getNetwork`, besides the configured
+network's passphrase.
+
+A buyer's wallet must be able to sign an `AddressV2` entry: an SDK that knows
+only legacy `Address` credentials cannot decode the prepared entry, or signs
+the legacy payload, which the gateway refuses as `invalid_signature`.
+Signing the `signature_payload` the gateway returns works with any Ed25519
+signer.
 
 ## Observed costs on testnet
 

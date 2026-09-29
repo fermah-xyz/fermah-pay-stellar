@@ -4,8 +4,8 @@ use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_gateway::config::Config;
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
-use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::store::Store;
+use fermah_pay_stellar_gateway::{shutdown, startup};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .context("connecting to PostgreSQL")?;
     let rpc =
         RpcClient::new(&config.rpc_url, config.rpc_timeout()).context("building RPC client")?;
-    rpc.verify_network(config.network).await.context("checking the RPC network")?;
+    startup::verify_rpc(&rpc, config.network).await.context("checking the RPC network")?;
     let store = Store::new(pool);
     let ledger = LedgerApi::new(
         store.clone(),

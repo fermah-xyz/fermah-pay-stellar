@@ -42,6 +42,13 @@ invocation), and if it carries one valid Ed25519 signature by the buyer's own
 account key. Accounts that authorize through additional signers or
 thresholds are not supported.
 
+The entry carries `AddressV2` credentials (network protocol 27 and later),
+whose signed payload also commits to the buyer's address. The wallet's SDK
+must support them: one that knows only legacy `Address` credentials cannot
+decode the entry, or signs the legacy payload, which is refused as
+`invalid_signature`. `signature_payload` is the `AddressV2` payload, so
+signing it directly works with any Ed25519 signer.
+
 The entry is valid until `expiration_ledger`, about an hour after
 preparation by default. A deposit whose signature lapses before the network
 includes it ends `EXPIRED`; prepare a new one.
