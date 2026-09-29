@@ -6,7 +6,8 @@
 use std::future::Future;
 
 use fermah_pay_stellar_chain::rpc::{
-    AuthMode, LedgerEntries, RpcClient, RpcError, SendOutcome, SimulationOutcome, TransactionStatus,
+    AuthMode, FeeStats, LatestLedgerInfo, LedgerEntries, RpcClient, RpcError, SendOutcome,
+    SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{
     LedgerEntryData, LedgerKey, LedgerKeyAccount, TransactionEnvelope,
@@ -46,6 +47,14 @@ pub trait Chain: Send + Sync {
 
     fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
 
+    /// The latest ledger with its close time, which the engine compares with
+    /// the local clock before it builds time bounds from that clock.
+    fn latest_ledger_info(&self)
+    -> impl Future<Output = Result<LatestLedgerInfo, RpcError>> + Send;
+
+    /// Recent inclusion fees, to bid from.
+    fn fee_stats(&self) -> impl Future<Output = Result<FeeStats, RpcError>> + Send;
+
     /// The entries that exist among `keys`, and the ledger they were read at.
     fn ledger_entries(
         &self,
@@ -83,6 +92,14 @@ impl Chain for RpcClient {
 
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         self.get_latest_ledger().await
+    }
+
+    async fn latest_ledger_info(&self) -> Result<LatestLedgerInfo, RpcError> {
+        self.get_latest_ledger_info().await
+    }
+
+    async fn fee_stats(&self) -> Result<FeeStats, RpcError> {
+        self.get_fee_stats().await
     }
 
     async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {

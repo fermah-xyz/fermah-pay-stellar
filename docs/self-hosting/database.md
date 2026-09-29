@@ -84,6 +84,11 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | seed file of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | seed file of the contracts' operator; the worker serves the deployments bound with this operator |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
+| Worker | `PAY_STELLAR_MAX_CLOCK_SKEW_SECS` | largest difference between the host clock and the latest ledger's close time at which transactions are still built, default 20; must be below the validity |
+| Worker | `PAY_STELLAR_INCLUSION_FEE` | lowest inclusion bid per operation, in stroops, default 10000; at least 100 |
+| Worker | `PAY_STELLAR_MAX_INCLUSION_FEE` | highest inclusion bid per operation, in stroops, default 1000000 (0.1 XLM); equal to the lowest for a fixed bid |
+| Worker | `PAY_STELLAR_INCLUSION_FEE_PERCENTILE` | percentile of recent Soroban inclusion fees to bid at: `10` to `90` in steps of 10, `95`, `99` or `max`; default `90` |
+| Worker | `PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT` | headroom over the simulated resource fee, default 20; the unused part is refunded |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 98, default 98 |
 
@@ -92,6 +97,16 @@ otherwise. Run one worker per source account.
 
 Both processes refuse to start unless the RPC endpoint serves the configured
 network at protocol 27 or later: authorizations use `AddressV2` credentials.
+
+Each transaction bids the market percentile of recent inclusion fees, never
+less than the lowest bid nor more than the highest, and twice the previous
+bid after a transaction expired unincluded; each bid is logged. The fee
+source pays at most twice the highest bid per transaction in inclusion fees
+(the call and its fee bump), besides the resource fee. See
+[inclusion fees](../architecture/transactions.md#inclusion-fees). Keep the
+host clock synchronized: the worker stops building transactions while it
+disagrees with the network by more than `PAY_STELLAR_MAX_CLOCK_SKEW_SECS`
+([local clock](../architecture/transactions.md#local-clock)).
 
 Run one gateway process per network. A testnet gateway refuses live keys,
 and a pubnet gateway refuses test keys.

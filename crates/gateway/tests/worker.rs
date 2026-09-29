@@ -21,8 +21,9 @@ use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
 };
 use fermah_pay_stellar_chain::rpc::{
-    IncludedTransaction, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
-    Simulation, SimulationOutcome, TransactionStatus,
+    FeeDistribution, FeePercentile, FeeStats, IncludedTransaction, LatestLedgerInfo, LedgerEntries,
+    LedgerEntryRecord, NodeView, RpcError, SendOutcome, Simulation, SimulationOutcome,
+    TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -45,7 +46,9 @@ use fermah_pay_stellar_gateway::ledger::LatestLedger;
 use fermah_pay_stellar_gateway::quarantine::{
     self, QuarantineError, QuarantinedCharge, Resolution,
 };
-use fermah_pay_stellar_gateway::submission::{Chain, Clock, Engine, Keys, Policy, SourceSequence};
+use fermah_pay_stellar_gateway::submission::{
+    Chain, Clock, Engine, FeePolicy, Keys, Policy, SourceSequence,
+};
 use fermah_pay_stellar_gateway::worker::{Settings, Step, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
@@ -526,6 +529,41 @@ impl Chain for Stellar {
         Ok(self.latest())
     }
 
+    async fn latest_ledger_info(&self) -> Result<LatestLedgerInfo, RpcError> {
+        Ok(self.with(|n| LatestLedgerInfo {
+            sequence: n.latest,
+            close_time: n.clock.now().unix_timestamp(),
+            protocol_version: 28,
+        }))
+    }
+
+    /// A quiet network: every recent Soroban transaction paid the minimum.
+    async fn fee_stats(&self) -> Result<FeeStats, RpcError> {
+        let quiet = FeeDistribution {
+            max: 100,
+            min: 100,
+            mode: 100,
+            p10: 100,
+            p20: 100,
+            p30: 100,
+            p40: 100,
+            p50: 100,
+            p60: 100,
+            p70: 100,
+            p80: 100,
+            p90: 100,
+            p95: 100,
+            p99: 100,
+            transaction_count: 10,
+            ledger_count: 50,
+        };
+        Ok(FeeStats {
+            soroban_inclusion_fee: quiet,
+            inclusion_fee: quiet,
+            latest_ledger: self.latest(),
+        })
+    }
+
     async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {
         // The real RPC refuses a read of no keys.
         if keys.is_empty() {
@@ -695,7 +733,12 @@ impl World {
                 source: SecretKey::from_strkey(source_seed).unwrap(),
                 fee_source: SecretKey::from_strkey(&self.fee_seed).unwrap(),
             },
-            Policy { inclusion_fee: 100, resource_fee_margin_percent: 10, validity: VALIDITY },
+            Policy {
+                fees: FeePolicy::new(100, 100_000, FeePercentile::P90).unwrap(),
+                resource_fee_margin_percent: 10,
+                validity: VALIDITY,
+                max_clock_skew: Duration::from_secs(20),
+            },
         );
         Worker::new(
             engine,
@@ -1163,6 +1206,40 @@ async fn test_batch_not_included_is_requeued_only_after_the_operator_authorizati
     assert_eq!(settled.contract_charge_id, charge.contract_charge_id);
     assert_eq!(w.balance(&x).await, (70, 0));
     assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+/// The inclusion bid per operation of a sent fee bump: its fee less the
+/// inner resource fee, over the inner operation and the fee bump.
+fn bid_of(envelope: &TransactionEnvelope) -> i64 {
+    let TransactionEnvelope::TxFeeBump(bump) = envelope else { panic!("not a fee bump") };
+    let TransactionExt::V1(data) = &inner(envelope).ext else { panic!("not assembled") };
+    (bump.tx.fee - data.resource_fee) / 2
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_batch_rebuilt_after_its_envelope_expired_bids_twice_as_much(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 1);
+    let sends_before = w.stellar.sent().len();
+    worker.step().await.unwrap();
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.settle(&worker).await;
+    // Requeued once the batch's authorization lapsed, and sent again.
+    w.stellar.set_latest(START_LEDGER + OPERATOR_LEDGERS + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
+    // The next batch, after one that landed, bids from the market again.
+    let later = w.charge(&x, 10, "c-2").await;
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&later.charge_id).await.state(), ChargeState::Charged);
+    let bids: Vec<i64> = w.stellar.sent()[sends_before..].iter().map(bid_of).collect();
+    assert_eq!(bids, [100, 200, 100]);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

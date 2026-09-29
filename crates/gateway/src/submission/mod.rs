@@ -19,8 +19,16 @@
 //!
 //! One source account has at most one envelope in flight (enforced by a
 //! unique index), because the network accepts only the next sequence number.
+//!
+//! An envelope's fee and time bounds are fixed when it is built. Its
+//! inclusion bid follows the recent market and is raised after an envelope
+//! expired unincluded ([`fees`]). Its upper time bound comes from the local
+//! clock, so no envelope is built while that clock disagrees with the latest
+//! ledger's close time by more than the policy allows; that check only
+//! gates building, and proves nothing about any envelope's outcome.
 
 pub mod chain;
+pub mod fees;
 
 use std::time::Duration;
 
@@ -41,6 +49,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub use chain::{Chain, SourceSequence};
+pub use fees::{Bid, FeePolicy, FeePolicyError};
 
 /// Where the engine reads the current time; tests control it to reach the
 /// end of a validity window without waiting.
@@ -123,12 +132,17 @@ pub struct Keys {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
-    /// Inclusion bid per operation, in stroops.
-    pub inclusion_fee: u32,
+    /// How each envelope's inclusion bid is chosen.
+    pub fees: FeePolicy,
     /// Headroom over the simulated resource fee; unused fee is refunded.
     pub resource_fee_margin_percent: u8,
     /// How long an envelope may be included after it is built.
     pub validity: Duration,
+    /// Largest difference between the local clock and the latest ledger's
+    /// close time at which envelopes are still built. Keep it well below
+    /// `validity`: a clock that far behind builds envelopes whose window has
+    /// already closed on the network.
+    pub max_clock_skew: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,6 +161,11 @@ pub enum EngineError {
     Signing(#[source] SigningError),
     #[error("network request failed before anything was installed")]
     Chain(#[source] RpcError),
+    #[error(
+        "local clock reads {local}, but ledger {ledger} closed at {ledger_close}: \
+         more than {bound_secs}s apart, so no envelope is built until they agree"
+    )]
+    ClockSkew { local: i64, ledger: u32, ledger_close: i64, bound_secs: u64 },
     #[error("database operation `{operation}` failed")]
     Store {
         operation: &'static str,
@@ -172,6 +191,8 @@ struct Slot {
     sequence: i64,
     valid_until: OffsetDateTime,
     valid_until_unix: u64,
+    /// Inclusion bid per operation, in stroops.
+    inclusion_fee: u32,
 }
 
 /// A signed, fee-bumped envelope not yet recorded.
@@ -303,13 +324,13 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         function: HostFunction,
         auth: Vec<SorobanAuthorizationEntry>,
     ) -> Result<Prepared, EngineError> {
-        let slot = self.next_slot().await?;
+        let slot = self.next_slot(kind).await?;
         let unassembled = soroban::invocation_transaction(
             &slot.source,
             slot.sequence,
             function,
             auth,
-            self.policy.inclusion_fee,
+            slot.inclusion_fee,
             slot.valid_until_unix,
         )
         .map_err(EngineError::Assembly)?;
@@ -344,11 +365,11 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// simulation named, with the resources that simulation returned. It is
     /// recorded and sent like any other submission.
     pub async fn prepare_restore(&self, restore: &Restore) -> Result<Prepared, EngineError> {
-        let slot = self.next_slot().await?;
+        let slot = self.next_slot(Kind::Restore).await?;
         let unassembled = soroban::restore_transaction(
             &slot.source,
             slot.sequence,
-            self.policy.inclusion_fee,
+            slot.inclusion_fee,
             slot.valid_until_unix,
         );
         let tx = soroban::assemble(
@@ -361,11 +382,12 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         self.seal(Kind::Restore, slot, tx)
     }
 
-    async fn next_slot(&self) -> Result<Slot, EngineError> {
+    async fn next_slot(&self, kind: Kind) -> Result<Slot, EngineError> {
         let source = self.keys.source.address();
         if let Some(id) = self.in_flight(&source).await? {
             return Err(EngineError::SourceBusy { account: source, id });
         }
+        self.check_clock().await?;
         let current = self
             .chain
             .account_sequence(&source)
@@ -380,15 +402,108 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             .saturating_add(i64::try_from(self.policy.validity.as_secs()).unwrap_or(i64::MAX));
         let valid_until = OffsetDateTime::from_unix_timestamp(valid_until_unix)
             .map_err(|_| EngineError::Corrupt("validity window beyond the representable range"))?;
+        let inclusion_fee = self.inclusion_bid(kind, &source, current + 1).await?;
         Ok(Slot {
             source,
             sequence: current + 1,
             valid_until,
             valid_until_unix: u64::try_from(valid_until_unix).unwrap_or(0),
+            inclusion_fee,
         })
     }
 
+    /// Refuses to go on while the local clock, which sets the envelope's
+    /// upper time bound, is further from the latest ledger's close time than
+    /// the policy allows. A node lagging behind the network looks the same
+    /// as a local clock running ahead; either way nothing is built until the
+    /// two agree again.
+    async fn check_clock(&self) -> Result<(), EngineError> {
+        let ledger = self.chain.latest_ledger_info().await.map_err(EngineError::Chain)?;
+        let local = self.clock.now().unix_timestamp();
+        let bound_secs = self.policy.max_clock_skew.as_secs();
+        if local.abs_diff(ledger.close_time) > bound_secs {
+            return Err(EngineError::ClockSkew {
+                local,
+                ledger: ledger.sequence,
+                ledger_close: ledger.close_time,
+                bound_secs,
+            });
+        }
+        Ok(())
+    }
+
+    /// The inclusion bid for the next envelope from `source`, logged with
+    /// what it was chosen from. An unreadable fee market is not an error:
+    /// the bid then rests on the floor and the escalation alone.
+    async fn inclusion_bid(
+        &self,
+        kind: Kind,
+        source: &AccountAddress,
+        sequence: i64,
+    ) -> Result<u32, EngineError> {
+        let fees = self.policy.fees;
+        let market = match self.chain.fee_stats().await {
+            Ok(stats) => Some(stats.soroban_inclusion_fee.at(fees.percentile)),
+            Err(error) => {
+                tracing::warn!(error = %error, "fee statistics unavailable; bidding without the market");
+                None
+            }
+        };
+        let bid = fees.bid(market, self.expired_bid(source).await?);
+        tracing::info!(
+            kind = kind.as_str(),
+            source = %source,
+            sequence,
+            bid = bid.stroops,
+            market = ?bid.market,
+            percentile = %fees.percentile,
+            escalated_from = ?bid.escalated_from,
+            floor = fees.floor,
+            cap = fees.cap,
+            "inclusion bid per operation"
+        );
+        if bid.capped() {
+            tracing::warn!(
+                wanted = bid.wanted,
+                cap = fees.cap,
+                "inclusion bid held at the cap; the envelope may not be included while fees stay this high"
+            );
+        }
+        Ok(bid.stroops)
+    }
+
+    /// The bid of `source`'s latest envelope, if that envelope expired
+    /// without being included. Identifiers are time-ordered (UUIDv7), and a
+    /// source's next envelope is built only once the previous one is final,
+    /// so the highest identifier is the latest envelope; reading it walks the
+    /// primary key backwards instead of scanning the source's history.
+    async fn expired_bid(&self, source: &AccountAddress) -> Result<Option<u32>, EngineError> {
+        let latest = sqlx::query!(
+            r#"
+            SELECT state, envelope_xdr FROM pay_stellar.submissions
+            WHERE network = $1 AND source_address = $2
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+            self.network.caip2(),
+            source.as_str(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store("read the latest submission"))?;
+        let Some(latest) = latest.filter(|row| row.state == State::Expired.as_str()) else {
+            return Ok(None);
+        };
+        match TransactionEnvelope::from_xdr_base64(&latest.envelope_xdr, Limits::none()) {
+            Ok(TransactionEnvelope::TxFeeBump(bump)) => soroban::fee_bump_inclusion_fee(&bump.tx)
+                .map(Some)
+                .ok_or(EngineError::Corrupt("expired envelope's fee is not one the engine builds")),
+            _ => Err(EngineError::Corrupt("installed envelope does not decode")),
+        }
+    }
+
     fn seal(&self, kind: Kind, slot: Slot, tx: Transaction) -> Result<Prepared, EngineError> {
+        let inclusion_fee = slot.inclusion_fee;
         let inner_hash =
             transaction::transaction_hash(&tx, self.network).map_err(EngineError::Signing)?;
         let TransactionEnvelope::Tx(inner) =
@@ -397,9 +512,8 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         else {
             unreachable!("transaction::sign produces a v1 envelope")
         };
-        let bump =
-            soroban::fee_bump(inner, &self.keys.fee_source.address(), self.policy.inclusion_fee)
-                .map_err(EngineError::Assembly)?;
+        let bump = soroban::fee_bump(inner, &self.keys.fee_source.address(), inclusion_fee)
+            .map_err(EngineError::Assembly)?;
         let outer_hash =
             soroban::fee_bump_hash(&bump, self.network).map_err(EngineError::Assembly)?;
         let envelope = soroban::sign_fee_bump(bump, self.network, &self.keys.fee_source)

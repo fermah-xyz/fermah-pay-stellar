@@ -8,9 +8,9 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
-use fermah_pay_stellar_chain::rpc::RpcClient;
+use fermah_pay_stellar_chain::rpc::{FeePercentile, RpcClient};
 use fermah_pay_stellar_domain::Network;
-use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy, SystemClock};
+use fermah_pay_stellar_gateway::submission::{Engine, FeePolicy, Keys, Policy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
 use fermah_pay_stellar_gateway::{shutdown, startup};
 use sqlx::postgres::PgPoolOptions;
@@ -40,14 +40,27 @@ struct Config {
     /// serves exactly the deployments bound with this operator.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_KEY_FILE")]
     operator_key_file: PathBuf,
-    /// Inclusion bid per operation, in stroops.
+    /// Lowest inclusion bid per operation, in stroops. An envelope bids more
+    /// when recent fees, or the expiry of the previous envelope, call for it.
     #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE", default_value = "10000")]
     inclusion_fee: u32,
+    /// Highest inclusion bid per operation, in stroops. Set it equal to the
+    /// lowest for a fixed bid.
+    #[arg(long, env = "PAY_STELLAR_MAX_INCLUSION_FEE", default_value = "1000000")]
+    max_inclusion_fee: u32,
+    /// Percentile of recent Soroban inclusion fees to bid at: 10 to 90 in
+    /// steps of 10, 95, 99 or max.
+    #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE_PERCENTILE", default_value = "90")]
+    inclusion_fee_percentile: FeePercentile,
     #[arg(long, env = "PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT", default_value = "20")]
     resource_fee_margin_percent: u8,
     /// Seconds a transaction may be included after it is built.
     #[arg(long, env = "PAY_STELLAR_TRANSACTION_VALIDITY_SECS", default_value = "60")]
     transaction_validity_secs: u64,
+    /// Seconds the local clock may differ from the latest ledger's close time
+    /// before the worker stops building transactions; below the validity.
+    #[arg(long, env = "PAY_STELLAR_MAX_CLOCK_SKEW_SECS", default_value = "20")]
+    max_clock_skew_secs: u64,
     /// Ledgers the operator's authorization of a batch stays valid.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS", default_value = "24")]
     operator_authorization_ledgers: u32,
@@ -95,6 +108,15 @@ async fn main() -> anyhow::Result<()> {
     if config.max_batch == 0 || config.max_batch > MAX_BATCH {
         bail!("max batch must be between 1 and {MAX_BATCH}");
     }
+    if config.max_clock_skew_secs >= config.transaction_validity_secs {
+        bail!("max clock skew must be below the transaction validity");
+    }
+    let fees = FeePolicy::new(
+        config.inclusion_fee,
+        config.max_inclusion_fee,
+        config.inclusion_fee_percentile,
+    )
+    .context("inclusion fee settings")?;
     let keys = Keys {
         source: read_key(&config.source_key_file)?,
         fee_source: read_key(&config.fee_source_key_file)?,
@@ -112,7 +134,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         network = %config.network,
         source = %keys.source.address(),
+        fee_source = %keys.fee_source.address(),
         operator = %operator.address(),
+        inclusion_fee_floor = fees.floor,
+        inclusion_fee_cap = fees.cap,
+        inclusion_fee_percentile = %fees.percentile,
         "worker starting"
     );
     let engine = Engine::new(
@@ -122,9 +148,10 @@ async fn main() -> anyhow::Result<()> {
         config.network,
         keys,
         Policy {
-            inclusion_fee: config.inclusion_fee,
+            fees,
             resource_fee_margin_percent: config.resource_fee_margin_percent,
             validity: Duration::from_secs(config.transaction_validity_secs),
+            max_clock_skew: Duration::from_secs(config.max_clock_skew_secs),
         },
     );
     let worker = Worker::new(

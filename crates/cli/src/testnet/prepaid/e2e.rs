@@ -17,7 +17,7 @@ use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::onboarding::onboard_buyers;
 use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{ChargeRequest, MAX_BATCH, account_balance, charge_record};
-use fermah_pay_stellar_chain::rpc::hex_lower;
+use fermah_pay_stellar_chain::rpc::{FeePercentile, hex_lower};
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
 };
@@ -27,7 +27,9 @@ use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::Store;
-use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy as EnginePolicy, SystemClock};
+use fermah_pay_stellar_gateway::submission::{
+    Engine, FeePolicy, Keys, Policy as EnginePolicy, SystemClock,
+};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
@@ -155,9 +157,16 @@ impl Context {
                 fee_source: self.profile.key(FEE_SOURCE)?,
             },
             EnginePolicy {
-                inclusion_fee: self.policy.inclusion_fee,
+                // The worker's own defaults: bid from the market, never
+                // below the profile's fee nor above a hundred times it.
+                fees: FeePolicy::new(
+                    self.policy.inclusion_fee,
+                    self.policy.inclusion_fee.saturating_mul(100),
+                    FeePercentile::P90,
+                )?,
                 resource_fee_margin_percent: 20,
                 validity: Duration::from_secs(60),
+                max_clock_skew: Duration::from_secs(20),
             },
         );
         let worker = Worker::new(
