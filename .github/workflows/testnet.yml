@@ -1,29 +1,43 @@
 name: testnet
 
-# Exercises the live Stellar testnet. Manual and weekly rather than per push:
-# it depends on public infrastructure (RPC, Friendbot) outside this repository.
+# Exercises the live Stellar testnet. It depends on public infrastructure
+# (RPC, Friendbot) outside this repository, so it runs when the code that
+# reaches the network changes on main, on demand, and on a pull request only
+# when the `testnet` label is set.
 on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - contracts/**
+      - proto/**
+      - db/**
+      - Cargo.lock
+      - .github/workflows/testnet.yml
+  pull_request:
+    types: [labeled, synchronize]
   workflow_dispatch:
-  schedule:
-    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  SQLX_OFFLINE: "true"
 
 jobs:
   onboarding:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p fermah-pay-stellar-chain --test testnet_onboarding --locked -- --ignored
       - name: Record sponsored onboarding evidence
         run: |
@@ -33,5 +47,92 @@ jobs:
             > evidence/buyer-onboarding.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: testnet-evidence
+          name: testnet-onboarding-evidence
+          path: evidence/
+
+  # A seller's flow through the gateway API against the recorded prepaid
+  # ledger deployment, with the gateway and settlement worker in-process.
+  end-to-end:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: testnet
+    # Every run submits from the same testnet accounts, whose sequence numbers
+    # only one run at a time may advance.
+    concurrency:
+      group: testnet-end-to-end
+      cancel-in-progress: false
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: pay_stellar_owner
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: pay_stellar
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U pay_stellar_owner -d pay_stellar"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build
+        run: cargo build --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-testnet
+      # Keys go to files outside the workspace with mode 0600, never to the
+      # log or to the evidence directory.
+      - name: Write the testnet profile
+        env:
+          OPERATOR_SPONSOR: ${{ secrets.TESTNET_OPERATOR_SPONSOR_SECRET }}
+          SUBMITTER: ${{ secrets.TESTNET_SUBMITTER_SECRET }}
+          FEE_SOURCE: ${{ secrets.TESTNET_FEE_SOURCE_SECRET }}
+          OPERATOR: ${{ secrets.TESTNET_OPERATOR_SECRET }}
+          USDC_RESERVE: ${{ secrets.TESTNET_USDC_RESERVE_SECRET }}
+          DEPLOYMENT: ${{ vars.TESTNET_DEPLOYMENT_JSON }}
+        run: |
+          umask 077
+          profile="$RUNNER_TEMP/testnet-profile"
+          mkdir -p "$profile/buyers"
+          printf '%s' "$OPERATOR_SPONSOR" > "$profile/operator-sponsor.secret"
+          printf '%s' "$SUBMITTER" > "$profile/submitter.secret"
+          printf '%s' "$FEE_SOURCE" > "$profile/fee-source.secret"
+          printf '%s' "$OPERATOR" > "$profile/operator.secret"
+          printf '%s' "$USDC_RESERVE" > "$profile/usdc-reserve.secret"
+          printf '%s' "$DEPLOYMENT" > "$profile/deployment.json"
+          echo "PAY_STELLAR_TESTNET_PROFILE=$profile" >> "$GITHUB_ENV"
+      - name: Run end to end
+        env:
+          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+        run: |
+          ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence end-to-end
+      - name: Summarise the transactions
+        if: always()
+        run: |
+          record=$(ls evidence/*api-end-to-end.json 2>/dev/null | head -1)
+          [ -n "$record" ] || { echo "No evidence record was written." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## End to end on Stellar testnet"
+            echo
+            echo "| Step | Transaction |"
+            echo "|---|---|"
+            jq -r '
+              def link(h): "[\(h[0:12])…](https://stellar.expert/explorer/testnet/tx/\(h))";
+              "| Buyer created with 0 XLM | \(link(.onboarding_transaction)) |",
+              "| Buyer funded with Circle USDC | \(link(.funding_transaction)) |",
+              "| Deposit, signed by the buyer | \(link(.deposit.transaction_hash)) |",
+              (.charges[] | "| Charge \(.sequence) (\(.amount) units) | \(link(.transaction_hash)) |"),
+              "| Retried charge | returned the original charge (created: \(.retried_charge.created)) |",
+              "| Replayed sequence sent to the contract | \(.contract_replay.result) |",
+              "| Final balance | gateway \(.observed.gateway_available), contract \(.observed.contract_balance) |"
+            ' "$record"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: testnet-end-to-end-evidence
           path: evidence/

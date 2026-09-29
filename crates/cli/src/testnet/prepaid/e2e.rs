@@ -16,9 +16,11 @@ use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::onboarding::onboard_buyers;
 use fermah_pay_stellar_chain::payments::payments_transaction;
-use fermah_pay_stellar_chain::prepaid::account_state;
+use fermah_pay_stellar_chain::prepaid::{ChargeRequest, account_state};
 use fermah_pay_stellar_chain::rpc::hex_lower;
-use fermah_pay_stellar_chain::stellar_xdr::{Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr};
+use fermah_pay_stellar_chain::stellar_xdr::{
+    HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
+};
 use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{transaction, usdc};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
@@ -389,6 +391,33 @@ impl Context {
             account == (i128::from(expected), 3),
             "contract account {account:?}, expected balance {expected} after sequence 3"
         );
+        // The contract's own replay protection, independent of the gateway:
+        // sequence 1 is consumed, so the same charge sent straight to the
+        // contract is refused. Only simulated; nothing is submitted.
+        let replay =
+            ChargeRequest { owner: buyer.address(), seq: 1, amount: i128::from(CHARGES[0]) };
+        let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
+        let operator = self.profile.key("operator")?;
+        let submitter = self.submitter(&source, &fee_source);
+        let function = HostFunction::InvokeContract(pinned.charge_call(&replay));
+        let tree = pinned.charge_authorization(&replay);
+        let replay_refusal = match self.authorize(&submitter, &function, &[(&operator, tree)]).await
+        {
+            Ok(_) => bail!("the contract accepted a replay of charge sequence 1"),
+            Err(error) => format!("{error:#}"),
+        };
+        ensure!(
+            replay_refusal.contains("Error(Contract, #110)"),
+            "the replay was refused for another reason: {replay_refusal}"
+        );
+        let after_replay = self
+            .rpc
+            .get_ledger_entries(&[pinned.account_key(&buyer.address())])
+            .await?
+            .first()
+            .and_then(|record| account_state(&record.data));
+        ensure!(after_replay == Some(account), "the refused replay changed the account");
+
         let after = balances(&self.rpc, &buyer.address(), &asset).await?;
         ensure!(
             after.xlm_stroops == Some(0),
@@ -401,7 +430,7 @@ impl Context {
         batches.dedup();
         Ok(json!({
             "criterion": "api-end-to-end",
-            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, and the gateway balance equals the contract balance",
+            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge sequence, and the gateway balance equals the contract balance",
             "contract": contract,
             "buyer": buyer.address().to_string(),
             "onboarding_transaction": hex_lower(&onboarding.transaction_hash),
@@ -425,6 +454,11 @@ impl Context {
                 "same_charge": retried.charge_id == charge_ids[0],
             },
             "conflicting_reuse": conflict.message(),
+            "contract_replay": {
+                "sequence": 1,
+                "result": "refused before submission as DuplicateCharge (contract error 110)",
+                "account_unchanged": true,
+            },
             "observed": {
                 "gateway_available": balance.available,
                 "gateway_pending": balance.pending_charges,
