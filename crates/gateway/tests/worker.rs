@@ -391,6 +391,21 @@ impl Stellar {
     /// Someone else includes the call and authorizations of `envelope` in a
     /// transaction of their own: the contract state changes, this gateway's
     /// source sequence does not.
+    /// Logs a `charges` event in which the contract answered `expired` for
+    /// the first charge `envelope` carries, as a sender naming the same
+    /// charge with an earlier last ledger would see.
+    fn log_expired_answer(&self, envelope: &TransactionEnvelope) {
+        let (call, _, _) = invocation(envelope);
+        let ScVal::Vec(Some(ScVec(charges))) = &call.args.as_slice()[0] else { panic!("charges") };
+        let ScVal::Vec(Some(ScVec(fields))) = &charges[0] else { panic!("charge") };
+        let entry = ScVal::Vec(Some(ScVec(
+            vec![fields[0].clone(), fields[1].clone(), fields[2].clone(), ScVal::U32(4)]
+                .try_into()
+                .unwrap(),
+        )));
+        self.with(|n| n.log_charges(ScVal::Vec(Some(ScVec(vec![entry].try_into().unwrap())))));
+    }
+
     fn include_elsewhere(&self, envelope: &TransactionEnvelope) {
         let (call, auth, _) = invocation(envelope);
         let operator = self.operator.clone();
@@ -1455,6 +1470,31 @@ async fn test_batch_applied_elsewhere_and_decided_late_is_settled_from_its_event
     let charge = w.charge(&x, 30, "c-1").await;
     let worker = w.worker();
     decided_after_records_lapse(&w, &worker, &charge, true).await;
+    w.settle(&worker).await;
+    let settled = w.get_charge(&charge.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!(w.balance(&x).await, (70, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_expired_answer_before_the_settlement_does_not_refund_the_charge(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    let batch = w.stellar.sent().last().unwrap().clone();
+    // An `expired` answer debits nothing and records nothing; the batch
+    // applied afterwards is the charge's settlement.
+    w.stellar.log_expired_answer(&batch);
+    w.stellar.include_elsewhere(&batch);
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.stellar.set_latest(charge.last_ledger + CHARGE_RECORD_GRACE + 1);
     w.settle(&worker).await;
     let settled = w.get_charge(&charge.charge_id).await;
     assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));

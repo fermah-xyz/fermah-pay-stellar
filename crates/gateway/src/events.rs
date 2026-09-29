@@ -9,7 +9,9 @@
 
 use std::future::Future;
 
-use fermah_pay_stellar_chain::prepaid::{ChainAddress, ChargeEntry, LedgerEvent, ledger_event};
+use fermah_pay_stellar_chain::prepaid::{
+    ChainAddress, ChargeEntry, LedgerEvent, Outcome, ledger_event,
+};
 use fermah_pay_stellar_chain::rpc::{
     EventCursor, EventPage, EventsFrom, Health, RpcClient, RpcError,
 };
@@ -52,6 +54,21 @@ pub struct FoundEntry {
     pub event: EventCursor,
     pub ledger: u32,
     pub transaction_hash: [u8; 32],
+}
+
+impl FoundEntry {
+    /// Whether the contract settled the charge in this entry. A `duplicate`
+    /// or `expired` answer debits nothing and records nothing, whoever sent
+    /// it, so it is never the charge's settlement.
+    #[must_use]
+    pub const fn settles(&self) -> bool {
+        !matches!(self.entry.outcome, Outcome::Duplicate | Outcome::Expired)
+    }
+
+    #[must_use]
+    pub fn is_duplicate(&self) -> bool {
+        self.entry.outcome == Outcome::Duplicate
+    }
 }
 
 /// What reading a range of the contract's events established.

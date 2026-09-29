@@ -39,7 +39,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::events::{ChargeSearch, search_charge};
+use crate::events::{ChargeSearch, FoundEntry, search_charge};
 use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
 
 #[derive(Clone, Copy, Debug)]
@@ -483,10 +483,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             ChargeSearch::Complete { entries, .. } => entries,
         };
         // Inside the range the contract answers `duplicate` only while the
-        // charge's record lives, which an earlier entry created.
-        let Some(found) = entries.iter().find(|found| found.entry.outcome != Outcome::Duplicate)
-        else {
-            return Ok(Some(if entries.is_empty() {
+        // charge's record lives, which an earlier entry created; with no
+        // settling entry, a duplicate answer means part of the story is
+        // missing. `expired` answers change nothing.
+        let Some(found) = entries.iter().find(|found| found.settles()) else {
+            return Ok(Some(if !entries.iter().any(FoundEntry::is_duplicate) {
                 ChargeDecision::Refused(Outcome::Expired)
             } else {
                 ChargeDecision::Quarantine {

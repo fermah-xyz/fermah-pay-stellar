@@ -349,11 +349,15 @@ pub async fn prove_from_events<L: EventLog>(
         "events of contract {} in ledgers {from} to {to}, read from a node retaining ledgers from {oldest}",
         stellar_strkey::Contract(charge.deployment.contract).to_string()
     );
-    let Some(found) = entries.iter().find(|found| found.entry.outcome != Outcome::Duplicate) else {
-        return match entries.first() {
+    // `expired` answers change nothing; a `duplicate` answer with no
+    // settling entry in the range contradicts the search.
+    let Some(found) = entries.iter().find(|found| found.settles()) else {
+        return match entries.iter().find(|found| found.is_duplicate()) {
             None => Ok((
                 Resolution::Expired,
-                format!("{searched}: no entry for charge {shown_charge}; its last ledger is {to}"),
+                format!(
+                    "{searched}: no entry settling charge {shown_charge}; its last ledger is {to}"
+                ),
             )),
             Some(duplicate) => Err(QuarantineError::NotSettled {
                 hash: hex_lower(&duplicate.transaction_hash),
