@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_gateway::config::Config;
-use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LedgerApi};
+use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::store::Store;
@@ -31,8 +31,9 @@ async fn main() -> anyhow::Result<()> {
         store.clone(),
         rpc,
         config.network,
-        DepositPolicy {
+        LedgerPolicy {
             authorization_validity_ledgers: config.deposit_authorization_ledgers.get(),
+            charge_validity_ledgers: config.charge_validity_ledgers,
         },
     );
     let listener = TcpListener::bind(config.listen_addr)

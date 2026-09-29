@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT c.id, c.buyer_id, c.amount, c.sequence, c.state, c.outcome, c.created_at,\n                   s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.charges c\n            LEFT JOIN pay_stellar.submissions s ON s.id = c.submission_id\n            WHERE c.seller_deployment_id = $1 AND c.network = $2\n              AND (c.id = $3 OR c.idempotency_key = $4)\n            ",
+  "query": "\n            SELECT c.id, c.buyer_id, c.amount, c.charge_id, c.last_ledger, c.state, c.outcome,\n                   c.created_at,\n                   s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.charges c\n            LEFT JOIN pay_stellar.submissions s ON s.id = c.submission_id\n            WHERE c.seller_deployment_id = $1 AND c.network = $2\n              AND (c.id = $3 OR c.idempotency_key = $4)\n            ",
   "describe": {
     "columns": [
       {
@@ -38,17 +38,28 @@
       },
       {
         "ordinal": 3,
-        "name": "sequence",
-        "type_info": "Int8",
+        "name": "charge_id",
+        "type_info": "Bytea",
         "origin": {
           "Table": {
             "table": "pay_stellar.charges",
-            "name": "sequence"
+            "name": "charge_id"
           }
         }
       },
       {
         "ordinal": 4,
+        "name": "last_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.charges",
+            "name": "last_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "state",
         "type_info": "Text",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "outcome",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "outer_hash?",
         "type_info": "Bytea",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "ledger?",
         "type_info": "Int4",
         "origin": {
@@ -117,11 +128,12 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       true,
       true
     ]
   },
-  "hash": "8923bcf7458c8d1202504d1364a54fe78faed2f863d9e5c5a735dc60c2d3015f"
+  "hash": "e08bc1a017ff7da32c239538adc5968ebf24a99a59ebe5807e018110ac435f8f"
 }

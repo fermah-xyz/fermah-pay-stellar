@@ -1,6 +1,6 @@
 //! Settlement worker against real PostgreSQL, with the API and the worker
 //! under their production roles, and a scripted network that applies the
-//! prepaid contract's rules: per-account charge sequences, per-owner deposit
+//! prepaid contract's rules: expiring per-charge records, per-owner deposit
 //! markers, single-use authorization nonces and expiring signatures. The
 //! script can lose a send, include a transaction as failed, or include a
 //! broadcast authorization through someone else's transaction.
@@ -17,24 +17,28 @@ use common::{Harness, Ledger, Tenant, authed, pool_as, start_with};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::{Outcome, PrepaidDeployment};
+use fermah_pay_stellar_chain::prepaid::{
+    CHARGE_RECORD_GRACE, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
+};
 use fermah_pay_stellar_chain::rpc::{
     IncludedTransaction, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
     Simulation, SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType,
-    ContractEventV0, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction,
-    Int128Parts, InvokeContractArgs, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt,
-    LedgerFootprint, LedgerKey, LedgerKeyContractData, Limits, OperationBody, OperationMetaV2,
-    ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizationEntry,
-    SorobanCredentials, SorobanResources, SorobanTransactionData, SorobanTransactionDataExt,
-    SorobanTransactionMetaExt, SorobanTransactionMetaV2, Transaction, TransactionEnvelope,
-    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
-    TransactionResultResult, VecM, WriteXdr,
+    ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
+    ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction, Int128Parts,
+    InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt,
+    LedgerFootprint, LedgerKey, LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation,
+    OperationBody, OperationMetaV2, Preconditions, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol,
+    ScVal, ScVec, SequenceNumber, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources,
+    SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
+    SorobanTransactionMetaV2, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
+    TransactionMetaV4, TransactionResult, TransactionResultExt, TransactionResultResult,
+    TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
-use fermah_pay_stellar_chain::transaction::address_of;
+use fermah_pay_stellar_chain::transaction::{account_id, address_of};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::LatestLedger;
@@ -66,8 +70,10 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 struct ContractState {
-    /// owner -> (balance, last consumed charge sequence)
-    accounts: HashMap<AccountAddress, (i128, u64)>,
+    /// owner -> balance
+    accounts: HashMap<AccountAddress, i128>,
+    /// Settled charge records: outcome code and the last ledger they live.
+    records: HashMap<(AccountAddress, [u8; 32]), (u32, u32)>,
     deposits: HashSet<(AccountAddress, [u8; 32])>,
     /// USDC held by each wallet, which a deposit moves into the treasury.
     usdc: HashMap<AccountAddress, i128>,
@@ -86,6 +92,9 @@ struct Net {
     fail_inclusions: usize,
     /// `charge_batch` returns one outcome fewer than it settled.
     truncate_outcomes: bool,
+    /// `charge_batch` settles without leaving records, which the real
+    /// contract never does: a contradiction the worker must not guess past.
+    skip_records: bool,
     simulation_barrier: Option<Arc<Barrier>>,
     /// Buyer accounts whose contract entry is archived: any call touching one
     /// needs a restore first.
@@ -213,7 +222,7 @@ impl Net {
                     return Err("USDC balance too low".to_owned());
                 }
                 *held -= amount;
-                state.accounts.entry(owner).or_insert((0, 0)).0 += amount;
+                *state.accounts.entry(owner).or_insert(0) += amount;
                 Ok((state, ScVal::Void, None))
             }
             b"charge_batch" => {
@@ -223,26 +232,42 @@ impl Net {
                 let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
                 let mut outcomes = Vec::new();
                 let mut settled = Vec::new();
+                let now = self.latest;
                 for charge in charges.iter() {
                     let ScVal::Vec(Some(ScVec(fields))) = charge else { panic!("charge") };
                     let owner = owner_of(&fields[0]);
-                    let ScVal::U64(seq) = fields[1] else { panic!("seq") };
+                    let ScVal::Bytes(id) = &fields[1] else { panic!("charge id") };
+                    let id: [u8; 32] = id.as_slice().try_into().unwrap();
                     let amount = i128_of(&fields[2]);
-                    let code = match state.accounts.get_mut(&owner) {
-                        None => 5,
-                        Some((_, consumed)) if seq <= *consumed => 3,
-                        Some((_, consumed)) if seq != *consumed + 1 => 4,
-                        Some((balance, consumed)) => {
-                            *consumed = seq;
-                            if amount > MAX_CHARGE {
-                                2
-                            } else if amount > *balance {
-                                1
-                            } else {
+                    let ScVal::U32(last_ledger) = fields[3] else { panic!("last ledger") };
+                    if last_ledger > now + MAX_CHARGE_WINDOW {
+                        return Err("Error(Contract, #118)".to_owned());
+                    }
+                    let recorded = state
+                        .records
+                        .get(&(owner.clone(), id))
+                        .is_some_and(|(_, live_until)| *live_until >= now);
+                    let code = if recorded {
+                        3
+                    } else if last_ledger < now {
+                        4
+                    } else {
+                        let code = match state.accounts.get_mut(&owner) {
+                            None => 5,
+                            Some(_) if amount > MAX_CHARGE => 2,
+                            Some(balance) if amount > *balance => 1,
+                            Some(balance) => {
                                 *balance -= amount;
                                 0
                             }
+                        };
+                        if !self.skip_records {
+                            state.records.insert(
+                                (owner.clone(), id),
+                                (code, last_ledger + CHARGE_RECORD_GRACE),
+                            );
                         }
+                        code
                     };
                     outcomes.push(ScVal::U32(code));
                     settled.push(ScVal::Vec(Some(ScVec(
@@ -341,7 +366,7 @@ impl Stellar {
         self.with(|n| n.latest)
     }
 
-    fn account(&self, owner: &AccountAddress) -> Option<(i128, u64)> {
+    fn account(&self, owner: &AccountAddress) -> Option<i128> {
         self.with(|n| n.state.accounts.get(owner).copied())
     }
 
@@ -511,8 +536,11 @@ impl Chain for Stellar {
             });
         }
         let contract_data = |key: &LedgerKey, val: ScVal| {
-            let LedgerKey::ContractData(LedgerKeyContractData { contract, key: data_key, .. }) =
-                key
+            let LedgerKey::ContractData(LedgerKeyContractData {
+                contract,
+                key: data_key,
+                durability,
+            }) = key
             else {
                 unreachable!()
             };
@@ -522,7 +550,7 @@ impl Chain for Stellar {
                     ext: ExtensionPoint::V0,
                     contract: contract.clone(),
                     key: data_key.clone(),
-                    durability: ContractDataDurability::Persistent,
+                    durability: *durability,
                     val,
                 }),
                 ext: LedgerEntryExt::V0,
@@ -531,22 +559,22 @@ impl Chain for Stellar {
         };
         let state = self.with(|n| n.state.clone());
         let mut existing: HashMap<LedgerKey, ScVal> = HashMap::new();
-        for (owner, (balance, seq)) in &state.accounts {
+        let read_at = self.with(|n| n.latest - n.entries_behind);
+        for (owner, balance) in &state.accounts {
             let value = ScVal::Map(Some(ScMap(
-                vec![
-                    ScMapEntry {
-                        key: symbol("balance"),
-                        val: ScVal::I128(Int128Parts {
-                            hi: 0,
-                            lo: u64::try_from(*balance).unwrap(),
-                        }),
-                    },
-                    ScMapEntry { key: symbol("charge_seq"), val: ScVal::U64(*seq) },
-                ]
+                vec![ScMapEntry {
+                    key: symbol("balance"),
+                    val: ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(*balance).unwrap() }),
+                }]
                 .try_into()
                 .unwrap(),
             )));
             existing.insert(self.deployment.account_key(owner), value);
+        }
+        for ((owner, id), (code, live_until)) in &state.records {
+            if *live_until >= read_at {
+                existing.insert(self.deployment.charge_record_key(owner, id), ScVal::U32(*code));
+            }
         }
         for (owner, id) in &state.deposits {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
@@ -623,6 +651,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             drop_sends: 0,
             fail_inclusions: 0,
             truncate_outcomes: false,
+            skip_records: false,
             simulation_barrier: None,
             archived: HashSet::new(),
             entries_behind: 0,
@@ -858,7 +887,7 @@ async fn test_deposit_not_included_is_sent_again_and_credited_once(
     let settled = w.get_deposit(&deposit.deposit_id).await;
     assert_eq!(settled.state(), DepositState::Confirmed);
     assert_eq!(w.balance(&buyer).await, (100, 0));
-    assert_eq!(w.stellar.account(&buyer.key.address()), Some((100, 0)));
+    assert_eq!(w.stellar.account(&buyer.key.address()), Some(100));
     // The same signed entry went out again in a new transaction.
     let sent = w.stellar.sent();
     assert_eq!(sent.len(), 3);
@@ -893,7 +922,7 @@ async fn test_deposit_included_elsewhere_is_credited_once_from_the_contract_mark
     let settled = w.get_deposit(&deposit.deposit_id).await;
     assert_eq!(settled.state(), DepositState::Confirmed);
     assert_eq!(w.balance(&buyer).await, (100, 0));
-    assert_eq!(w.stellar.account(&buyer.key.address()), Some((100, 0)));
+    assert_eq!(w.stellar.account(&buyer.key.address()), Some(100));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1019,7 +1048,7 @@ async fn test_one_batch_charges_refunds_refusals_and_matches_the_contract(
     let z = w.funded("z", 100).await;
     // Z's on-chain balance drops below the gateway's view, as after a
     // withdrawal the gateway did not see.
-    w.stellar.with(|n| n.state.accounts.get_mut(&z.key.address()).unwrap().0 = 10);
+    w.stellar.with(|n| *n.state.accounts.get_mut(&z.key.address()).unwrap() = 10);
     let charged = w.charge(&x, 30, "c-x").await;
     let above = w.charge(&y, MAX_CHARGE as i64 + 10, "c-y").await;
     let short = w.charge(&z, 20, "c-z").await;
@@ -1045,40 +1074,62 @@ async fn test_one_batch_charges_refunds_refusals_and_matches_the_contract(
     assert_eq!(w.balance(&x).await, (70, 0));
     assert_eq!(w.balance(&y).await, (100, 0));
     assert_eq!(w.balance(&z).await, (100, 0));
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
-    assert_eq!(w.stellar.account(&y.key.address()), Some((100, 1)));
-    assert_eq!(w.stellar.account(&z.key.address()), Some((10, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+    assert_eq!(w.stellar.account(&y.key.address()), Some(100));
+    assert_eq!(w.stellar.account(&z.key.address()), Some(10));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_contradicting_answer_quarantines_and_blocks_only_that_buyer(
+async fn test_duplicate_answer_is_settled_from_the_charge_record(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-x1").await;
+    // The charge already landed through someone else's transaction: the
+    // contract debited it and recorded it as charged.
+    let id = hash_of(&charge.contract_charge_id);
+    w.stellar.with(|n| {
+        *n.state.accounts.get_mut(&x.key.address()).unwrap() -= 10;
+        n.state
+            .records
+            .insert((x.key.address(), id), (0, charge.last_ledger + CHARGE_RECORD_GRACE));
+    });
+    w.settle(&w.worker()).await;
+    let settled = w.get_charge(&charge.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!(w.balance(&x).await, (90, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(90));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_unknown_account_answer_is_quarantined_without_blocking_others(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = world(opts, connect).await;
     let x = w.funded("x", 100).await;
     let y = w.funded("y", 100).await;
-    // X's sequence 1 is already consumed on-chain.
-    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 1);
-    let duplicate = w.charge(&x, 10, "c-x1").await;
-    let fine = w.charge(&y, 10, "c-y1").await;
+    // Y's account is gone from the contract although a deposit created it.
+    w.stellar.with(|n| n.state.accounts.remove(&y.key.address()));
+    let lost = w.charge(&y, 10, "c-y1").await;
+    let fine = w.charge(&x, 10, "c-x1").await;
     let worker = w.worker();
     w.settle(&worker).await;
-    let quarantined = w.get_charge(&duplicate.charge_id).await;
+    let quarantined = w.get_charge(&lost.charge_id).await;
     assert_eq!(
         (quarantined.state(), quarantined.outcome.as_str()),
-        (ChargeState::Quarantined, "duplicate")
+        (ChargeState::Quarantined, "unknown_account")
     );
+    // The amount stays debited while an operator reviews; X is unaffected,
+    // and so are Y's other charges once the account is back.
+    assert_eq!(w.balance(&y).await, (90, 0));
     assert_eq!(w.get_charge(&fine.charge_id).await.state(), ChargeState::Charged);
-    // The amount stays debited while an operator reviews.
-    assert_eq!(w.balance(&x).await, (90, 0));
-
-    let blocked = w.charge(&x, 10, "c-x2").await;
+    w.stellar.with(|n| n.state.accounts.insert(y.key.address(), 100));
     let next = w.charge(&y, 10, "c-y2").await;
     w.settle(&worker).await;
-    assert_eq!(w.get_charge(&blocked.charge_id).await.state(), ChargeState::Admitted);
     assert_eq!(w.get_charge(&next.charge_id).await.state(), ChargeState::Charged);
-    assert_eq!(w.stellar.account(&x.key.address()), Some((100, 1)));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1109,13 +1160,13 @@ async fn test_batch_not_included_is_requeued_only_after_the_operator_authorizati
     w.settle(&worker).await;
     let settled = w.get_charge(&charge.charge_id).await;
     assert_eq!(settled.state(), ChargeState::Charged);
-    assert_eq!(settled.sequence, 1);
+    assert_eq!(settled.contract_charge_id, charge.contract_charge_id);
     assert_eq!(w.balance(&x).await, (70, 0));
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_batch_applied_elsewhere_is_quarantined_not_charged_again(
+async fn test_batch_applied_elsewhere_is_settled_from_its_records_not_charged_again(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1131,32 +1182,51 @@ async fn test_batch_applied_elsewhere_is_quarantined_not_charged_again(
     w.settle(&worker).await;
 
     let settled = w.get_charge(&charge.charge_id).await;
-    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Quarantined, ""));
-    let error = w.last_error("charges", &charge.charge_id).await.unwrap();
-    assert!(error.contains("consumed sequence 1"), "{error}");
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
     assert_eq!(w.balance(&x).await, (70, 0));
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_batch_answer_of_the_wrong_length_quarantines_every_charge(
+async fn test_unreadable_batch_answer_is_settled_from_the_records(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let w = world(opts, connect).await;
     let x = w.funded("x", 100).await;
     let first = w.charge(&x, 10, "c-1").await;
-    let second = w.charge(&x, 10, "c-2").await;
+    let above = w.charge(&x, MAX_CHARGE as i64 + 10, "c-2").await;
     w.stellar.with(|n| n.truncate_outcomes = true);
     w.settle(&w.worker()).await;
-    for charge in [first, second] {
-        assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
-    }
-    assert_eq!(w.balance(&x).await, (80, 0));
+    let first = w.get_charge(&first.charge_id).await;
+    let above = w.get_charge(&above.charge_id).await;
+    assert_eq!((first.state(), first.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!((above.state(), above.outcome.as_str()), (ChargeState::Refused, "above_limit"));
+    assert_eq!(w.balance(&x).await, (90, 0));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_batch_of_unknown_fate_is_decided_from_the_account_sequence(
+async fn test_applied_batch_without_records_is_quarantined(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-1").await;
+    // Included and successful, unreadable, and no record: the evidence
+    // contradicts itself, so nothing is guessed.
+    w.stellar.with(|n| {
+        n.truncate_outcomes = true;
+        n.skip_records = true;
+    });
+    w.settle(&w.worker()).await;
+    let quarantined = w.get_charge(&charge.charge_id).await;
+    assert_eq!(quarantined.state(), ChargeState::Quarantined);
+    assert_eq!(w.balance(&x).await, (90, 0));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_batch_of_unknown_fate_is_decided_from_the_charge_records(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1167,8 +1237,8 @@ async fn test_batch_of_unknown_fate_is_decided_from_the_account_sequence(
     w.stellar.with(|n| n.drop_sends = 2);
     worker.step().await.unwrap();
     // The source sequence moves past the batch although the batch is not
-    // found: the engine quarantines the submission. The contract still has
-    // the charge's sequence free, so the charge is settled again, once.
+    // found: the engine quarantines the submission. The contract holds no
+    // record of the charge, so it is sent again, and settled once.
     w.stellar.with(|n| n.source_sequence += 1);
     w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.stellar.set_latest(START_LEDGER + OPERATOR_LEDGERS + 1);
@@ -1182,7 +1252,71 @@ async fn test_batch_of_unknown_fate_is_decided_from_the_account_sequence(
     assert_eq!(quarantined, 1);
     assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
     assert_eq!(w.balance(&x).await, (70, 0));
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_charge_not_sent_before_its_last_ledger_is_refunded(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let sends = w.stellar.sent().len();
+    // Too close to its last ledger to be sure of landing in time: not sent,
+    // not yet refunded.
+    w.stellar.set_latest(charge.last_ledger - 1);
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Admitted);
+    assert_eq!(w.stellar.sent().len(), sends);
+    w.stellar.set_latest(charge.last_ledger + 1);
+    w.settle(&w.worker()).await;
+    let expired = w.get_charge(&charge.charge_id).await;
+    assert_eq!((expired.state(), expired.outcome.as_str()), (ChargeState::Refused, "expired"));
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(w.stellar.sent().len(), sends);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_batch_not_included_past_the_charges_last_ledger_is_refunded(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    // Past its last ledger while a record would still live: never applied.
+    w.stellar.set_latest(charge.last_ledger + 1);
+    w.settle(&worker).await;
+    let expired = w.get_charge(&charge.charge_id).await;
+    assert_eq!((expired.state(), expired.outcome.as_str()), (ChargeState::Refused, "expired"));
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(100));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_batch_decided_after_its_records_would_have_lapsed_is_quarantined(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    // No record now proves nothing: a record of an applied charge would
+    // have lapsed too.
+    w.stellar.set_latest(charge.last_ledger + CHARGE_RECORD_GRACE + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
+    assert_eq!(w.balance(&x).await, (70, 0));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1217,7 +1351,7 @@ async fn test_archived_buyer_account_is_restored_and_the_batch_settles(
     .await
     .unwrap();
     assert_eq!(kinds, ["restore", "charge_batch"]);
-    assert_eq!(w.stellar.account(&idle.key.address()), Some((90, 1)));
+    assert_eq!(w.stellar.account(&idle.key.address()), Some(90));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1239,11 +1373,11 @@ async fn test_restarted_worker_resends_the_recorded_batch_and_settles_it(
     let sent = w.stellar.sent();
     assert_eq!(sent.len(), sends_before + 2);
     assert_eq!(sent[sends_before], sent[sends_before + 1], "the same bytes are resent");
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_small_batches_keep_each_buyers_sequences_in_order(
+async fn test_batches_hold_at_most_the_configured_number_of_charges(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1259,8 +1393,15 @@ async fn test_small_batches_keep_each_buyers_sequences_in_order(
     for charge in &charges {
         assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
     }
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 3)));
-    assert_eq!(w.stellar.account(&y.key.address()), Some((90, 1)));
+    let batches: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pay_stellar.submissions WHERE kind = 'charge_batch'",
+    )
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(batches, 2);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+    assert_eq!(w.stellar.account(&y.key.address()), Some(90));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1290,7 +1431,7 @@ async fn test_two_workers_racing_for_one_batch_submit_it_once(
     w.settle(&first).await;
     w.settle(&second).await;
     assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
-    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
 }
 
 // ---- end to end -------------------------------------------------------------
@@ -1313,7 +1454,7 @@ async fn test_deposit_three_charges_and_a_retried_charge_end_in_matching_balance
         assert_eq!(w.get_charge(id).await.state(), ChargeState::Charged);
     }
     assert_eq!(w.balance(&buyer).await, (40, 0));
-    assert_eq!(w.stellar.account(&buyer.key.address()), Some((40, 3)));
+    assert_eq!(w.stellar.account(&buyer.key.address()), Some(40));
 }
 
 // ---- resolving quarantine ---------------------------------------------------
@@ -1343,8 +1484,13 @@ async fn test_quarantined_charges_are_resolved_from_the_contract_event(
     let x = w.funded("x", 100).await;
     let charged = w.charge(&x, 10, "c-1").await;
     let above = w.charge(&x, MAX_CHARGE as i64 + 10, "c-2").await;
-    // The return value is unusable, so both are quarantined, still debited.
-    w.stellar.with(|n| n.truncate_outcomes = true);
+    // The return value is unusable and no record was left, so both are
+    // quarantined, still debited; the batch's event still shows what the
+    // contract did.
+    w.stellar.with(|n| {
+        n.truncate_outcomes = true;
+        n.skip_records = true;
+    });
     w.settle(&w.worker()).await;
     assert_eq!(w.balance(&x).await, (100 - 10 - (MAX_CHARGE as i64 + 10), 0));
     let batch = w.get_charge(&charged.charge_id).await.transaction_hash;
@@ -1385,11 +1531,13 @@ async fn test_quarantined_charges_are_resolved_from_the_contract_event(
     .unwrap_err();
     assert!(matches!(again, QuarantineError::NotQuarantined(_)), "{again:?}");
     assert_eq!(w.balance(&x).await, (90, 0));
-    w.stellar.with(|n| n.truncate_outcomes = false);
+    w.stellar.with(|n| {
+        n.truncate_outcomes = false;
+        n.skip_records = false;
+    });
     let next = w.charge(&x, 5, "c-3").await;
     w.settle(&w.worker()).await;
-    let next = w.get_charge(&next.charge_id).await;
-    assert_eq!((next.state(), next.sequence), (ChargeState::Charged, 3));
+    assert_eq!(w.get_charge(&next.charge_id).await.state(), ChargeState::Charged);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1400,40 +1548,187 @@ async fn test_evidence_that_does_not_settle_the_charge_is_refused(
     let w = world(opts, connect).await;
     let x = w.funded("x", 100).await;
     let y = w.funded("y", 100).await;
-    // X's sequence 1 is already consumed: the contract answers duplicate.
-    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 1);
-    let duplicate = w.charge(&x, 10, "c-x").await;
-    let other = w.charge(&y, 10, "c-y").await;
+    w.stellar.with(|n| n.state.accounts.remove(&y.key.address()));
+    let lost = w.charge(&y, 10, "c-y").await;
+    let fine = w.charge(&x, 10, "c-x").await;
     w.settle(&w.worker()).await;
-    let q = quarantined(&w, &duplicate.charge_id).await;
-    let batch = hash_of(&w.get_charge(&duplicate.charge_id).await.transaction_hash);
+    let q = quarantined(&w, &lost.charge_id).await;
+    let batch = hash_of(&w.get_charge(&lost.charge_id).await.transaction_hash);
 
-    // The batch answered `duplicate` for X: it consumed nothing, so it proves
-    // no outcome; and X's sequence is consumed, so readmission is refused.
+    // The contract answered unknown_account, recorded as such: neither the
+    // batch nor the record settles the charge.
     let error = quarantine::prove_from_transaction(&w.stellar, &q, &batch).await.unwrap_err();
     assert!(
-        matches!(error, QuarantineError::NotConsumed { outcome: "duplicate", .. }),
+        matches!(error, QuarantineError::NotSettled { outcome: "unknown_account", .. }),
         "{error:?}"
     );
-    let error = quarantine::prove_readmission(&w.stellar, &q).await.unwrap_err();
-    assert!(matches!(error, QuarantineError::SequenceConsumed { consumed: 1, .. }), "{error:?}");
-    // An entry for the right account and sequence but another amount proves
-    // nothing either: Y's charge settled for 10, not 11.
-    assert_eq!(w.get_charge(&other.charge_id).await.state(), ChargeState::Charged);
-    let wrong_amount = QuarantinedCharge { owner: y.key.address(), amount: 11, ..q.clone() };
+    w.stellar.set_latest(q.authorization_horizon + 1);
+    let error = quarantine::prove_from_record(&w.stellar, &q).await.unwrap_err();
+    assert!(
+        matches!(error, QuarantineError::RecordUnresolvable { outcome: "unknown_account", .. }),
+        "{error:?}"
+    );
+    // An entry for the right account and charge but another amount proves
+    // nothing either: X's charge settled for 10, not 11.
+    assert_eq!(w.get_charge(&fine.charge_id).await.state(), ChargeState::Charged);
+    let wrong_amount = QuarantinedCharge {
+        owner: x.key.address(),
+        charge_id: hash_of(&fine.contract_charge_id),
+        amount: 11,
+        ..q.clone()
+    };
     let error =
         quarantine::prove_from_transaction(&w.stellar, &wrong_amount, &batch).await.unwrap_err();
     assert!(matches!(error, QuarantineError::AmountMismatch { .. }), "{error:?}");
+}
 
-    // Once the sequence is free again (here, set by the test), readmission
-    // is proven and the charge settles in the next batch.
-    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 0);
-    let (resolution, evidence) = quarantine::prove_readmission(&w.stellar, &q).await.unwrap();
+/// A stored envelope whose only authorization expires at `horizon`.
+fn envelope_with_horizon(horizon: u32) -> String {
+    let call = InvokeContractArgs {
+        contract_address: ScAddress::Contract(ContractId(Hash([7; 32]))),
+        function_name: ScSymbol("charge_batch".try_into().unwrap()),
+        args: VecM::default(),
+    };
+    let entry = SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address: ScAddress::Account(account_id(&treasury())),
+            nonce: 1,
+            signature_expiration_ledger: horizon,
+            signature: ScVal::Void,
+        }),
+        root_invocation: SorobanAuthorizedInvocation {
+            function: SorobanAuthorizedFunction::ContractFn(call.clone()),
+            sub_invocations: VecM::default(),
+        },
+    };
+    let operation = Operation {
+        source_account: None,
+        body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(call),
+            auth: vec![entry].try_into().unwrap(),
+        }),
+    };
+    TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx: Transaction {
+            source_account: MuxedAccount::Ed25519(Uint256([1; 32])),
+            fee: 100,
+            seq_num: SequenceNumber(1),
+            cond: Preconditions::None,
+            memo: Memo::None,
+            operations: vec![operation].try_into().unwrap(),
+            ext: TransactionExt::V0,
+        },
+        signatures: VecM::default(),
+    })
+    .to_xdr_base64(Limits::none())
+    .unwrap()
+}
+
+/// Quarantines an admitted charge the contract never saw, as a contradiction
+/// elsewhere would: the charge is linked to a finished submission whose
+/// authorization lapsed a ledger ago.
+async fn quarantine_unsent(w: &World, charge_id: &str) {
+    let horizon = w.stellar.with(|n| n.latest) - 1;
+    quarantine_unsent_until(w, charge_id, horizon).await;
+}
+
+async fn quarantine_unsent_until(w: &World, charge_id: &str, horizon: u32) {
+    let submission = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO pay_stellar.submissions
+             (id, network, kind, state, source_address, fee_source_address, sequence,
+              valid_until, inner_hash, outer_hash, envelope_xdr, resolved_at, last_error)
+         VALUES ($1, 'stellar:testnet', 'charge_batch', 'quarantined', $2, $2, 1, now(),
+                 $3, $4, $5, now(), 'test')",
+    )
+    .bind(submission)
+    .bind(treasury().as_str())
+    .bind(vec![3_u8; 32])
+    .bind(submission.as_bytes().repeat(2))
+    .bind(envelope_with_horizon(horizon))
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE pay_stellar.charges
+         SET state = 'quarantined', submission_id = $2, batch_index = 0, settled_at = now()
+         WHERE id = $1::uuid",
+    )
+    .bind(charge_id)
+    .bind(submission)
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_record_evidence_readmits_expires_or_refuses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let readmit = w.charge(&x, 10, "c-1").await;
+    let expire = w.charge(&x, 20, "c-2").await;
+    for charge in [&readmit, &expire] {
+        quarantine_unsent(&w, &charge.charge_id).await;
+    }
+
+    // No record and still within its last ledger: sent again, charged once.
+    let q = quarantined(&w, &readmit.charge_id).await;
+    let (resolution, evidence) = quarantine::prove_from_record(&w.stellar, &q).await.unwrap();
+    assert_eq!(resolution, Resolution::Readmitted);
     quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
-    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Admitted);
     w.settle(&w.worker()).await;
-    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Charged);
-    assert_eq!(w.stellar.account(&x.key.address()), Some((90, 1)));
+    assert_eq!(w.get_charge(&readmit.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(90));
+
+    // Past its last ledger while a record would still live: refunded.
+    let q = quarantined(&w, &expire.charge_id).await;
+    w.stellar.set_latest(expire.last_ledger + CHARGE_RECORD_GRACE + 1);
+    let error = quarantine::prove_from_record(&w.stellar, &q).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::RecordGone { .. }), "{error:?}");
+    w.stellar.set_latest(expire.last_ledger + 1);
+    let (resolution, evidence) = quarantine::prove_from_record(&w.stellar, &q).await.unwrap();
+    assert_eq!(resolution, Resolution::Expired);
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    let refunded = w.get_charge(&expire.charge_id).await;
+    assert_eq!((refunded.state(), refunded.outcome.as_str()), (ChargeState::Refused, "expired"));
+    assert_eq!(w.balance(&x).await, (90, 0));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_record_evidence_needs_a_read_past_the_batch_authorization(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-1").await;
+    let latest = w.stellar.with(|n| n.latest);
+    quarantine_unsent_until(&w, &charge.charge_id, latest + 5).await;
+    let q = quarantined(&w, &charge.charge_id).await;
+    assert_eq!(q.authorization_horizon, latest + 5);
+
+    // The batch's authorization could still land, or a lagging node may not
+    // show where it already did: no record proves nothing.
+    w.stellar.set_latest(latest + 5);
+    let error = quarantine::prove_from_record(&w.stellar, &q).await.unwrap_err();
+    assert!(
+        matches!(error, QuarantineError::ReadBeforeHorizon { ledger, horizon, .. }
+            if ledger == latest + 5 && horizon == latest + 5),
+        "{error:?}"
+    );
+    // A node at the horizon but serving entries from a ledger behind it:
+    // refused likewise.
+    w.stellar.set_latest(latest + 6);
+    w.stellar.with(|n| n.entries_behind = 1);
+    let error = quarantine::prove_from_record(&w.stellar, &q).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::ReadBeforeHorizon { .. }), "{error:?}");
+    // Past it: the absent record readmits the charge.
+    w.stellar.with(|n| n.entries_behind = 0);
+    let (resolution, _) = quarantine::prove_from_record(&w.stellar, &q).await.unwrap();
+    assert_eq!(resolution, Resolution::Readmitted);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1444,7 +1739,10 @@ async fn test_only_the_resolution_function_leaves_quarantine(
     let w = world(opts, connect).await;
     let x = w.funded("x", 100).await;
     let charge = w.charge(&x, 10, "c-1").await;
-    w.stellar.with(|n| n.truncate_outcomes = true);
+    w.stellar.with(|n| {
+        n.truncate_outcomes = true;
+        n.skip_records = true;
+    });
     w.settle(&w.worker()).await;
     let id = uuid::Uuid::parse_str(&charge.charge_id).unwrap();
 

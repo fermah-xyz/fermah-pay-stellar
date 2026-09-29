@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH expired AS (\n                UPDATE pay_stellar.charges c\n                SET state = 'refused', outcome = 'expired', settled_at = now(),\n                    last_error = 'not settled before its last ledger'\n                FROM pay_stellar.ledger_contracts l\n                WHERE c.state = 'admitted' AND c.last_ledger < $1 AND c.network = $2\n                  AND l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network\n                  AND l.operator_address = $3\n                RETURNING c.buyer_id, c.amount\n            ),\n            refunds AS (\n                SELECT buyer_id, sum(amount) AS amount FROM expired GROUP BY buyer_id\n            )\n            UPDATE pay_stellar.buyers b\n            SET available = b.available + refunds.amount\n            FROM refunds WHERE b.id = refunds.buyer_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71f83597d5ff461f9b5bff6ca08109427ddd708fe540c6d30bbe745533ba92f0"
+}

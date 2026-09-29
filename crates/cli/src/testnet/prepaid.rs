@@ -27,6 +27,7 @@ use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{deploy, friendbot, network_id, transaction, usdc};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::evidence::{self, tx_url};
 use super::ledger::balances;
@@ -42,6 +43,13 @@ const USDC_RESERVE: &str = "usdc-reserve";
 const ROLES: [&str; 4] = ["admin", "operator", "seller", "treasury"];
 /// Ledgers (about 5 s each) a signer's authorization stays valid.
 const AUTH_VALIDITY_LEDGERS: u32 = 60;
+/// Ledgers (about an hour) a charge stays settleable.
+const CHARGE_VALIDITY_LEDGERS: u32 = 720;
+
+/// The charge identifier a tag gives buyer `buyer`.
+fn tagged_charge_id(tag: &str, buyer: u32) -> [u8; 32] {
+    Sha256::digest(format!("{tag}/{buyer}").as_bytes()).into()
+}
 
 pub struct Context {
     pub rpc: RpcClient,
@@ -471,12 +479,14 @@ impl Context {
     }
 
     /// Charges `amount` from each buyer in `first..=last` in one
-    /// `charge_batch` transaction, with per-account sequence `seq`.
+    /// `charge_batch` transaction. Each buyer's charge identifier is derived
+    /// from `tag` and the buyer's number, so repeating a tag repeats the
+    /// charges.
     pub async fn charge_batch(
         &self,
         first: u32,
         last: u32,
-        seq: u64,
+        tag: &str,
         amount: i128,
     ) -> anyhow::Result<()> {
         self.rpc.verify_network(NETWORK).await?;
@@ -484,8 +494,16 @@ impl Context {
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;
         let submitter = self.submitter(&source, &fee_source);
+        let last_ledger = self.rpc.get_latest_ledger().await? + CHARGE_VALIDITY_LEDGERS;
         let charges: Vec<ChargeRequest> = (first..=last)
-            .map(|i| Ok(ChargeRequest { owner: self.profile.buyer(i)?.address(), seq, amount }))
+            .map(|i| {
+                Ok(ChargeRequest {
+                    owner: self.profile.buyer(i)?.address(),
+                    charge_id: tagged_charge_id(tag, i),
+                    amount,
+                    last_ledger,
+                })
+            })
             .collect::<anyhow::Result<_>>()?;
         let function = HostFunction::InvokeContract(pinned.charge_batch_call(&charges));
         let auth = self
@@ -505,26 +523,33 @@ impl Context {
         record["contract"] = json!(recorded.contract);
         record["operator"] = json!(operator.address().to_string());
         record["entries"] = json!(charges.len());
-        record["sequence"] = json!(seq);
+        record["charge_tag"] = json!(tag);
+        record["last_ledger"] = json!(last_ledger);
         record["amount"] = json!(amount.to_string());
         record["outcomes"] = json!(outcomes);
         evidence::write(
             &self.evidence_dir,
-            &format!("charge-batch-{}-seq{seq}", charges.len()),
+            &format!("charge-batch-{}-{tag}", charges.len()),
             record,
         )
     }
 
     /// A single `charge`; a refusal is reported with the simulation error and
     /// nothing is submitted.
-    pub async fn charge(&self, buyer: u32, seq: u64, amount: i128) -> anyhow::Result<()> {
+    pub async fn charge(&self, buyer: u32, tag: &str, amount: i128) -> anyhow::Result<()> {
         self.rpc.verify_network(NETWORK).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;
         let submitter = self.submitter(&source, &fee_source);
         let owner = self.profile.buyer(buyer)?.address();
-        let charge = ChargeRequest { owner: owner.clone(), seq, amount };
+        let last_ledger = self.rpc.get_latest_ledger().await? + CHARGE_VALIDITY_LEDGERS;
+        let charge = ChargeRequest {
+            owner: owner.clone(),
+            charge_id: tagged_charge_id(tag, buyer),
+            amount,
+            last_ledger,
+        };
         let function = HostFunction::InvokeContract(pinned.charge_call(&charge));
         let before = self.contract_balance(&submitter, &pinned, &charge.owner).await?;
         let outcome = match self
@@ -540,12 +565,13 @@ impl Context {
         let after = self.contract_balance(&submitter, &pinned, &charge.owner).await?;
         evidence::write(
             &self.evidence_dir,
-            &format!("charge-buyer-{buyer}-seq{seq}"),
+            &format!("charge-buyer-{buyer}-{tag}"),
             json!({
                 "criterion": "single-charge",
                 "contract": recorded.contract,
                 "buyer": owner.to_string(),
-                "sequence": seq,
+                "charge_tag": tag,
+                "charge_id": hex_lower(&charge.charge_id),
                 "amount": amount.to_string(),
                 "outcome": outcome,
                 "observed": { "ledger_balance_before": before.to_string(), "ledger_balance_after": after.to_string() },

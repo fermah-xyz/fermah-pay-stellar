@@ -7,11 +7,12 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::Parser;
 use fermah_pay_stellar_chain::keys::SecretKey;
+use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy, SystemClock};
-use fermah_pay_stellar_gateway::worker::{MAX_BATCH, Settings, Worker};
+use fermah_pay_stellar_gateway::worker::{Settings, Worker};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
@@ -50,8 +51,8 @@ struct Config {
     /// Ledgers the operator's authorization of a batch stays valid.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS", default_value = "24")]
     operator_authorization_ledgers: u32,
-    /// Charges per batch, at most 100.
-    #[arg(long, env = "PAY_STELLAR_MAX_BATCH", default_value = "100")]
+    /// Charges per batch, at most 98, the contract's limit.
+    #[arg(long, env = "PAY_STELLAR_MAX_BATCH", default_value = "98")]
     max_batch: usize,
     #[arg(long, env = "PAY_STELLAR_RETRY_AFTER_SECS", default_value = "30")]
     retry_after_secs: u64,

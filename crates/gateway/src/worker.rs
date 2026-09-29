@@ -14,9 +14,9 @@
 //! by someone else's transaction. So a deposit or charge is only released
 //! for another attempt, or declared unprocessed, after every authorization it
 //! was sent with has lapsed, and then from the contract's own state: a
-//! deposit's marker, or an account's consumed charge sequence.
+//! deposit's marker, or the charge's record.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -25,7 +25,8 @@ use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, Outcome, PrepaidDeployment, account_state, batch_outcomes,
+    CHARGE_RECORD_GRACE, ChargeRequest, DepositIntent, MAX_BATCH, Outcome, PrepaidDeployment,
+    batch_outcomes, charge_record,
 };
 use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -39,9 +40,6 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
-
-/// The contract's batch limit.
-pub const MAX_BATCH: usize = 100;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
@@ -129,30 +127,32 @@ fn hash32(bytes: Vec<u8>) -> Result<[u8; 32], WorkerError> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ChargeDecision {
     Charged,
-    /// The contract consumed the sequence without debiting.
+    /// Nothing was debited: the contract refused the charge, or it expired.
     Refused(Outcome),
     Quarantine {
         outcome: Option<Outcome>,
         reason: String,
     },
-    /// Proven unprocessed: the sequence is still free on the contract.
+    /// Proven unprocessed and still within its last ledger.
     Requeue(String),
 }
 
-fn decision_for(outcome: Outcome) -> ChargeDecision {
-    match outcome {
+/// The decision an outcome the contract settled, or recorded, establishes.
+/// `None` for `Duplicate`: the charge's record, not this answer, says what
+/// happened to it.
+fn settled(outcome: Outcome) -> Option<ChargeDecision> {
+    Some(match outcome {
         Outcome::Charged => ChargeDecision::Charged,
-        Outcome::InsufficientBalance | Outcome::AboveLimit => ChargeDecision::Refused(outcome),
-        // Each contradicts the gateway's own record: it sends an account's
-        // sequence only after every earlier one settled, and charges only
-        // accounts a confirmed deposit created.
-        Outcome::Duplicate | Outcome::OutOfOrder | Outcome::UnknownAccount => {
-            ChargeDecision::Quarantine {
-                outcome: Some(outcome),
-                reason: format!("contract answered {}", outcome.token()),
-            }
+        Outcome::InsufficientBalance | Outcome::AboveLimit | Outcome::Expired => {
+            ChargeDecision::Refused(outcome)
         }
-    }
+        // The gateway charges only buyers a confirmed deposit created.
+        Outcome::UnknownAccount => ChargeDecision::Quarantine {
+            outcome: Some(outcome),
+            reason: "contract answered unknown_account".to_owned(),
+        },
+        Outcome::Duplicate => return None,
+    })
 }
 
 struct Snapshot {
@@ -203,6 +203,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         }
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
+        self.expire_charges().await?;
         let submitted = match self.submit_deposit().await? {
             Some(id) => Some(id),
             None => self.submit_charges().await?,
@@ -311,8 +312,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     ) -> Result<(), WorkerError> {
         let rows = sqlx::query!(
             r#"
-            SELECT c.id, c.sequence, c.batch_index AS "batch_index!", b.wallet_address,
-                   l.contract_address, l.usdc_address, l.treasury_address,
+            SELECT c.id, c.charge_id, c.last_ledger, c.batch_index AS "batch_index!",
+                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address,
                    (SELECT count(*) FROM pay_stellar.charges a
                     WHERE a.submission_id = c.submission_id) AS "batch_size!"
             FROM pay_stellar.charges c
@@ -328,8 +329,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .await
         .map_err(store("read submitted charges"))?;
         let Some(first) = rows.first() else { return Ok(()) };
+        let deployment =
+            deployment(&first.contract_address, &first.usdc_address, &first.treasury_address)?;
 
-        let decisions: Vec<(Uuid, ChargeDecision)> = match resolution.state {
+        // What the batch's answer settles directly; the rest is decided from
+        // each charge's record on the contract.
+        let mut decisions: Vec<(Uuid, ChargeDecision)> = Vec::new();
+        let mut from_records = Vec::new();
+        match resolution.state {
             State::Installed => return Ok(()),
             State::Succeeded => {
                 let outcomes = resolution.return_value.as_ref().and_then(batch_outcomes);
@@ -337,85 +344,109 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     Some(outcomes)
                         if i64::try_from(outcomes.len()).ok() == Some(first.batch_size) =>
                     {
-                        rows.iter()
-                            .map(|row| {
-                                let outcome = usize::try_from(row.batch_index)
-                                    .ok()
-                                    .and_then(|i| outcomes.get(i).copied())
-                                    .ok_or(WorkerError::Corrupt("batch index outside the batch"))?;
-                                Ok((row.id, decision_for(outcome)))
-                            })
-                            .collect::<Result<_, WorkerError>>()?
+                        for row in &rows {
+                            let outcome = usize::try_from(row.batch_index)
+                                .ok()
+                                .and_then(|i| outcomes.get(i).copied())
+                                .ok_or(WorkerError::Corrupt("batch index outside the batch"))?;
+                            match settled(outcome) {
+                                Some(decision) => decisions.push((row.id, decision)),
+                                None => from_records.push(row),
+                            }
+                        }
                     }
-                    _ => {
-                        let reason = format!(
-                            "batch of {} returned {:?}",
-                            first.batch_size, resolution.return_value
-                        );
-                        rows.iter()
-                            .map(|row| {
-                                (
-                                    row.id,
-                                    ChargeDecision::Quarantine {
-                                        outcome: None,
-                                        reason: reason.clone(),
-                                    },
-                                )
-                            })
-                            .collect()
-                    }
+                    // Included and successful, but the answer is unreadable:
+                    // every charge it applied left a record.
+                    _ => from_records.extend(rows.iter()),
                 }
             }
-            // Not applied by this submission, or unknown whether it was: the
-            // account's consumed sequence decides, read at a ledger after
-            // every authorization the envelope carried has lapsed.
-            State::Failed | State::Expired | State::Quarantined => {
-                let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
-                let deployment = deployment(
-                    &first.contract_address,
-                    &first.usdc_address,
-                    &first.treasury_address,
-                )?;
-                let owners =
-                    rows.iter()
-                        .map(|row| address(&row.wallet_address))
-                        .collect::<Result<HashSet<_>, _>>()?;
-                let keys: Vec<LedgerKey> =
-                    owners.iter().map(|owner| deployment.account_key(owner)).collect();
-                let snapshot = self.existing(keys).await?;
-                if snapshot.ledger <= horizon {
-                    return Ok(());
-                }
-                rows.iter()
-                    .map(|row| {
-                        let owner = address(&row.wallet_address)?;
-                        let consumed = match snapshot.entries.get(&deployment.account_key(&owner)) {
-                            None => 0,
-                            Some(entry) => account_state(entry).map(|(_, seq)| seq)
-                                .ok_or(WorkerError::Corrupt("account entry does not decode"))?,
-                        };
-                        let sequence = u64::try_from(row.sequence)
-                            .map_err(|_| WorkerError::Corrupt("negative charge sequence"))?;
-                        Ok((
-                            row.id,
-                            if consumed < sequence {
-                                ChargeDecision::Requeue(format!(
-                                    "submission {submission} did not apply it; sequence {sequence} is still free"
-                                ))
-                            } else {
-                                ChargeDecision::Quarantine {
-                                    outcome: None,
-                                    reason: format!(
-                                        "submission {submission} did not show it applied, yet the account has consumed sequence {consumed}"
-                                    ),
-                                }
-                            },
-                        ))
-                    })
-                    .collect::<Result<_, WorkerError>>()?
+            State::Failed | State::Expired | State::Quarantined => from_records.extend(rows.iter()),
+        }
+
+        if !from_records.is_empty() {
+            let applied = resolution.state == State::Succeeded;
+            let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
+            let owners = from_records
+                .iter()
+                .map(|row| Ok((address(&row.wallet_address)?, hash32(row.charge_id.clone())?)))
+                .collect::<Result<Vec<_>, WorkerError>>()?;
+            let keys =
+                owners.iter().map(|(owner, id)| deployment.charge_record_key(owner, id)).collect();
+            let snapshot = self.existing(keys).await?;
+            for (row, (owner, id)) in from_records.iter().zip(&owners) {
+                let decision = match snapshot.entries.get(&deployment.charge_record_key(owner, id))
+                {
+                    Some(entry) => {
+                        let outcome = charge_record(entry)
+                            .ok_or(WorkerError::Corrupt("charge record does not decode"))?;
+                        settled(outcome).ok_or(WorkerError::Corrupt("a record holds duplicate"))?
+                    }
+                    // Applied, per the network, yet no record: contradiction.
+                    None if applied => ChargeDecision::Quarantine {
+                        outcome: Some(Outcome::Duplicate),
+                        reason: format!(
+                            "submission {submission} answered duplicate or unreadably, and the contract holds no record at ledger {}",
+                            snapshot.ledger
+                        ),
+                    },
+                    // A copy of the batch's authorization could still land.
+                    None if snapshot.ledger <= horizon => continue,
+                    None if snapshot.ledger <= row.last_ledger => ChargeDecision::Requeue(format!(
+                        "submission {submission} did not apply it; no record at ledger {}",
+                        snapshot.ledger
+                    )),
+                    // Past its last ledger, and a record would still live:
+                    // it was never applied and never can be.
+                    None if snapshot.ledger <= row.last_ledger + i64::from(CHARGE_RECORD_GRACE) => {
+                        ChargeDecision::Refused(Outcome::Expired)
+                    }
+                    None => ChargeDecision::Quarantine {
+                        outcome: None,
+                        reason: format!(
+                            "no record at ledger {}, past the ledger its record would have lived to",
+                            snapshot.ledger
+                        ),
+                    },
+                };
+                decisions.push((row.id, decision));
             }
-        };
+        }
         self.apply_charge_decisions(&decisions).await
+    }
+
+    /// Admitted charges past their last ledger were never applied (an
+    /// admitted charge is not in flight, and is readmitted only once its
+    /// earlier submission is proven not to have applied it) and never can be:
+    /// they are refused as expired and their amount returned.
+    async fn expire_charges(&self) -> Result<(), WorkerError> {
+        let latest = self.latest_ledger().await?;
+        sqlx::query!(
+            r#"
+            WITH expired AS (
+                UPDATE pay_stellar.charges c
+                SET state = 'refused', outcome = 'expired', settled_at = now(),
+                    last_error = 'not settled before its last ledger'
+                FROM pay_stellar.ledger_contracts l
+                WHERE c.state = 'admitted' AND c.last_ledger < $1 AND c.network = $2
+                  AND l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network
+                  AND l.operator_address = $3
+                RETURNING c.buyer_id, c.amount
+            ),
+            refunds AS (
+                SELECT buyer_id, sum(amount) AS amount FROM expired GROUP BY buyer_id
+            )
+            UPDATE pay_stellar.buyers b
+            SET available = b.available + refunds.amount
+            FROM refunds WHERE b.id = refunds.buyer_id
+            "#,
+            latest,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("expire charges"))?;
+        Ok(())
     }
 
     async fn apply_charge_decisions(
@@ -796,8 +827,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     }
 
     async fn submit_charges(&self) -> Result<Option<Uuid>, WorkerError> {
-        // Buyers with a charge in flight or in quarantine are skipped
-        // entirely: their next sequence is not known to be free.
+        let latest = self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
+        // A charge too close to its last ledger may not be included in time;
+        // it is left to expire and be refunded rather than sent.
+        let sendable =
+            i64::from(latest.saturating_add(self.settings.operator_authorization_ledgers));
         let Some(target) = sqlx::query!(
             r#"
             SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address
@@ -805,9 +839,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             JOIN LATERAL (
                 SELECT min(c.created_at) AS oldest FROM pay_stellar.charges c
                 WHERE c.seller_deployment_id = l.seller_deployment_id AND c.state = 'admitted'
-                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p
-                                  WHERE p.buyer_id = c.buyer_id
-                                    AND p.state IN ('submitted', 'quarantined'))
+                  AND c.last_ledger > $4
             ) o ON o.oldest IS NOT NULL
             WHERE l.network = $1 AND l.operator_address = $2
               AND l.seller_deployment_id <> ALL($3)
@@ -817,6 +849,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             self.network().caip2(),
             self.operator_address.as_str(),
             &self.set_aside_ids(),
+            sendable,
         )
         .fetch_optional(&self.pool)
         .await
@@ -827,36 +860,22 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let deployment =
             deployment(&target.contract_address, &target.usdc_address, &target.treasury_address)?;
         let limit = i64::try_from(self.settings.max_batch.min(MAX_BATCH)).unwrap_or(1);
-        let candidates = sqlx::query!(
+        let batch = sqlx::query!(
             r#"
-            WITH eligible AS (
-                SELECT c.buyer_id, min(c.created_at) AS oldest
-                FROM pay_stellar.charges c
-                WHERE c.seller_deployment_id = $1 AND c.state = 'admitted'
-                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p
-                                  WHERE p.buyer_id = c.buyer_id
-                                    AND p.state IN ('submitted', 'quarantined'))
-                GROUP BY c.buyer_id
-                ORDER BY oldest
-                LIMIT $2
-            )
-            SELECT c.id, c.buyer_id, c.sequence, c.amount, b.wallet_address
-            FROM eligible e
-            JOIN pay_stellar.charges c ON c.buyer_id = e.buyer_id AND c.state = 'admitted'
+            SELECT c.id, c.charge_id, c.last_ledger, c.amount, b.wallet_address
+            FROM pay_stellar.charges c
             JOIN pay_stellar.buyers b ON b.id = c.buyer_id
-            ORDER BY e.oldest, c.buyer_id, c.sequence
+            WHERE c.seller_deployment_id = $1 AND c.state = 'admitted' AND c.last_ledger > $3
+            ORDER BY c.created_at, c.id
+            LIMIT $2
             "#,
             target.seller_deployment_id,
             limit,
+            sendable,
         )
         .fetch_all(&self.pool)
         .await
         .map_err(store("read admitted charges"))?;
-        // Every eligible buyer's admitted charges, in sequence order: taking a
-        // prefix of that list keeps each buyer's charges contiguous from its
-        // next free sequence, which is the order the contract accepts.
-        let batch: Vec<_> =
-            candidates.into_iter().take(usize::try_from(limit).unwrap_or(1)).collect();
         if batch.is_empty() {
             return Ok(None);
         }
@@ -865,14 +884,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             .map(|c| {
                 Ok(ChargeRequest {
                     owner: address(&c.wallet_address)?,
-                    seq: u64::try_from(c.sequence)
-                        .map_err(|_| WorkerError::Corrupt("negative charge sequence"))?,
+                    charge_id: hash32(c.charge_id.clone())?,
                     amount: i128::from(c.amount),
+                    last_ledger: u32::try_from(c.last_ledger)
+                        .map_err(|_| WorkerError::Corrupt("charge last ledger out of range"))?,
                 })
             })
             .collect::<Result<Vec<_>, WorkerError>>()?;
 
-        let latest = self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).map_err(WorkerError::Randomness)?;
         let unsigned = SorobanAuthorizationEntry {

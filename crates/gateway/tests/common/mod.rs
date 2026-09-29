@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::issuance;
-use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LatestLedger, LedgerApi};
+use fermah_pay_stellar_gateway::ledger::{LatestLedger, LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::Store;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -22,6 +22,7 @@ use tonic::{Code, Request, Status};
 use uuid::Uuid;
 
 pub const AUTHORIZATION_VALIDITY_LEDGERS: u32 = 720;
+pub const CHARGE_VALIDITY_LEDGERS: u32 = 720;
 
 /// The latest ledger the API sees; `None` makes every read fail.
 #[derive(Clone, Default)]
@@ -108,7 +109,10 @@ pub async fn start_with<L: LatestLedger>(
         store.clone(),
         api_ledger,
         network,
-        DepositPolicy { authorization_validity_ledgers: AUTHORIZATION_VALIDITY_LEDGERS },
+        LedgerPolicy {
+            authorization_validity_ledgers: AUTHORIZATION_VALIDITY_LEDGERS,
+            charge_validity_ledgers: CHARGE_VALIDITY_LEDGERS,
+        },
     );
     let limits = ServerLimits {
         max_concurrent_requests: 64,

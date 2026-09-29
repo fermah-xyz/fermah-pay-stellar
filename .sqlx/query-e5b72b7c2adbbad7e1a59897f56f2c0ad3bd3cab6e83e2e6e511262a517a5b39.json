@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.ledger_contracts l\n            JOIN LATERAL (\n                SELECT min(c.created_at) AS oldest FROM pay_stellar.charges c\n                WHERE c.seller_deployment_id = l.seller_deployment_id AND c.state = 'admitted'\n                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p\n                                  WHERE p.buyer_id = c.buyer_id\n                                    AND p.state IN ('submitted', 'quarantined'))\n            ) o ON o.oldest IS NOT NULL\n            WHERE l.network = $1 AND l.operator_address = $2\n              AND l.seller_deployment_id <> ALL($3)\n            ORDER BY o.oldest\n            LIMIT 1\n            ",
+  "query": "\n            SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.ledger_contracts l\n            JOIN LATERAL (\n                SELECT min(c.created_at) AS oldest FROM pay_stellar.charges c\n                WHERE c.seller_deployment_id = l.seller_deployment_id AND c.state = 'admitted'\n                  AND c.last_ledger > $4\n            ) o ON o.oldest IS NOT NULL\n            WHERE l.network = $1 AND l.operator_address = $2\n              AND l.seller_deployment_id <> ALL($3)\n            ORDER BY o.oldest\n            LIMIT 1\n            ",
   "describe": {
     "columns": [
       {
@@ -52,7 +52,8 @@
       "Left": [
         "Text",
         "Text",
-        "UuidArray"
+        "UuidArray",
+        "Int8"
       ]
     },
     "nullable": [
@@ -62,5 +63,5 @@
       false
     ]
   },
-  "hash": "2f7eae75980fec85bd1b2492be2874c86ff583eae4798022d45f37b2a0141cc1"
+  "hash": "e5b72b7c2adbbad7e1a59897f56f2c0ad3bd3cab6e83e2e6e511262a517a5b39"
 }

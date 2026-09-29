@@ -179,7 +179,7 @@ pub fn sign_fee_bump(
 mod tests {
     use stellar_xdr::{
         ContractId, Hash, InvokeContractArgs, LedgerFootprint, ScAddress, ScSymbol,
-        SorobanResources, SorobanTransactionDataExt, StringM,
+        SorobanResources, SorobanResourcesExtV0, SorobanTransactionDataExt, StringM,
     };
 
     use super::*;
@@ -234,6 +234,21 @@ mod tests {
         let source = SecretKey::generate().unwrap();
         let result = assemble(unassembled(&source), resources(0), i64::from(u32::MAX), 0);
         assert!(matches!(result, Err(AssemblyError::FeeOverflow { .. })));
+    }
+
+    /// Since protocol 23 the network restores archived entries inside the
+    /// invocation itself; simulation marks them in the data's extension,
+    /// which must reach the network unchanged.
+    #[test]
+    fn test_assemble_keeps_the_entries_to_restore() {
+        let source = SecretKey::generate().unwrap();
+        let mut data = resources(0);
+        data.ext = SorobanTransactionDataExt::V1(SorobanResourcesExtV0 {
+            archived_soroban_entries: vec![0, 3].try_into().unwrap(),
+        });
+        let tx = assemble(unassembled(&source), data.clone(), 100, 0).unwrap();
+        let TransactionExt::V1(assembled) = &tx.ext else { panic!("not assembled") };
+        assert_eq!(assembled.ext, data.ext);
     }
 
     #[test]

@@ -720,6 +720,14 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     }
 }
 
+/// [`Engine::authorization_horizon`] of a stored envelope, for readers that
+/// hold the row rather than the engine.
+pub fn stored_authorization_horizon(envelope_xdr: &str) -> Option<u32> {
+    TransactionEnvelope::from_xdr_base64(envelope_xdr, Limits::none())
+        .ok()
+        .map(|envelope| authorization_horizon(&envelope))
+}
+
 fn authorization_horizon(envelope: &TransactionEnvelope) -> u32 {
     let operations = match envelope {
         TransactionEnvelope::TxFeeBump(bump) => match &bump.tx.inner_tx {

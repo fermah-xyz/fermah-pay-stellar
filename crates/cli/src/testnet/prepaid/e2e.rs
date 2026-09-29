@@ -16,7 +16,7 @@ use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::onboarding::onboard_buyers;
 use fermah_pay_stellar_chain::payments::payments_transaction;
-use fermah_pay_stellar_chain::prepaid::{ChargeRequest, account_state};
+use fermah_pay_stellar_chain::prepaid::{ChargeRequest, MAX_BATCH, account_balance, charge_record};
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
@@ -24,7 +24,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{transaction, usdc};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
-use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LedgerApi};
+use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::Store;
 use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy as EnginePolicy, SystemClock};
@@ -137,7 +137,7 @@ impl Context {
             store.clone(),
             self.rpc.clone(),
             NETWORK,
-            DepositPolicy { authorization_validity_ledgers: 720 },
+            LedgerPolicy { authorization_validity_ledgers: 720, charge_validity_ledgers: 720 },
         );
         let mut gateway_stop = stopped.clone();
         let limits =
@@ -167,7 +167,7 @@ impl Context {
             Settings {
                 operator_authorization_ledgers: 24,
                 retry_after: Duration::from_secs(10),
-                max_batch: 100,
+                max_batch: MAX_BATCH,
             },
         );
         let mut worker_stop = stopped.clone();
@@ -386,17 +386,34 @@ impl Context {
             .get_ledger_entries(&[pinned.account_key(&buyer.address())])
             .await?
             .first()
-            .and_then(|record| account_state(&record.data))
+            .and_then(|record| account_balance(&record.data))
             .context("no contract account for the buyer")?;
-        ensure!(
-            account == (i128::from(expected), 3),
-            "contract account {account:?}, expected balance {expected} after sequence 3"
-        );
+        ensure!(account == i128::from(expected), "contract balance {account}, expected {expected}");
+        // Each charge left its record on the contract, holding its outcome.
+        for charge in &charges {
+            let id = parse_charge_id(&charge.contract_charge_id)?;
+            let recorded = self
+                .rpc
+                .get_ledger_entries(&[pinned.charge_record_key(&buyer.address(), &id)])
+                .await?
+                .first()
+                .and_then(|record| charge_record(&record.data));
+            ensure!(
+                recorded == Some(fermah_pay_stellar_chain::prepaid::Outcome::Charged),
+                "charge {} is recorded as {recorded:?}",
+                charge.contract_charge_id
+            );
+        }
         // The contract's own replay protection, independent of the gateway:
-        // sequence 1 is consumed, so the same charge sent straight to the
-        // contract is refused. Only simulated; nothing is submitted.
-        let replay =
-            ChargeRequest { owner: buyer.address(), seq: 1, amount: i128::from(CHARGES[0]) };
+        // the first charge's identifier is recorded, so the same charge sent
+        // straight to the contract is refused. Only simulated; nothing is
+        // submitted.
+        let replay = ChargeRequest {
+            owner: buyer.address(),
+            charge_id: parse_charge_id(&charges[0].contract_charge_id)?,
+            amount: i128::from(CHARGES[0]),
+            last_ledger: charges[0].last_ledger,
+        };
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;
         let submitter = self.submitter(&source, &fee_source);
@@ -404,7 +421,7 @@ impl Context {
         let tree = pinned.charge_authorization(&replay);
         let replay_refusal = match self.authorize(&submitter, &function, &[(&operator, tree)]).await
         {
-            Ok(_) => bail!("the contract accepted a replay of charge sequence 1"),
+            Ok(_) => bail!("the contract accepted a replay of the first charge"),
             Err(error) => format!("{error:#}"),
         };
         ensure!(
@@ -416,7 +433,7 @@ impl Context {
             .get_ledger_entries(&[pinned.account_key(&buyer.address())])
             .await?
             .first()
-            .and_then(|record| account_state(&record.data));
+            .and_then(|record| account_balance(&record.data));
         ensure!(after_replay == Some(account), "the refused replay changed the account");
 
         let after = balances(&self.rpc, &buyer.address(), &asset).await?;
@@ -431,7 +448,7 @@ impl Context {
         batches.dedup();
         Ok(json!({
             "criterion": "api-end-to-end",
-            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge sequence, and the gateway balance equals the contract balance",
+            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge, and the gateway balance equals the contract balance",
             "contract": contract,
             "buyer": buyer.address().to_string(),
             "onboarding_transaction": hex_lower(&onboarding.transaction_hash),
@@ -444,7 +461,8 @@ impl Context {
             },
             "charges": charges.iter().map(|c| json!({
                 "amount": c.amount,
-                "sequence": c.sequence,
+                "contract_charge_id": c.contract_charge_id,
+                "last_ledger": c.last_ledger,
                 "state": "charged",
                 "transaction_hash": c.transaction_hash,
                 "ledger": c.ledger,
@@ -456,19 +474,28 @@ impl Context {
             },
             "conflicting_reuse": conflict.message(),
             "contract_replay": {
-                "sequence": 1,
+                "contract_charge_id": charges[0].contract_charge_id,
                 "result": "refused before submission as DuplicateCharge (contract error 110)",
                 "account_unchanged": true,
             },
             "observed": {
                 "gateway_available": balance.available,
                 "gateway_pending": balance.pending_charges,
-                "contract_balance": account.0.to_string(),
-                "contract_charge_seq": account.1,
+                "contract_balance": account.to_string(),
+                "charge_records": "charged",
                 "buyer_xlm_stroops_before": before.xlm_stroops,
                 "buyer_xlm_stroops_after": after.xlm_stroops,
                 "buyer_usdc_after": after.usdc,
             },
         }))
     }
+}
+
+fn parse_charge_id(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| hex.get(i..i + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .context("charge identifier is not hex")?;
+    <[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("charge identifier is not 32 bytes"))
 }
