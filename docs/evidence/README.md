@@ -83,22 +83,22 @@ record, which a batch cannot share. A replayed charge writes nothing.
 
 ### API end to end on testnet
 
-[`api-end-to-end`](testnet/2026-09-29T022513-api-end-to-end.json), recorded by the `testnet` CI workflow
-([run](https://github.com/fermah-xyz/fermah-pay-stellar/actions/runs/36512413007))
+[`api-end-to-end`](testnet/2026-09-29T051738-api-end-to-end.json), recorded by the `testnet` CI workflow
+([run](https://github.com/fermah-xyz/fermah-pay-stellar/actions/runs/36525388773))
 with `fermah-pay-stellar-testnet end-to-end` against the deployment above. A
 seller's calls go only through the gateway's gRPC API; the gateway and the
 settlement worker run under their production database roles.
 
 | Step | Transaction |
 |---|---|
-| New buyer created with 0 XLM, reserves sponsored | [`c809fec0…`](https://stellar.expert/explorer/testnet/tx/c809fec00818df65b9ae3bde281952793b8cbec64021096cef760c226dfc0c9c) |
-| Buyer sent 0.1 Circle USDC from the reserve | [`7a615c9b…`](https://stellar.expert/explorer/testnet/tx/7a615c9b0dfd5e506180fba5a6598dabbfde8014cbd43a925359cfbbf7dba80d) |
-| Deposit of 0.1 USDC, authorized by one buyer signature, sent and paid by the worker | [`27655ba4…`](https://stellar.expert/explorer/testnet/tx/27655ba4bb602df3bc3d9658cbae709191a3e2c50bb3a4e5624f6e5f9b2a3b2c) |
-| Three charges (0.01, 0.02, 0.03 USDC) settled in one batch | [`27851e05…`](https://stellar.expert/explorer/testnet/tx/27851e05dd1274a8f0a10cbd182b8ca9eeef241857fae78d6f3bdb71cd63668f) |
-| The first charge's sequence sent straight to the contract | refused before submission as `DuplicateCharge` (contract error 110); no transaction |
+| New buyer created with 0 XLM, reserves sponsored | [`5e0d079e…`](https://stellar.expert/explorer/testnet/tx/5e0d079e476c94994a7392e364007995d7e654deef27a2eab07c7ac8df169f86) |
+| Buyer sent 0.1 Circle USDC from the reserve | [`3de86332…`](https://stellar.expert/explorer/testnet/tx/3de863327c8dd8814a42b8b17dd544110f8f08dbce27cf0f62502652731d60ed) |
+| Deposit of 0.1 USDC, authorized by one buyer signature, sent and paid by the worker | [`dc747a0a…`](https://stellar.expert/explorer/testnet/tx/dc747a0a4e22722dbd7ade4be3a6b6e0006aac55a9704851eec6ae057ffb1701) |
+| Three charges (0.01, 0.02, 0.03 USDC) settled in one batch | [`c4529f29…`](https://stellar.expert/explorer/testnet/tx/c4529f29472926930349a92ea62dba8b4f816856c4b11c8dd3dfde69bf23e984) |
+| The first charge sent straight to the contract again | refused before submission as `DuplicateCharge` (contract error 110); no transaction |
 
 Observed afterwards: the retried charge returned the original charge
 (`created: false`), reusing its key with another amount was refused with
-`idempotency_conflict`, the gateway's available balance and the contract's
-account balance are both 0.04 USDC with charge
-sequence 3, and the buyer held 0 XLM before and after.
+`idempotency_conflict`, each charge's record on the contract holds
+`charged`, the gateway's available balance and the contract's account
+balance are both 0.04 USDC, and the buyer held 0 XLM before and after.
