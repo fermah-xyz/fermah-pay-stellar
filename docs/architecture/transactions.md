@@ -66,7 +66,14 @@ schema in [`0002_submissions.sql`](../../db/migrations/0002_submissions.sql)):
   sent) or the exact bytes to resend.
 - **One envelope in flight per source.** A unique index allows at most one
   submission per source account whose outcome is unknown, because the network
-  accepts only the next sequence number.
+  accepts only the next sequence number. A worker may hold several source
+  accounts (channel accounts): each round it resolves every open envelope,
+  settles what is final, and sends new work from each free source, so one
+  envelope waiting out its window does not hold back the rest. Charges carry
+  their own identifiers and need no order, so two batches of one seller can
+  be in flight at once. Every batch writes the contract instance, so the
+  network applies batches of one contract in the same ledger one after the
+  other. The sources hold no XLM: the fee account pays through fee bumps.
 - **Outcomes come only from the hash.** A `sendTransaction` answer, including
   a refusal, never settles a submission: resending an envelope that already
   landed is refused as a stale sequence. A submission is final only when:

@@ -44,7 +44,7 @@ use tokio::net::TcpListener;
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
-use super::{Context, FEE_SOURCE, NETWORK, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
+use super::{CHANNEL, Context, FEE_SOURCE, NETWORK, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
 use crate::testnet::evidence::{self, tx_url};
 use crate::testnet::ledger::balances;
 
@@ -152,10 +152,12 @@ impl Context {
             self.rpc.clone(),
             SystemClock,
             NETWORK,
-            Keys {
-                source: self.profile.key(SUBMITTER)?,
-                fee_source: self.profile.key(FEE_SOURCE)?,
-            },
+            // The zero-XLM channel account comes first, so it sends whenever
+            // it is free.
+            Keys::new(
+                vec![self.profile.key(CHANNEL)?, self.profile.key(SUBMITTER)?],
+                self.profile.key(FEE_SOURCE)?,
+            )?,
             EnginePolicy {
                 // The worker's own defaults: bid from the market, never
                 // below the profile's fee nor above a hundred times it.
@@ -188,8 +190,9 @@ impl Context {
                 .await;
         });
 
-        let outcome =
-            self.seller_flow(&format!("http://{addr}"), &token, &pinned, &recorded.contract).await;
+        let outcome = self
+            .seller_flow(&format!("http://{addr}"), &token, &pinned, &recorded.contract, &owner)
+            .await;
         let _ = stop.send(true);
         let _ = settlement.await;
         let _ = gateway.await;
@@ -203,6 +206,7 @@ impl Context {
         token: &str,
         pinned: &fermah_pay_stellar_chain::prepaid::PrepaidDeployment,
         contract: &str,
+        records: &PgPool,
     ) -> anyhow::Result<serde_json::Value> {
         let asset = usdc::circle_usdc(NETWORK);
         let channel = Channel::from_shared(endpoint.to_owned())?.connect().await?;
@@ -455,6 +459,29 @@ impl Context {
         let mut batches: Vec<String> = charges.iter().map(|c| c.transaction_hash.clone()).collect();
         batches.sort();
         batches.dedup();
+
+        // Which accounts sequenced the deposit and the batches: the channel
+        // account, holding no XLM, sends while it is free.
+        let hashes: Vec<String> =
+            std::iter::once(deposit.transaction_hash.clone()).chain(batches.clone()).collect();
+        let sources: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT source_address FROM pay_stellar.submissions
+             WHERE encode(outer_hash, 'hex') = ANY($1)",
+        )
+        .bind(&hashes)
+        .fetch_all(records)
+        .await?;
+        let channel_account = self.profile.key(CHANNEL)?.address();
+        ensure!(
+            sources.iter().any(|source| source == channel_account.as_str()),
+            "the channel account {channel_account} sent none of {hashes:?}"
+        );
+        let channel_after = balances(&self.rpc, &channel_account, &asset).await?;
+        ensure!(
+            channel_after.xlm_stroops == Some(0),
+            "the channel account holds XLM: {:?}",
+            channel_after.xlm_stroops
+        );
         Ok(json!({
             "criterion": "api-end-to-end",
             "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge, and the gateway balance equals the contract balance",
@@ -495,6 +522,9 @@ impl Context {
                 "buyer_xlm_stroops_before": before.xlm_stroops,
                 "buyer_xlm_stroops_after": after.xlm_stroops,
                 "buyer_usdc_after": after.usdc,
+                "sources": sources,
+                "channel_account": channel_account.to_string(),
+                "channel_xlm_stroops_after": channel_after.xlm_stroops,
             },
         }))
     }

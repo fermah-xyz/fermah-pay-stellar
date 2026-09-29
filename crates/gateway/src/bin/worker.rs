@@ -29,10 +29,12 @@ struct Config {
     rpc_url: String,
     #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
     rpc_timeout_secs: u64,
-    /// File holding the `S...` seed of the account that sequences every
-    /// transaction. No other process may submit from this account.
-    #[arg(long, env = "PAY_STELLAR_SOURCE_KEY_FILE")]
-    source_key_file: PathBuf,
+    /// Files, comma-separated, each holding the `S...` seed of an account
+    /// that sequences transactions. Each account has at most one transaction
+    /// in flight, so several keep sending while one waits. No other process
+    /// may submit from these accounts.
+    #[arg(long, env = "PAY_STELLAR_SOURCE_KEY_FILE", value_delimiter = ',', required = true)]
+    source_key_file: Vec<PathBuf>,
     /// File holding the seed of the account that pays fees.
     #[arg(long, env = "PAY_STELLAR_FEE_SOURCE_KEY_FILE")]
     fee_source_key_file: PathBuf,
@@ -117,10 +119,10 @@ async fn main() -> anyhow::Result<()> {
         config.inclusion_fee_percentile,
     )
     .context("inclusion fee settings")?;
-    let keys = Keys {
-        source: read_key(&config.source_key_file)?,
-        fee_source: read_key(&config.fee_source_key_file)?,
-    };
+    let sources =
+        config.source_key_file.iter().map(|file| read_key(file)).collect::<Result<Vec<_>, _>>()?;
+    let keys = Keys::new(sources, read_key(&config.fee_source_key_file)?)
+        .context("source account settings")?;
     let operator = read_key(&config.operator_key_file)?;
 
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
@@ -133,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
         .context("connecting to PostgreSQL")?;
     tracing::info!(
         network = %config.network,
-        source = %keys.source.address(),
+        sources = ?keys.source_addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
         fee_source = %keys.fee_source.address(),
         operator = %operator.address(),
         inclusion_fee_floor = fees.floor,

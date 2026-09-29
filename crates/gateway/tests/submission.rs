@@ -24,8 +24,8 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::events::EventLog;
 use fermah_pay_stellar_gateway::submission::{
-    Broadcast, Chain, Clock, Engine, EngineError, FeePolicy, Keys, Kind, Policy, SourceSequence,
-    State,
+    Broadcast, Chain, Clock, Engine, EngineError, FeePolicy, Keys, KeysError, Kind, Policy,
+    SourceSequence, State,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
@@ -378,10 +378,11 @@ impl Harness {
             self.chain.clone(),
             self.clock.clone(),
             Network::Testnet,
-            Keys {
-                source: SecretKey::from_strkey(&self.source_seed).unwrap(),
-                fee_source: SecretKey::from_strkey(&self.fee_seed).unwrap(),
-            },
+            Keys::new(
+                vec![SecretKey::from_strkey(&self.source_seed).unwrap()],
+                SecretKey::from_strkey(&self.fee_seed).unwrap(),
+            )
+            .unwrap(),
             Policy {
                 fees,
                 resource_fee_margin_percent: 15,
@@ -444,12 +445,27 @@ async fn test_second_install_while_one_is_in_flight_is_refused(
     connect: PgConnectOptions,
 ) {
     let h = harness(opts, connect).await;
-    let first = h.engine().install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    h.engine().install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
     let second = h.engine().install(Kind::Deposit, call(), vec![]).await;
+    assert!(matches!(second, Err(EngineError::NoFreeSource)), "{second:?}");
+}
+
+#[test]
+fn test_source_accounts_must_be_given_and_distinct() {
+    let fee = || SecretKey::generate().unwrap();
+    assert!(matches!(Keys::new(vec![], fee()), Err(KeysError::NoSource)));
+    let (a, b) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+    let repeated = a.address();
+    let twice = SecretKey::from_strkey(&a.to_strkey()).unwrap();
+    let error = Keys::new(vec![a, b, twice], fee()).err();
     assert!(
-        matches!(second, Err(EngineError::SourceBusy { id, .. }) if id == first.id),
-        "{second:?}"
+        matches!(&error, Some(KeysError::Duplicate(address)) if *address == repeated),
+        "{error:?}"
     );
+    // The positive control: distinct sources are accepted.
+    let keys =
+        Keys::new(vec![SecretKey::generate().unwrap(), SecretKey::generate().unwrap()], fee());
+    assert_eq!(keys.map(|k| k.source_count()).ok(), Some(2));
 }
 
 fn call_named(function: &str) -> HostFunction {

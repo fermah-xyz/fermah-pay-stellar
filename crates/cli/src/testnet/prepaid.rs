@@ -41,6 +41,9 @@ const SPONSOR: &str = "operator-sponsor";
 const SUBMITTER: &str = "submitter";
 const FEE_SOURCE: &str = "fee-source";
 const USDC_RESERVE: &str = "usdc-reserve";
+/// A further source account for the settlement worker, sponsored with zero
+/// XLM like the roles: fee bumps pay for everything it sends.
+const CHANNEL: &str = "channel-1";
 const ROLES: [&str; 4] = ["admin", "operator", "seller", "treasury"];
 /// Ledgers (about 5 s each) a signer's authorization stays valid.
 const AUTH_VALIDITY_LEDGERS: u32 = 60;
@@ -157,7 +160,7 @@ impl Context {
         }
         let sponsor = self.profile.key(SPONSOR)?;
         let mut missing = Vec::new();
-        for name in ROLES.into_iter().chain([USDC_RESERVE]) {
+        for name in ROLES.into_iter().chain([USDC_RESERVE, CHANNEL]) {
             let key = self.profile.key(name)?;
             if !self.account_exists(&key.address()).await? {
                 missing.push(key);
@@ -183,7 +186,8 @@ impl Context {
             }
         }
         let mut roles = serde_json::Map::new();
-        for name in [SPONSOR, SUBMITTER, FEE_SOURCE, USDC_RESERVE].into_iter().chain(ROLES) {
+        for name in [SPONSOR, SUBMITTER, FEE_SOURCE, USDC_RESERVE, CHANNEL].into_iter().chain(ROLES)
+        {
             roles.insert(name.to_owned(), json!(self.profile.key(name)?.address().to_string()));
         }
         println!("{}", serde_json::to_string_pretty(&roles)?);

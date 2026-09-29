@@ -87,11 +87,16 @@ struct ContractState {
 struct Net {
     latest: u32,
     source_sequence: i64,
+    /// Sequences of further source accounts; any other source uses
+    /// `source_sequence`.
+    sequences: HashMap<AccountAddress, i64>,
     state: ContractState,
     included: HashMap<[u8; 32], TransactionStatus>,
     sent: Vec<TransactionEnvelope>,
     /// The next sends are accepted but never included.
     drop_sends: usize,
+    /// Sources whose envelopes the network never includes.
+    stuck: HashSet<AccountAddress>,
     /// The next included transactions fail without effect.
     fail_inclusions: usize,
     /// `charge_batch` returns one outcome fewer than it settled.
@@ -420,9 +425,9 @@ impl Stellar {
 }
 
 impl Chain for Stellar {
-    async fn account_sequence(&self, _: &AccountAddress) -> Result<SourceSequence, RpcError> {
+    async fn account_sequence(&self, account: &AccountAddress) -> Result<SourceSequence, RpcError> {
         Ok(self.with(|n| SourceSequence {
-            sequence: Some(n.source_sequence),
+            sequence: Some(n.sequences.get(account).copied().unwrap_or(n.source_sequence)),
             latest_ledger: n.latest - n.entries_behind,
         }))
     }
@@ -484,6 +489,10 @@ impl Chain for Stellar {
     async fn send(&self, envelope: &TransactionEnvelope) -> Result<SendOutcome, RpcError> {
         let hash = outer_hash(envelope);
         let sequence = inner(envelope).seq_num.0;
+        let MuxedAccount::Ed25519(Uint256(source)) = inner(envelope).source_account else {
+            panic!("muxed source")
+        };
+        let source = AccountAddress::from_public_key(source);
         let operator = self.operator.clone();
         let deployment = self.deployment.clone();
         self.with(|n| {
@@ -491,7 +500,8 @@ impl Chain for Stellar {
             if n.included.contains_key(&hash) {
                 return Ok(SendOutcome::Duplicate { hash });
             }
-            if sequence != n.source_sequence + 1 {
+            let current = n.sequences.get(&source).copied().unwrap_or(n.source_sequence);
+            if sequence != current + 1 {
                 return Ok(SendOutcome::Rejected {
                     hash,
                     result: Box::new(TransactionResult {
@@ -501,11 +511,17 @@ impl Chain for Stellar {
                     }),
                 });
             }
+            if n.stuck.contains(&source) {
+                return Ok(SendOutcome::Pending { hash });
+            }
             if n.drop_sends > 0 {
                 n.drop_sends -= 1;
                 return Ok(SendOutcome::Pending { hash });
             }
-            n.source_sequence = sequence;
+            match n.sequences.get_mut(&source) {
+                Some(extra) => *extra = sequence,
+                None => n.source_sequence = sequence,
+            }
             let status = if n.fail_inclusions > 0 {
                 n.fail_inclusions -= 1;
                 TransactionStatus::Failed(included(envelope, n.latest, false, None))
@@ -730,10 +746,12 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         net: Arc::new(Mutex::new(Net {
             latest: START_LEDGER,
             source_sequence: 500,
+            sequences: HashMap::new(),
             state: ContractState::default(),
             included: HashMap::new(),
             sent: Vec::new(),
             drop_sends: 0,
+            stuck: HashSet::new(),
             fail_inclusions: 0,
             truncate_outcomes: false,
             skip_records: false,
@@ -773,15 +791,21 @@ impl World {
     /// A worker process with its own source account, as after a restart
     /// when `source_seed` is reused.
     fn worker_with(&self, source_seed: &str, max_batch: usize) -> Worker<Stellar, ManualClock> {
+        self.worker_with_sources(vec![SecretKey::from_strkey(source_seed).unwrap()], max_batch)
+    }
+
+    /// A worker holding several source accounts, sending from each free one.
+    fn worker_with_sources(
+        &self,
+        sources: Vec<SecretKey>,
+        max_batch: usize,
+    ) -> Worker<Stellar, ManualClock> {
         let engine = Engine::new(
             self.worker_pool.clone(),
             self.stellar.clone(),
             self.clock.clone(),
             Network::Testnet,
-            Keys {
-                source: SecretKey::from_strkey(source_seed).unwrap(),
-                fee_source: SecretKey::from_strkey(&self.fee_seed).unwrap(),
-            },
+            Keys::new(sources, SecretKey::from_strkey(&self.fee_seed).unwrap()).unwrap(),
             Policy {
                 fees: FeePolicy::new(100, 100_000, FeePercentile::P90).unwrap(),
                 resource_fee_margin_percent: 10,
@@ -1665,6 +1689,90 @@ async fn test_restarted_worker_resends_the_recorded_batch_and_settles_it(
     assert_eq!(sent.len(), sends_before + 2);
     assert_eq!(sent[sends_before], sent[sends_before + 1], "the same bytes are resent");
     assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+/// A second source account, with its own sequence on the network.
+fn extra_source(w: &World) -> SecretKey {
+    let key = SecretKey::generate().unwrap();
+    w.stellar.with(|n| n.sequences.insert(key.address(), 900));
+    key
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_free_sources_each_send_a_batch_in_one_round(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charges = [
+        w.charge(&x, 10, "c-1").await,
+        w.charge(&x, 20, "c-2").await,
+        w.charge(&x, 30, "c-3").await,
+    ];
+    let primary = SecretKey::from_strkey(&w.source_seed).unwrap();
+    let worker = w.worker_with_sources(vec![primary, extra_source(&w)], 1);
+    let states = || async {
+        let mut states = Vec::new();
+        for charge in &charges {
+            states.push(w.get_charge(&charge.charge_id).await.state());
+        }
+        states
+    };
+
+    // Neither envelope is included at once, nor when resent in the next
+    // round: each source holds one in flight.
+    w.stellar.with(|n| n.drop_sends = 4);
+    let Step::Submitted(sent) = worker.step().await.unwrap() else { panic!("nothing sent") };
+    assert_eq!(sent.len(), 2, "one batch per source");
+    let sources: HashSet<AccountAddress> = w
+        .stellar
+        .sent()
+        .iter()
+        .map(|envelope| {
+            let MuxedAccount::Ed25519(Uint256(key)) = inner(envelope).source_account else {
+                panic!("muxed source")
+            };
+            AccountAddress::from_public_key(key)
+        })
+        .collect();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        states().await,
+        [ChargeState::Submitted, ChargeState::Submitted, ChargeState::Admitted]
+    );
+    assert_eq!(worker.step().await.unwrap(), Step::InFlight, "no source is free");
+
+    w.settle(&worker).await;
+    assert_eq!(states().await, [ChargeState::Charged; 3]);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(40));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_stuck_source_does_not_hold_back_the_others(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let primary = SecretKey::from_strkey(&w.source_seed).unwrap();
+    w.stellar.with(|n| n.stuck.insert(primary.address()));
+    let stuck = w.charge(&x, 10, "c-1").await;
+    let single = w.worker_with(&w.source_seed, 1);
+    single.step().await.unwrap();
+    assert_eq!(w.get_charge(&stuck.charge_id).await.state(), ChargeState::Submitted);
+
+    // With its only source stuck, a worker sends nothing more.
+    let waiting = w.charge(&x, 20, "c-2").await;
+    assert_eq!(single.step().await.unwrap(), Step::InFlight);
+    assert_eq!(w.get_charge(&waiting.charge_id).await.state(), ChargeState::Admitted);
+
+    // With a second source, the next batch goes out and settles.
+    let pooled = w.worker_with_sources(vec![primary, extra_source(&w)], 1);
+    assert!(matches!(pooled.step().await.unwrap(), Step::Submitted(sent) if sent.len() == 1));
+    assert_eq!(w.get_charge(&waiting.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.get_charge(&stuck.charge_id).await.state(), ChargeState::Submitted);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(80));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
