@@ -83,7 +83,7 @@ must not be able to issue keys.
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
 | Worker | `PAY_STELLAR_WORKER_DATABASE_URL` | URL of the worker login role |
 | Worker | `PAY_STELLAR_NETWORK`, `PAY_STELLAR_RPC_URL` | as for the gateway |
-| Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | seed file of the account that sequences every transaction; no other process may submit from it |
+| Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | seed files, comma-separated, of the accounts that sequence transactions; each has at most one transaction in flight, so several keep sending while one waits. The accounts may hold no XLM (the fee account pays), and no other process may submit from them |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | seed file of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | seed file of the contracts' operator; the worker serves the deployments bound with this operator |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |

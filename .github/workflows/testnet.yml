@@ -96,6 +96,7 @@ jobs:
           FEE_SOURCE: ${{ secrets.TESTNET_FEE_SOURCE_SECRET }}
           OPERATOR: ${{ secrets.TESTNET_OPERATOR_SECRET }}
           USDC_RESERVE: ${{ secrets.TESTNET_USDC_RESERVE_SECRET }}
+          CHANNEL: ${{ secrets.TESTNET_CHANNEL_SECRET }}
           DEPLOYMENT: ${{ vars.TESTNET_DEPLOYMENT_JSON }}
         run: |
           umask 077
@@ -106,6 +107,7 @@ jobs:
           printf '%s' "$FEE_SOURCE" > "$profile/fee-source.secret"
           printf '%s' "$OPERATOR" > "$profile/operator.secret"
           printf '%s' "$USDC_RESERVE" > "$profile/usdc-reserve.secret"
+          printf '%s' "$CHANNEL" > "$profile/channel-1.secret"
           printf '%s' "$DEPLOYMENT" > "$profile/deployment.json"
           echo "PAY_STELLAR_TESTNET_PROFILE=$profile" >> "$GITHUB_ENV"
       - name: Run end to end

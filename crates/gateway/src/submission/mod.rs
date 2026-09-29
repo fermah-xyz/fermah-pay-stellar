@@ -124,10 +124,49 @@ impl State {
 
 /// The accounts the engine signs with.
 pub struct Keys {
-    /// Signs and sequences every transaction.
-    pub source: SecretKey,
+    /// Sign and sequence transactions. Each has at most one envelope in
+    /// flight, so several let one stuck envelope leave the others sending.
+    sources: Vec<SecretKey>,
     /// Signs the fee bump and pays.
     pub fee_source: SecretKey,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeysError {
+    #[error("at least one source account is needed")]
+    NoSource,
+    #[error("source account {0} is listed twice")]
+    Duplicate(AccountAddress),
+}
+
+impl Keys {
+    /// No two engines, in this process or another, may share a source: each
+    /// assumes it alone sequences the accounts it holds.
+    pub fn new(sources: Vec<SecretKey>, fee_source: SecretKey) -> Result<Self, KeysError> {
+        if sources.is_empty() {
+            return Err(KeysError::NoSource);
+        }
+        for (i, key) in sources.iter().enumerate() {
+            if sources[..i].iter().any(|earlier| earlier.address() == key.address()) {
+                return Err(KeysError::Duplicate(key.address()));
+            }
+        }
+        Ok(Self { sources, fee_source })
+    }
+
+    #[must_use]
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    #[must_use]
+    pub fn source_addresses(&self) -> Vec<AccountAddress> {
+        self.sources.iter().map(SecretKey::address).collect()
+    }
+
+    fn source(&self, address: &AccountAddress) -> Option<&SecretKey> {
+        self.sources.iter().find(|key| key.address() == *address)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +188,8 @@ pub struct Policy {
 pub enum EngineError {
     #[error("source {account} already has submission {id} in flight")]
     SourceBusy { account: AccountAddress, id: Uuid },
+    #[error("every source account has an envelope in flight")]
+    NoFreeSource,
     #[error("source account {0} does not exist")]
     SourceMissing(AccountAddress),
     #[error("simulation refused the transaction: {0}")]
@@ -396,10 +437,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     }
 
     async fn next_slot(&self, kind: Kind) -> Result<Slot, EngineError> {
-        let source = self.keys.source.address();
-        if let Some(id) = self.in_flight(&source).await? {
-            return Err(EngineError::SourceBusy { account: source, id });
-        }
+        let source = self.free_source().await?;
         self.check_clock().await?;
         let current = self
             .chain
@@ -515,13 +553,29 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         }
     }
 
+    /// The first source with no envelope in flight. Callers in one process
+    /// prepare one envelope at a time, and `record` refuses a second envelope
+    /// for a source in any case.
+    async fn free_source(&self) -> Result<AccountAddress, EngineError> {
+        for key in &self.keys.sources {
+            let source = key.address();
+            if self.in_flight(&source).await?.is_none() {
+                return Ok(source);
+            }
+        }
+        Err(EngineError::NoFreeSource)
+    }
+
     fn seal(&self, kind: Kind, slot: Slot, tx: Transaction) -> Result<Prepared, EngineError> {
         let inclusion_fee = slot.inclusion_fee;
+        let source_key = self
+            .keys
+            .source(&slot.source)
+            .ok_or(EngineError::Corrupt("slot names a source this engine does not hold"))?;
         let inner_hash =
             transaction::transaction_hash(&tx, self.network).map_err(EngineError::Signing)?;
         let TransactionEnvelope::Tx(inner) =
-            transaction::sign(tx, self.network, &[&self.keys.source])
-                .map_err(EngineError::Signing)?
+            transaction::sign(tx, self.network, &[source_key]).map_err(EngineError::Signing)?
         else {
             unreachable!("transaction::sign produces a v1 envelope")
         };
@@ -717,13 +771,20 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// Resends and resolves every submission this engine's source still has
     /// in flight, e.g. after a restart.
     pub async fn recover(&self) -> Result<Vec<(Uuid, Resolution)>, EngineError> {
-        let source = self.keys.source.address();
         let mut resolved = Vec::new();
-        if let Some(id) = self.in_flight(&source).await? {
-            self.broadcast(id).await?;
-            resolved.push((id, self.resolve(id).await?));
+        for key in &self.keys.sources {
+            if let Some(id) = self.in_flight(&key.address()).await? {
+                self.broadcast(id).await?;
+                resolved.push((id, self.resolve(id).await?));
+            }
         }
         Ok(resolved)
+    }
+
+    /// How many envelopes this engine can have in flight at once.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.keys.source_count()
     }
 
     /// The last ledger in which any address authorization carried by the

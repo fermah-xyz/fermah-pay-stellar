@@ -74,12 +74,13 @@ pub enum WorkerError {
 }
 
 /// What one [`Worker::step`] did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// This worker's source still has a transaction whose outcome is open;
-    /// nothing else can be sent from it.
+    /// Every source has a transaction whose outcome is open; nothing new
+    /// could be sent.
     InFlight,
-    Submitted(Uuid),
+    /// New transactions sent this round, oldest first.
+    Submitted(Vec<Uuid>),
     Idle,
 }
 
@@ -202,27 +203,39 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         self.engine.network()
     }
 
-    /// One round: finish what is in flight, apply final outcomes, conclude
-    /// lapsed deposits, then send at most one new transaction.
+    /// One round: resend and resolve what is in flight, apply final
+    /// outcomes, conclude lapsed deposits and expired charges, then send new
+    /// transactions from every source that is free. Settling does not wait
+    /// for open envelopes: it only touches rows whose submission is final, or
+    /// that were never sent.
     pub async fn step(&self) -> Result<Step, WorkerError> {
+        let mut open = 0;
         for (_, resolution) in self.engine.recover().await? {
             if !resolution.state.is_final() {
-                return Ok(Step::InFlight);
+                open += 1;
             }
         }
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
         self.expire_charges().await?;
-        let submitted = match self.submit_deposit().await? {
-            Some(id) => Some(id),
-            None => self.submit_charges().await?,
-        };
-        let Some(id) = submitted else { return Ok(Step::Idle) };
-        self.engine.broadcast(id).await?;
-        if self.engine.resolve(id).await?.state.is_final() {
-            self.settle().await?;
+        let mut submitted = Vec::new();
+        while open + submitted.len() < self.engine.capacity() {
+            let next = match self.submit_deposit().await? {
+                Some(id) => Some(id),
+                None => self.submit_charges().await?,
+            };
+            let Some(id) = next else { break };
+            self.engine.broadcast(id).await?;
+            if self.engine.resolve(id).await?.state.is_final() {
+                self.settle().await?;
+            }
+            submitted.push(id);
         }
-        Ok(Step::Submitted(id))
+        Ok(match (submitted.is_empty(), open) {
+            (false, _) => Step::Submitted(submitted),
+            (true, 0) => Step::Idle,
+            (true, _) => Step::InFlight,
+        })
     }
 
     /// Steps until `shutdown` resolves: `busy_poll` apart while there is work,
@@ -859,7 +872,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 self.set_aside(row.id);
                 return Ok(None);
             }
-            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
 
@@ -895,7 +908,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     async fn restore(&self, restore: &Restore, refused: Uuid) -> Result<Option<Uuid>, WorkerError> {
         let prepared = match self.engine.prepare_restore(restore).await {
             Ok(prepared) => prepared,
-            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
@@ -1016,7 +1029,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 self.set_aside(target.seller_deployment_id);
                 return Ok(None);
             }
-            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         // The operator signed after the network reached `latest`, so no
