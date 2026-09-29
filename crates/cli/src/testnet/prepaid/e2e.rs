@@ -95,7 +95,7 @@ where
 
 impl Context {
     pub async fn end_to_end(&self, database_url: &str) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, NETWORK).await?;
         let (recorded, pinned) = self.deployment()?;
         let operator = self.profile.key("operator")?;
         ensure!(

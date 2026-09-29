@@ -10,9 +10,9 @@ use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_domain::Network;
-use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
+use fermah_pay_stellar_gateway::{shutdown, startup};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
 
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
         .context("building RPC client")?;
-    rpc.verify_network(config.network).await.context("checking the RPC network")?;
+    startup::verify_rpc(&rpc, config.network).await.context("checking the RPC network")?;
     let pool = PgPoolOptions::new()
         .max_connections(4)
         .connect(&config.database_url)

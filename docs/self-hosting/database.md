@@ -73,7 +73,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_DATABASE_MAX_CONNECTIONS` | pool size, default 16, must be at least 1 |
 | Gateway | `PAY_STELLAR_MAX_CONCURRENT_REQUESTS` | requests processed at once across all connections, default 64; the rest wait |
 | Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |
-| Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup. Must be `https` unless it points at this host |
+| Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup (network passphrase, and protocol 27 or later). Must be `https` unless it points at this host |
 | Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
 | Gateway | `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` | ledgers a charge may wait for settlement before it is refunded, default 720 (about an hour), at most 17280 |
 | Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit signature stays valid, default 720 (about an hour) |
@@ -89,6 +89,9 @@ must not be able to issue keys.
 
 Key files must not be readable by other users; the worker refuses to start
 otherwise. Run one worker per source account.
+
+Both processes refuse to start unless the RPC endpoint serves the configured
+network at protocol 27 or later: authorizations use `AddressV2` credentials.
 
 Run one gateway process per network. A testnet gateway refuses live keys,
 and a pubnet gateway refuses test keys.

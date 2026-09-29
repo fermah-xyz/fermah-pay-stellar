@@ -150,6 +150,21 @@ which also commits the signed payload to the signer's address. Both are
 signed and verified by the same code and are accepted by the Soroban host;
 Stellar testnet accepted `AddressV2` entries for the recorded deposits.
 
+The gateway prepares deposit authorizations, and the worker signs its batch
+authorizations, with `AddressV2` credentials. They exist from network
+protocol 27 ([CAP-71 XDR](https://github.com/stellar/stellar-xdr/blob/68fa1ac55692f68ad2a2ca549d0a283273554439/Stellar-transaction.x#L585-L603), absent
+before), and settlement also relies on archived entries being restored
+inside the invocation that touches them, which protocol 23 introduced. So
+the gateway and the worker refuse to start unless their RPC endpoint reports
+`protocolVersion` 27 or later from `getNetwork`, besides the configured
+network's passphrase.
+
+A buyer's wallet must be able to sign an `AddressV2` entry: an SDK that knows
+only legacy `Address` credentials cannot decode the prepared entry, or signs
+the legacy payload, which the gateway refuses as `invalid_signature`.
+Signing the `signature_payload` the gateway returns works with any Ed25519
+signer.
+
 ## Observed costs on testnet
 
 From the [evidence records](../evidence/README.md):
