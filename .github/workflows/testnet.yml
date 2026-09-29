@@ -56,7 +56,10 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: testnet
+    # The operator keys live in environments: `testnet` is limited to main,
+    # and pull-request runs, which execute the pull request's code with the
+    # keys, use `testnet-pr`. Only a label set by a collaborator starts one.
+    environment: ${{ github.event_name == 'pull_request' && 'testnet-pr' || 'testnet' }}
     # Every run submits from the same testnet accounts, whose sequence numbers
     # only one run at a time may advance.
     concurrency:
