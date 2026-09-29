@@ -50,6 +50,7 @@ in `pay_stellar.chain_charge_entries`. The event layouts are those of the
 current contract, pinned by the contract's tests against the Soroban host;
 an event of this contract that does not decode, for example after an
 upgrade, is stored with its raw XDR and reported as `unrecognized_event`.
+Pauses, unpauses and limit changes are reported as `admin_change`.
 
 ## Matching events against the records
 

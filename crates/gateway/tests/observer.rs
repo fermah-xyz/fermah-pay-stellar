@@ -733,6 +733,18 @@ async fn test_rotation_the_binding_does_not_follow_is_a_finding_after_the_grace(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
+async fn test_pause_and_limit_changes_are_reported_at_once(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.chain.emit(1010, (vec![symbol("pause")], ScVal::Bool(true)));
+    w.observer().observe().await.unwrap();
+    assert_eq!(w.findings().await, [pair("admin_change", "warning")]);
+    assert_eq!(w.finding_detail("admin_change").await["paused"].as_bool(), Some(true));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
 async fn test_admin_rotation_is_reported_at_once(opts: PgPoolOptions, connect: PgConnectOptions) {
     let w = world(opts, connect).await;
     w.chain.emit(1010, role_event("admin", &admin(), &account(213)));

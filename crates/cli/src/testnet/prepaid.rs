@@ -16,7 +16,7 @@ use fermah_pay_stellar_chain::onboarding::{
 use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{
     ChargeRequest, DepositIntent, PrepaidDeployment, Roles, Totals, WithdrawIntent,
-    constructor_args, contract_totals,
+    constructor_args, contract_totals, instance_wasm,
 };
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
 use fermah_pay_stellar_chain::sponsored::{Credentials, Policy, Receipt, Submitter};
@@ -260,6 +260,75 @@ impl Context {
                 "create": receipt_json(&created),
             }),
         )
+    }
+
+    /// Replaces the recorded contract's code with `wasm`, authorized by the
+    /// admin, and checks on the ledger that the instance now runs it and that
+    /// its totals are unchanged.
+    pub async fn upgrade_prepaid(&self, wasm: &[u8]) -> anyhow::Result<()> {
+        self.rpc.verify_network(NETWORK).await?;
+        let (mut recorded, pinned) = self.deployment()?;
+        let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
+        let admin = self.profile.key("admin")?;
+        let submitter = self.submitter(&source, &fee_source);
+        let wasm_hash = deploy::wasm_hash(wasm);
+        let before = self.running_wasm(&pinned).await?;
+        ensure!(before != wasm_hash, "the contract already runs {}", hex_lower(&wasm_hash));
+        let totals_before = self.totals(&submitter, &pinned).await?;
+
+        let upload = deploy::upload(wasm)?;
+        let auth = submitter.record_source_authorization(&upload).await?;
+        let uploaded = submitter.submit(upload, auth).await?;
+        let function = HostFunction::InvokeContract(pinned.upgrade_call(wasm_hash));
+        let auth = self
+            .authorize(&submitter, &function, &[(&admin, pinned.upgrade_authorization(wasm_hash))])
+            .await?;
+        let upgraded = submitter.submit(function, auth).await?;
+
+        let after = self.running_wasm(&pinned).await?;
+        ensure!(after == wasm_hash, "the contract runs {} after the upgrade", hex_lower(&after));
+        let totals_after = self.totals(&submitter, &pinned).await?;
+        ensure!(totals_after == totals_before, "the upgrade changed the contract's totals");
+        recorded.wasm_sha256 = hex_lower(&wasm_hash);
+        self.profile.save_deployment(&recorded)?;
+        evidence::write(
+            &self.evidence_dir,
+            "prepaid-upgrade",
+            json!({
+                "criterion": "prepaid-ledger-upgrade",
+                "expected": "the admin replaces the contract's code in place; the contract address, balances and totals are unchanged",
+                "contract": recorded.contract,
+                "admin": admin.address().to_string(),
+                "upload": receipt_json(&uploaded),
+                "upgrade": receipt_json(&upgraded),
+                "observed": {
+                    "wasm_before": hex_lower(&before),
+                    "wasm_after": hex_lower(&after),
+                    "liabilities": totals_after.liabilities.to_string(),
+                    "revenue": totals_after.revenue.to_string(),
+                },
+            }),
+        )
+    }
+
+    async fn running_wasm(&self, pinned: &PrepaidDeployment) -> anyhow::Result<[u8; 32]> {
+        let entries = self.rpc.get_ledger_entries(&[pinned.instance_key()]).await?;
+        entries
+            .first()
+            .and_then(|entry| instance_wasm(&entry.data))
+            .context("the contract instance is missing or runs no Wasm")
+    }
+
+    async fn totals(
+        &self,
+        submitter: &Submitter<'_>,
+        pinned: &PrepaidDeployment,
+    ) -> anyhow::Result<Totals> {
+        let totals = submitter
+            .read(HostFunction::InvokeContract(pinned.get_totals_call()))
+            .await?
+            .context("get_totals returned nothing")?;
+        contract_totals(&totals).with_context(|| format!("unexpected totals {totals:?}"))
     }
 
     /// Creates buyers `1..=count` (sponsored, zero XLM, USDC trustline) and

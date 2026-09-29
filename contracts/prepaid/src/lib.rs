@@ -204,6 +204,22 @@ pub struct RoleChanged {
     pub current: Address,
 }
 
+/// The admin paused or unpaused the contract; `paused` is the state after
+/// the call. Emitted on every call, even one that leaves the state as it was.
+#[contractevent(topics = ["pause"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseChanged {
+    pub paused: bool,
+}
+
+/// The admin replaced the deposit and charge limits.
+#[contractevent(topics = ["limits"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LimitsChanged {
+    pub previous: Limits,
+    pub current: Limits,
+}
+
 #[contractevent(topics = ["revenue"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevenueWithdrawn {
@@ -413,25 +429,20 @@ impl PrepaidLedger {
 
     /// Stops deposits, charges and withdrawals until `unpause`.
     pub fn pause(env: Env) {
-        let mut config = config(&env);
-        config.admin.require_auth();
-        config.paused = true;
-        store_config(&env, &config);
+        set_paused(&env, true);
     }
 
     pub fn unpause(env: Env) {
-        let mut config = config(&env);
-        config.admin.require_auth();
-        config.paused = false;
-        store_config(&env, &config);
+        set_paused(&env, false);
     }
 
     pub fn set_limits(env: Env, limits: Limits) {
         let mut config = config(&env);
         config.admin.require_auth();
         validate_limits(&env, &limits);
-        config.limits = limits;
+        let previous = core::mem::replace(&mut config.limits, limits.clone());
         store_config(&env, &config);
+        LimitsChanged { previous, current: limits }.publish(&env);
     }
 
     /// Hands the admin role to `admin`, which must authorize taking it, so
@@ -460,7 +471,8 @@ impl PrepaidLedger {
 
     /// Replaces the contract code. The admin can change what every balance
     /// means through this, which is why it is a separate key from every
-    /// other role.
+    /// other role. The host itself emits a system event naming the previous
+    /// and the new code, so this call publishes no event of its own.
     pub fn upgrade(env: Env, wasm_hash: BytesN<32>) {
         config(&env).admin.require_auth();
         env.deployer().update_current_contract(ContractExecutable::Wasm(wasm_hash));
@@ -503,6 +515,14 @@ fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Se
     let live_for = last_ledger - now + CHARGE_RECORD_GRACE;
     env.storage().temporary().extend_ttl(&record, live_for, live_for);
     Settled(owner, charge_id, amount, outcome)
+}
+
+fn set_paused(env: &Env, paused: bool) {
+    let mut config = config(env);
+    config.admin.require_auth();
+    config.paused = paused;
+    store_config(env, &config);
+    PauseChanged { paused }.publish(env);
 }
 
 /// Moves one role to `current`, authorized by the admin and by `current`.

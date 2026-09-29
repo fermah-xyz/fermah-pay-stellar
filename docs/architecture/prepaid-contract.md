@@ -57,7 +57,9 @@ stay covered.
 
 The admin can replace the contract code through `upgrade`, and so holds power
 over what every balance means: it is the deployment's root of trust and
-should be kept offline or in hardware.
+should be kept offline or in hardware. Every administrative change is
+visible in the contract's events (see [events](#events)), so a pause, a
+limit change, a rotation or an upgrade nobody expected can be detected.
 
 ## What each signer authorizes
 
@@ -143,6 +145,31 @@ Measured in the Soroban VM with the built Wasm, one `charge_batch` call for
 
 These are local VM measurements, reproduced by `just contract-resources` and
 by the `Contract` CI job; they are not network evidence.
+
+## Events
+
+After construction, every call that changes state emits an event, all but
+the upgrade from the contract itself. Topics and data, as the host records
+them:
+
+| Call | Topics | Data |
+|---|---|---|
+| `deposit` | `"deposit"`, owner | `[amount, deposit_id]` |
+| `charge`, `charge_batch` | `"charges"` | `[[owner, charge_id, amount, outcome], ...]` |
+| `withdraw` | `"withdraw"`, owner | `[destination, amount, withdrawal_id]` |
+| `withdraw_revenue` | `"revenue"` | `[destination, amount, withdrawal_id]` |
+| `set_admin`, `set_operator`, `set_seller`, `set_treasury` | `"role"`, role name | `[previous, current]` |
+| `pause`, `unpause` | `"pause"` | `paused` after the call, even when it did not change |
+| `set_limits` | `"limits"` | `[previous, current]`, each `{max_charge, min_deposit}` |
+| `upgrade` | `"executable_update"`, previous code, new code (system event) | an empty vector |
+
+`upgrade` publishes no event of its own: the Soroban host emits a system
+event (type `System`, attributed to the contract) whenever a contract's code
+is replaced, naming the previous and the new executable (for Wasm code,
+`["Wasm", hash]`). A refused call emits nothing.
+[`prepaid_event`](../../crates/stellar-chain/src/prepaid.rs) decodes each of
+these; the contract tests pin the decoding against the events the host
+records.
 
 ## Errors
 

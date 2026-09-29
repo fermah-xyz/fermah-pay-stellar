@@ -50,6 +50,19 @@ Amounts are USDC base units: `10000000` is 1 USDC. The command checks that the
 network assigned the contract address derived locally from the deployer and
 salt, and records the deployment in the profile.
 
+To move an existing deployment to a newer contract build, keeping its
+address and balances, the admin replaces its code in place:
+
+```bash
+just contract-build
+testnet upgrade-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm
+```
+
+The command checks on the ledger that the instance runs the new Wasm and
+that the contract's totals are unchanged. The upgrade pays rent to keep the
+new code alive for about 30 days: about 19 XLM on testnet for a 15 KB
+contract, upload included.
+
 ## 4. Buyers
 
 ```bash
