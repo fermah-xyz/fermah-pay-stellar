@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.ledger_contracts l\n            JOIN LATERAL (\n                SELECT min(c.created_at) AS oldest FROM pay_stellar.charges c\n                WHERE c.seller_deployment_id = l.seller_deployment_id AND c.state = 'admitted'\n                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p\n                                  WHERE p.buyer_id = c.buyer_id\n                                    AND p.state IN ('submitted', 'quarantined'))\n            ) o ON o.oldest IS NOT NULL\n            WHERE l.network = $1 AND l.operator_address = $2\n              AND l.seller_deployment_id <> ALL($3)\n            ORDER BY o.oldest\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seller_deployment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "seller_deployment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2f7eae75980fec85bd1b2492be2874c86ff583eae4798022d45f37b2a0141cc1"
+}

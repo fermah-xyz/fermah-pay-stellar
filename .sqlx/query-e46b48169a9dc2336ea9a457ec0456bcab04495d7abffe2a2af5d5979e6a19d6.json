@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO pay_stellar.ledger_contracts\n            (seller_deployment_id, network, contract_address, usdc_address, treasury_address,\n             operator_address)\n        VALUES ($1, $2, $3, $4, $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e46b48169a9dc2336ea9a457ec0456bcab04495d7abffe2a2af5d5979e6a19d6"
+}

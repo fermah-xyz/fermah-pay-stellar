@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pay_stellar.deposits SET last_error = $2 WHERE id = $1 AND state = 'signed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "504d76eab1ff56daf5a66db327fd40f8adfddaaa493b009207ce0911658812aa"
+}

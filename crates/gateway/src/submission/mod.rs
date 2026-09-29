@@ -27,8 +27,9 @@ use fermah_pay_stellar_chain::rpc::{
 };
 use fermah_pay_stellar_chain::soroban::{self, AssemblyError};
 use fermah_pay_stellar_chain::stellar_xdr::{
-    HostFunction, Limits, ReadXdr, ScVal, SorobanAuthorizationEntry, TransactionEnvelope,
-    TransactionV1Envelope, VecM, WriteXdr,
+    FeeBumpTransactionInnerTx, HostFunction, Limits, OperationBody, ReadXdr, ScVal,
+    SorobanAuthorizationEntry, SorobanCredentials, TransactionEnvelope, TransactionV1Envelope,
+    VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::{self, SigningError};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
@@ -156,6 +157,20 @@ pub enum EngineError {
     Corrupt(&'static str),
 }
 
+/// A signed, fee-bumped envelope not yet recorded.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    pub id: Uuid,
+    pub kind: Kind,
+    pub source: AccountAddress,
+    pub fee_source: AccountAddress,
+    pub sequence: i64,
+    pub valid_until: OffsetDateTime,
+    pub inner_hash: [u8; 32],
+    pub outer_hash: [u8; 32],
+    envelope_xdr: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Installed {
     pub id: Uuid,
@@ -237,6 +252,14 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         &self.chain
     }
 
+    pub const fn clock(&self) -> &K {
+        &self.clock
+    }
+
+    pub const fn network(&self) -> Network {
+        self.network
+    }
+
     /// Builds, signs and fee-bumps a transaction invoking `function` with the
     /// already-signed `auth` entries, and records the envelope. Nothing is
     /// sent: the caller broadcasts the installed submission afterwards, and a
@@ -247,6 +270,21 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         function: HostFunction,
         auth: Vec<SorobanAuthorizationEntry>,
     ) -> Result<Installed, EngineError> {
+        let prepared = self.prepare(kind, function, auth).await?;
+        let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
+        self.record(&mut conn, &prepared).await
+    }
+
+    /// The network-facing half of [`Self::install`]: builds and signs the
+    /// envelope without touching the database, so a caller can then record it
+    /// in the same database transaction that links it to the business rows it
+    /// settles. No database lock is held while this talks to the network.
+    pub async fn prepare(
+        &self,
+        kind: Kind,
+        function: HostFunction,
+        auth: Vec<SorobanAuthorizationEntry>,
+    ) -> Result<Prepared, EngineError> {
         let source = self.keys.source.address();
         if let Some(id) = self.in_flight(&source).await? {
             return Err(EngineError::SourceBusy { account: source, id });
@@ -315,8 +353,38 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             .to_xdr_base64(Limits::none())
             .map_err(|e| EngineError::Assembly(AssemblyError::Encode(e.to_string())))?;
 
-        let id = Uuid::now_v7();
-        let fee_source = self.keys.fee_source.address();
+        Ok(Prepared {
+            id: Uuid::now_v7(),
+            kind,
+            source,
+            fee_source: self.keys.fee_source.address(),
+            sequence,
+            valid_until,
+            inner_hash,
+            outer_hash,
+            envelope_xdr,
+        })
+    }
+
+    /// Records a prepared envelope as in flight, on `conn`, which may be inside
+    /// the caller's transaction. On `SourceBusy` that transaction is aborted
+    /// and must be rolled back.
+    pub async fn record(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        prepared: &Prepared,
+    ) -> Result<Installed, EngineError> {
+        let Prepared {
+            id,
+            kind,
+            ref source,
+            ref fee_source,
+            sequence,
+            valid_until,
+            inner_hash,
+            outer_hash,
+            ref envelope_xdr,
+        } = *prepared;
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.submissions
@@ -335,7 +403,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             outer_hash.as_slice(),
             envelope_xdr,
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await;
         match inserted {
             Ok(_) => Ok(Installed { id, sequence, inner_hash, outer_hash, valid_until }),
@@ -344,8 +412,8 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             {
                 // Another installer won the race between the check above and
                 // this insert; its envelope is the one in flight.
-                let id = self.in_flight(&source).await?.unwrap_or(id);
-                Err(EngineError::SourceBusy { account: source, id })
+                let id = self.in_flight(source).await?.unwrap_or(id);
+                Err(EngineError::SourceBusy { account: source.clone(), id })
             }
             Err(source) => Err(EngineError::Store { operation: "install submission", source }),
         }
@@ -451,6 +519,18 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             resolved.push((id, self.resolve(id).await?));
         }
         Ok(resolved)
+    }
+
+    /// The last ledger in which any address authorization carried by the
+    /// submission's envelope is valid. Until it has passed, a copy of that
+    /// authorization taken from the broadcast envelope could still be
+    /// included by someone else's transaction, even after this envelope's own
+    /// window closed.
+    pub async fn authorization_horizon(&self, id: Uuid) -> Result<u32, EngineError> {
+        let row = self.load(id).await?;
+        let envelope = TransactionEnvelope::from_xdr_base64(&row.envelope_xdr, Limits::none())
+            .map_err(|_| EngineError::Corrupt("installed envelope does not decode"))?;
+        Ok(authorization_horizon(&envelope))
     }
 
     async fn in_flight(&self, source: &AccountAddress) -> Result<Option<Uuid>, EngineError> {
@@ -566,6 +646,34 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         .map_err(store("close submission"))?;
         resolution_of(&self.load(id).await?)
     }
+}
+
+fn authorization_horizon(envelope: &TransactionEnvelope) -> u32 {
+    let operations = match envelope {
+        TransactionEnvelope::TxFeeBump(bump) => match &bump.tx.inner_tx {
+            FeeBumpTransactionInnerTx::Tx(inner) => inner.tx.operations.as_slice(),
+        },
+        TransactionEnvelope::Tx(v1) => v1.tx.operations.as_slice(),
+        TransactionEnvelope::TxV0(v0) => v0.tx.operations.as_slice(),
+    };
+    operations
+        .iter()
+        .filter_map(|operation| match &operation.body {
+            OperationBody::InvokeHostFunction(invoke) => Some(invoke.auth.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|entry| match &entry.credentials {
+            SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds) => {
+                Some(creds.signature_expiration_ledger)
+            }
+            SorobanCredentials::AddressWithDelegates(delegated) => {
+                Some(delegated.address_credentials.signature_expiration_ledger)
+            }
+            SorobanCredentials::SourceAccount => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn resolution_of(row: &Row) -> Result<Resolution, EngineError> {

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        WITH refused AS (\n                            UPDATE pay_stellar.charges\n                            SET state = 'refused', outcome = $2, settled_at = now()\n                            WHERE id = $1 AND state = 'submitted'\n                            RETURNING buyer_id, amount\n                        )\n                        UPDATE pay_stellar.buyers b\n                        SET available = b.available + refused.amount\n                        FROM refused WHERE b.id = refused.buyer_id\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6d04f2e3786b2fa03748530bf5a868d4f4f860fa01143d9ba7e21a45e96d26b2"
+}

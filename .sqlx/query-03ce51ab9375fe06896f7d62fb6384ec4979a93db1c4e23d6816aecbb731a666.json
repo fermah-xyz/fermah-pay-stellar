@@ -1,0 +1,107 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.id, c.sequence, c.batch_index AS \"batch_index!\", b.wallet_address,\n                   l.contract_address, l.usdc_address, l.treasury_address,\n                   (SELECT count(*) FROM pay_stellar.charges a\n                    WHERE a.submission_id = c.submission_id) AS \"batch_size!\"\n            FROM pay_stellar.charges c\n            JOIN pay_stellar.buyers b ON b.id = c.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network\n            WHERE c.submission_id = $1 AND c.state = 'submitted'\n            ORDER BY c.batch_index\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "sequence",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.charges",
+            "name": "sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "batch_index!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.charges",
+            "name": "batch_index"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "batch_size!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "03ce51ab9375fe06896f7d62fb6384ec4979a93db1c4e23d6816aecbb731a666"
+}

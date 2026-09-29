@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH confirmed AS (\n                UPDATE pay_stellar.deposits\n                SET state = 'confirmed', resolved_at = now()\n                WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n                RETURNING buyer_id, amount\n            )\n            UPDATE pay_stellar.buyers b\n            SET available = b.available + confirmed.amount\n            FROM confirmed WHERE b.id = confirmed.buyer_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4b1b598c248cd92b9354d345b177105dc83a30a98979d1a98efb0e2ce0d60e03"
+}

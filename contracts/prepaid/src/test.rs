@@ -16,6 +16,7 @@ use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
     ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, WithdrawIntent,
+    account_charge_seq, batch_outcomes,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -1270,4 +1271,62 @@ fn test_treasury_approval_of_a_bare_transfer_cannot_fund_a_withdrawal() {
     ];
     assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), Err(auth_failure()));
     assert_eq!(w.balance(1), 10 * USDC);
+}
+
+// ---- storage layout the gateway reads -----------------------------------
+
+/// The gateway decides whether a deposit was credited, and whether a charge
+/// sequence was consumed, by reading these entries directly. Their keys and
+/// value shapes are contract-internal, so they are pinned here against the
+/// real host rather than restated in the gateway.
+#[test]
+fn test_gateway_storage_keys_match_the_contract_layout() {
+    let w = world();
+    let buyer = w.party(10 * USDC);
+    w.deposit(&buyer, 1, USDC, 1).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(1, 1, 100), w.charge(1, 2, MAX_CHARGE + 1)]).unwrap();
+    assert_eq!(outcomes, soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::AboveLimit]);
+
+    let snapshot = w.env.to_ledger_snapshot();
+    let entry = |key: &xdr::LedgerKey| {
+        snapshot.ledger_entries.iter().find(|(k, _)| **k == *key).map(|(_, (e, _))| e.data.clone())
+    };
+    let deployment = w.deployment();
+    let owner = w.owner_of(1);
+    // Both charges consumed their sequence, the refused one included.
+    let account = entry(&deployment.account_key(&owner)).expect("account entry at the derived key");
+    assert_eq!(account_charge_seq(&account), Some(2));
+    assert!(entry(&deployment.deposit_key(&owner, &id32(1))).is_some());
+    // Controls: a deposit id never used, and an owner that never deposited.
+    assert!(entry(&deployment.deposit_key(&owner, &id32(2))).is_none());
+    assert!(entry(&deployment.account_key(&w.owner_of(2))).is_none());
+}
+
+#[test]
+fn test_gateway_outcome_decoding_matches_every_contract_outcome() {
+    use fermah_pay_stellar_chain::prepaid::Outcome as Decoded;
+    let env = Env::default();
+    let all = soroban_sdk::vec![
+        &env,
+        Outcome::Charged,
+        Outcome::InsufficientBalance,
+        Outcome::AboveLimit,
+        Outcome::Duplicate,
+        Outcome::OutOfOrder,
+        Outcome::UnknownAccount,
+    ];
+    let val: Val = all.into_val(&env);
+    let encoded =
+        <xdr::ScVal as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(&env, &val).unwrap();
+    assert_eq!(
+        batch_outcomes(&encoded),
+        Some(std::vec![
+            Decoded::Charged,
+            Decoded::InsufficientBalance,
+            Decoded::AboveLimit,
+            Decoded::Duplicate,
+            Decoded::OutOfOrder,
+            Decoded::UnknownAccount,
+        ])
+    );
 }

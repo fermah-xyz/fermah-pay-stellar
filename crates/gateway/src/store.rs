@@ -11,7 +11,7 @@ use crate::scope::Scope;
 
 #[derive(Clone, Debug)]
 pub struct Store {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT available FROM pay_stellar.buyers\n            WHERE id = $1 AND product_id = $2 AND seller_deployment_id = $3 AND network = $4\n            FOR UPDATE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "available",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "available"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ddf211a4310d9d2254be37e65378a268b869bbc7f6c3eca2ecf828be0cf66e3b"
+}

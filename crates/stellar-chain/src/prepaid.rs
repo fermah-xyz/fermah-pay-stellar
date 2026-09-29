@@ -7,9 +7,10 @@
 
 use fermah_pay_stellar_domain::AccountAddress;
 use stellar_xdr::{
-    BytesM, ContractId, Hash, Int128Parts, InvokeContractArgs, ScAddress, ScBytes, ScMap,
-    ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation,
-    StringM, VecM,
+    BytesM, ContractDataDurability, ContractDataEntry, ContractId, Hash, Int128Parts,
+    InvokeContractArgs, LedgerEntryData, LedgerKey, LedgerKeyContractData, ScAddress, ScBytes,
+    ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction,
+    SorobanAuthorizedInvocation, StringM, VecM,
 };
 
 use crate::transaction::account_id;
@@ -228,6 +229,33 @@ impl PrepaidDeployment {
         invocation(self.charge_batch_call(charges), vec![])
     }
 
+    /// Ledger key of the owner's account entry, whose value carries the
+    /// balance and the last consumed charge sequence.
+    #[must_use]
+    pub fn account_key(&self, owner: &AccountAddress) -> LedgerKey {
+        self.persistent_key(vec_val(vec![symbol_val("Account"), account_val(owner)]))
+    }
+
+    /// Ledger key of the marker the contract writes when it processes
+    /// `deposit_id` for `owner`: present exactly when that deposit was
+    /// credited.
+    #[must_use]
+    pub fn deposit_key(&self, owner: &AccountAddress, deposit_id: &[u8; 32]) -> LedgerKey {
+        self.persistent_key(vec_val(vec![
+            symbol_val("Deposit"),
+            account_val(owner),
+            bytes_val(deposit_id),
+        ]))
+    }
+
+    fn persistent_key(&self, key: ScVal) -> LedgerKey {
+        LedgerKey::ContractData(LedgerKeyContractData {
+            contract: ScAddress::Contract(ContractId(Hash(self.contract))),
+            key,
+            durability: ContractDataDurability::Persistent,
+        })
+    }
+
     fn transfer(
         &self,
         from: &AccountAddress,
@@ -236,6 +264,74 @@ impl PrepaidDeployment {
     ) -> InvokeContractArgs {
         call(self.usdc, "transfer", vec![account_val(from), account_val(to), i128_val(amount)])
     }
+}
+
+/// A charge's result as `charge_batch` returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Charged,
+    InsufficientBalance,
+    AboveLimit,
+    Duplicate,
+    OutOfOrder,
+    UnknownAccount,
+}
+
+impl Outcome {
+    /// The contract encodes the enum as its `u32` discriminant.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => Self::Charged,
+            1 => Self::InsufficientBalance,
+            2 => Self::AboveLimit,
+            3 => Self::Duplicate,
+            4 => Self::OutOfOrder,
+            5 => Self::UnknownAccount,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Charged => "charged",
+            Self::InsufficientBalance => "insufficient_balance",
+            Self::AboveLimit => "above_limit",
+            Self::Duplicate => "duplicate",
+            Self::OutOfOrder => "out_of_order",
+            Self::UnknownAccount => "unknown_account",
+        }
+    }
+}
+
+/// The outcomes `charge_batch` returned, one per submitted charge in order;
+/// `None` if the value has any other shape.
+#[must_use]
+pub fn batch_outcomes(value: &ScVal) -> Option<Vec<Outcome>> {
+    let ScVal::Vec(Some(ScVec(items))) = value else { return None };
+    items
+        .iter()
+        .map(|item| match item {
+            ScVal::U32(code) => Outcome::from_code(*code),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last consumed charge sequence in an account entry read from the
+/// ledger; `None` if the entry is not an account entry of this contract.
+#[must_use]
+pub fn account_charge_seq(entry: &LedgerEntryData) -> Option<u64> {
+    let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
+        entry
+    else {
+        return None;
+    };
+    fields.iter().find_map(|field| match (&field.key, &field.val) {
+        (ScVal::Symbol(name), ScVal::U64(seq)) if name.0.as_slice() == b"charge_seq" => Some(*seq),
+        _ => None,
+    })
 }
 
 fn call(contract: [u8; 32], function: &str, args: Vec<ScVal>) -> InvokeContractArgs {

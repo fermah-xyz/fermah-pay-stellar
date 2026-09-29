@@ -1,0 +1,919 @@
+//! Settlement: submits signed deposits and batches of admitted charges
+//! through the durable submission engine, and applies each outcome to the rows
+//! it settles.
+//!
+//! A submission is recorded in the same database transaction that links it to
+//! its deposit or charges, so there is never an envelope in flight without a
+//! record of what it settles, nor a row marked submitted without its
+//! envelope. Outcomes are applied only from a final submission, one database
+//! transaction per submission; every balance change happens in the statement
+//! that moves a row into its final state, which can happen once.
+//!
+//! A submission that did not succeed is not a verdict on the rows it carried:
+//! the authorizations inside its broadcast envelope could still be included
+//! by someone else's transaction. So a deposit or charge is only released
+//! for another attempt, or declared unprocessed, after every authorization it
+//! was sent with has lapsed, and then from the contract's own state: a
+//! deposit's marker, or an account's consumed charge sequence.
+
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry};
+use fermah_pay_stellar_chain::keys::SecretKey;
+use fermah_pay_stellar_chain::network_id;
+use fermah_pay_stellar_chain::prepaid::{
+    ChargeRequest, DepositIntent, Outcome, PrepaidDeployment, account_charge_seq, batch_outcomes,
+};
+use fermah_pay_stellar_chain::rpc::RpcError;
+use fermah_pay_stellar_chain::stellar_xdr::{
+    HostFunction, LedgerEntryData, LedgerKey, Limits, ReadXdr, ScAddress, ScVal,
+    SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanCredentials,
+};
+use fermah_pay_stellar_chain::transaction::account_id;
+use fermah_pay_stellar_domain::{AccountAddress, Network};
+use sqlx::PgPool;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, State};
+
+/// The contract's batch limit.
+pub const MAX_BATCH: usize = 100;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Settings {
+    /// Ledgers the operator's authorization of a batch stays valid. A batch
+    /// that was not included is requeued only after this lapses, so it bounds
+    /// how long its charges wait.
+    pub operator_authorization_ledgers: u32,
+    /// How long work the network refused in simulation is left aside.
+    pub retry_after: Duration,
+    pub max_batch: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerError {
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error("network read failed")]
+    Chain(#[source] RpcError),
+    #[error("database operation `{operation}` failed")]
+    Store {
+        operation: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
+    #[error("stored row violates an invariant: {0}")]
+    Corrupt(&'static str),
+    #[error("signing the operator authorization")]
+    Signing(#[source] AuthorizationError),
+    #[error("operating system randomness unavailable")]
+    Randomness(#[source] getrandom::Error),
+}
+
+/// What one [`Worker::step`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    /// This worker's source still has a transaction whose outcome is open;
+    /// nothing else can be sent from it.
+    InFlight,
+    Submitted(Uuid),
+    Idle,
+}
+
+pub struct Worker<C, K> {
+    engine: Engine<C, K>,
+    pool: PgPool,
+    operator: SecretKey,
+    operator_address: AccountAddress,
+    settings: Settings,
+    /// Deposits and deployments whose last attempt the network refused in
+    /// simulation, and when they may be tried again. In memory: after a
+    /// restart they are simply tried once more.
+    set_aside: Mutex<HashMap<Uuid, OffsetDateTime>>,
+}
+
+fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> WorkerError {
+    move |source| WorkerError::Store { operation, source }
+}
+
+fn address(raw: &str) -> Result<AccountAddress, WorkerError> {
+    raw.parse().map_err(|_| WorkerError::Corrupt("address outside the CHECK constraint"))
+}
+
+fn deployment(
+    contract: &str,
+    usdc: &str,
+    treasury: &str,
+) -> Result<PrepaidDeployment, WorkerError> {
+    let contract_id = |raw: &str| {
+        stellar_strkey::Contract::from_string(raw)
+            .map(|c| c.0)
+            .map_err(|_| WorkerError::Corrupt("contract address outside the CHECK constraint"))
+    };
+    Ok(PrepaidDeployment {
+        contract: contract_id(contract)?,
+        usdc: contract_id(usdc)?,
+        treasury: address(treasury)?,
+    })
+}
+
+fn hash32(bytes: Vec<u8>) -> Result<[u8; 32], WorkerError> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| WorkerError::Corrupt("identifier is not 32 bytes"))
+}
+
+/// What a final submission means for one charge it carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChargeDecision {
+    Charged,
+    /// The contract consumed the sequence without debiting.
+    Refused(Outcome),
+    Quarantine {
+        outcome: Option<Outcome>,
+        reason: String,
+    },
+    /// Proven unprocessed: the sequence is still free on the contract.
+    Requeue(String),
+}
+
+fn decision_for(outcome: Outcome) -> ChargeDecision {
+    match outcome {
+        Outcome::Charged => ChargeDecision::Charged,
+        Outcome::InsufficientBalance | Outcome::AboveLimit => ChargeDecision::Refused(outcome),
+        // Each contradicts the gateway's own record: it sends an account's
+        // sequence only after every earlier one settled, and charges only
+        // accounts a confirmed deposit created.
+        Outcome::Duplicate | Outcome::OutOfOrder | Outcome::UnknownAccount => {
+            ChargeDecision::Quarantine {
+                outcome: Some(outcome),
+                reason: format!("contract answered {}", outcome.token()),
+            }
+        }
+    }
+}
+
+struct DepositRow {
+    id: Uuid,
+    deposit_id: [u8; 32],
+    expiration_ledger: i64,
+    owner: AccountAddress,
+    deployment: PrepaidDeployment,
+}
+
+impl<C: Chain, K: Clock> Worker<C, K> {
+    pub fn new(
+        engine: Engine<C, K>,
+        pool: PgPool,
+        operator: SecretKey,
+        settings: Settings,
+    ) -> Self {
+        Self {
+            engine,
+            pool,
+            operator_address: operator.address(),
+            operator,
+            settings,
+            set_aside: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub const fn engine(&self) -> &Engine<C, K> {
+        &self.engine
+    }
+
+    fn network(&self) -> Network {
+        self.engine.network()
+    }
+
+    /// One round: finish what is in flight, apply final outcomes, conclude
+    /// lapsed deposits, then send at most one new transaction.
+    pub async fn step(&self) -> Result<Step, WorkerError> {
+        for (_, resolution) in self.engine.recover().await? {
+            if !resolution.state.is_final() {
+                return Ok(Step::InFlight);
+            }
+        }
+        self.settle().await?;
+        self.conclude_lapsed_deposits().await?;
+        let submitted = match self.submit_deposit().await? {
+            Some(id) => Some(id),
+            None => self.submit_charges().await?,
+        };
+        let Some(id) = submitted else { return Ok(Step::Idle) };
+        self.engine.broadcast(id).await?;
+        if self.engine.resolve(id).await?.state.is_final() {
+            self.settle().await?;
+        }
+        Ok(Step::Submitted(id))
+    }
+
+    /// Steps until `shutdown` resolves: `busy_poll` apart while there is work,
+    /// `idle_poll` apart otherwise. A failed step is logged and retried.
+    pub async fn run(
+        &self,
+        busy_poll: Duration,
+        idle_poll: Duration,
+        shutdown: impl Future<Output = ()> + Send,
+    ) {
+        tokio::pin!(shutdown);
+        loop {
+            let wait = match self.step().await {
+                Ok(Step::Idle) => idle_poll,
+                Ok(Step::InFlight | Step::Submitted(_)) => busy_poll,
+                Err(error) => {
+                    tracing::error!(error = %error, source = ?std::error::Error::source(&error), "settlement step failed");
+                    idle_poll
+                }
+            };
+            tokio::select! {
+                () = &mut shutdown => return,
+                () = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+
+    fn set_aside_ids(&self) -> Vec<Uuid> {
+        let now = self.engine.clock().now();
+        self.set_aside
+            .lock()
+            .map(|map| map.iter().filter(|(_, until)| **until > now).map(|(id, _)| *id).collect())
+            .unwrap_or_default()
+    }
+
+    fn set_aside(&self, id: Uuid) {
+        let until = self.engine.clock().now()
+            + time::Duration::try_from(self.settings.retry_after).unwrap_or(time::Duration::MINUTE);
+        if let Ok(mut map) = self.set_aside.lock() {
+            map.insert(id, until);
+        }
+    }
+
+    async fn latest_ledger(&self) -> Result<i64, WorkerError> {
+        self.engine.chain().latest_ledger().await.map(i64::from).map_err(WorkerError::Chain)
+    }
+
+    async fn existing(
+        &self,
+        keys: Vec<LedgerKey>,
+    ) -> Result<HashMap<LedgerKey, LedgerEntryData>, WorkerError> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let records =
+            self.engine.chain().ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
+        Ok(records.into_iter().map(|record| (record.key, record.data)).collect())
+    }
+
+    // ---- applying outcomes -------------------------------------------------
+
+    async fn settle(&self) -> Result<(), WorkerError> {
+        let pending = sqlx::query!(
+            r#"
+            SELECT s.id, s.kind FROM pay_stellar.submissions s
+            WHERE s.network = $1 AND s.state <> 'installed'
+              AND (EXISTS (SELECT 1 FROM pay_stellar.charges c
+                           WHERE c.submission_id = s.id AND c.state = 'submitted')
+                OR EXISTS (SELECT 1 FROM pay_stellar.deposits d
+                           WHERE d.submission_id = s.id AND d.state = 'submitted'))
+            ORDER BY s.created_at
+            "#,
+            self.network().caip2(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("find settled submissions"))?;
+        for row in pending {
+            let resolution = self.engine.resolve(row.id).await?;
+            match row.kind.as_str() {
+                "charge_batch" => self.settle_charges(row.id, &resolution).await?,
+                "deposit" => self.settle_deposit(row.id, &resolution).await?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle_charges(
+        &self,
+        submission: Uuid,
+        resolution: &Resolution,
+    ) -> Result<(), WorkerError> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT c.id, c.sequence, c.batch_index AS "batch_index!", b.wallet_address,
+                   l.contract_address, l.usdc_address, l.treasury_address,
+                   (SELECT count(*) FROM pay_stellar.charges a
+                    WHERE a.submission_id = c.submission_id) AS "batch_size!"
+            FROM pay_stellar.charges c
+            JOIN pay_stellar.buyers b ON b.id = c.buyer_id
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network
+            WHERE c.submission_id = $1 AND c.state = 'submitted'
+            ORDER BY c.batch_index
+            "#,
+            submission,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("read submitted charges"))?;
+        let Some(first) = rows.first() else { return Ok(()) };
+
+        let decisions: Vec<(Uuid, ChargeDecision)> = match resolution.state {
+            State::Installed => return Ok(()),
+            State::Succeeded => {
+                let outcomes = resolution.return_value.as_ref().and_then(batch_outcomes);
+                match outcomes {
+                    Some(outcomes)
+                        if i64::try_from(outcomes.len()).ok() == Some(first.batch_size) =>
+                    {
+                        rows.iter()
+                            .map(|row| {
+                                let outcome = usize::try_from(row.batch_index)
+                                    .ok()
+                                    .and_then(|i| outcomes.get(i).copied())
+                                    .ok_or(WorkerError::Corrupt("batch index outside the batch"))?;
+                                Ok((row.id, decision_for(outcome)))
+                            })
+                            .collect::<Result<_, WorkerError>>()?
+                    }
+                    _ => {
+                        let reason = format!(
+                            "batch of {} returned {:?}",
+                            first.batch_size, resolution.return_value
+                        );
+                        rows.iter()
+                            .map(|row| {
+                                (
+                                    row.id,
+                                    ChargeDecision::Quarantine {
+                                        outcome: None,
+                                        reason: reason.clone(),
+                                    },
+                                )
+                            })
+                            .collect()
+                    }
+                }
+            }
+            State::Quarantined => rows
+                .iter()
+                .map(|row| {
+                    let reason = "the submission carrying it was quarantined".to_owned();
+                    (row.id, ChargeDecision::Quarantine { outcome: None, reason })
+                })
+                .collect(),
+            State::Failed | State::Expired => {
+                let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
+                if self.latest_ledger().await? <= horizon {
+                    return Ok(());
+                }
+                let deployment = deployment(
+                    &first.contract_address,
+                    &first.usdc_address,
+                    &first.treasury_address,
+                )?;
+                let owners =
+                    rows.iter()
+                        .map(|row| address(&row.wallet_address))
+                        .collect::<Result<HashSet<_>, _>>()?;
+                let keys: Vec<LedgerKey> =
+                    owners.iter().map(|owner| deployment.account_key(owner)).collect();
+                let entries = self.existing(keys).await?;
+                rows.iter()
+                    .map(|row| {
+                        let owner = address(&row.wallet_address)?;
+                        let consumed = match entries.get(&deployment.account_key(&owner)) {
+                            None => 0,
+                            Some(entry) => account_charge_seq(entry)
+                                .ok_or(WorkerError::Corrupt("account entry does not decode"))?,
+                        };
+                        let sequence = u64::try_from(row.sequence)
+                            .map_err(|_| WorkerError::Corrupt("negative charge sequence"))?;
+                        Ok((
+                            row.id,
+                            if consumed < sequence {
+                                ChargeDecision::Requeue(format!(
+                                    "submission {submission} was not applied; sequence {sequence} is still free"
+                                ))
+                            } else {
+                                ChargeDecision::Quarantine {
+                                    outcome: None,
+                                    reason: format!(
+                                        "submission {submission} was not applied, yet the account has consumed sequence {consumed}"
+                                    ),
+                                }
+                            },
+                        ))
+                    })
+                    .collect::<Result<_, WorkerError>>()?
+            }
+        };
+        self.apply_charge_decisions(&decisions).await
+    }
+
+    async fn apply_charge_decisions(
+        &self,
+        decisions: &[(Uuid, ChargeDecision)],
+    ) -> Result<(), WorkerError> {
+        let mut tx = self.pool.begin().await.map_err(store("begin charge settlement"))?;
+        for (id, decision) in decisions {
+            match decision {
+                ChargeDecision::Charged => {
+                    sqlx::query!(
+                        r#"
+                        UPDATE pay_stellar.charges
+                        SET state = 'charged', outcome = 'charged', settled_at = now()
+                        WHERE id = $1 AND state = 'submitted'
+                        "#,
+                        id,
+                    )
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(store("settle charge"))?;
+                }
+                // The refund is part of the same statement as the transition,
+                // so it happens exactly when the charge leaves `submitted`.
+                ChargeDecision::Refused(outcome) => {
+                    sqlx::query!(
+                        r#"
+                        WITH refused AS (
+                            UPDATE pay_stellar.charges
+                            SET state = 'refused', outcome = $2, settled_at = now()
+                            WHERE id = $1 AND state = 'submitted'
+                            RETURNING buyer_id, amount
+                        )
+                        UPDATE pay_stellar.buyers b
+                        SET available = b.available + refused.amount
+                        FROM refused WHERE b.id = refused.buyer_id
+                        "#,
+                        id,
+                        outcome.token(),
+                    )
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(store("refuse charge"))?;
+                }
+                ChargeDecision::Quarantine { outcome, reason } => {
+                    tracing::error!(charge_id = %id, reason, "charge quarantined");
+                    sqlx::query!(
+                        r#"
+                        UPDATE pay_stellar.charges
+                        SET state = 'quarantined', outcome = $2, last_error = $3, settled_at = now()
+                        WHERE id = $1 AND state = 'submitted'
+                        "#,
+                        id,
+                        outcome.map(Outcome::token),
+                        reason,
+                    )
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(store("quarantine charge"))?;
+                }
+                ChargeDecision::Requeue(reason) => {
+                    sqlx::query!(
+                        r#"
+                        UPDATE pay_stellar.charges
+                        SET state = 'admitted', submission_id = NULL, batch_index = NULL,
+                            last_error = $2
+                        WHERE id = $1 AND state = 'submitted'
+                        "#,
+                        id,
+                        reason,
+                    )
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(store("requeue charge"))?;
+                }
+            }
+        }
+        tx.commit().await.map_err(store("commit charge settlement"))
+    }
+
+    async fn settle_deposit(
+        &self,
+        submission: Uuid,
+        resolution: &Resolution,
+    ) -> Result<(), WorkerError> {
+        let Some(row) = sqlx::query!(
+            r#"
+            SELECT d.id, d.deposit_id, d.expiration_ledger, b.wallet_address,
+                   l.contract_address, l.usdc_address, l.treasury_address
+            FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network
+            WHERE d.submission_id = $1 AND d.state = 'submitted'
+            "#,
+            submission,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store("read submitted deposit"))?
+        else {
+            return Ok(());
+        };
+        let deposit = DepositRow {
+            id: row.id,
+            deposit_id: hash32(row.deposit_id)?,
+            expiration_ledger: row.expiration_ledger,
+            owner: address(&row.wallet_address)?,
+            deployment: deployment(
+                &row.contract_address,
+                &row.usdc_address,
+                &row.treasury_address,
+            )?,
+        };
+        match resolution.state {
+            State::Installed => Ok(()),
+            State::Succeeded => self.confirm(deposit.id).await,
+            State::Quarantined => {
+                tracing::error!(deposit_id = %deposit.id, "deposit quarantined");
+                self.close_deposit(
+                    deposit.id,
+                    "quarantined",
+                    "the submission carrying it was quarantined",
+                )
+                .await
+            }
+            State::Expired | State::Failed => {
+                if self.latest_ledger().await? <= deposit.expiration_ledger {
+                    if resolution.state == State::Expired {
+                        // Never included, and the buyer's signature is still
+                        // good: the same entry can be sent again. Its nonce
+                        // makes at most one inclusion possible.
+                        return self.resend_deposit(deposit.id).await;
+                    }
+                    // Included but failed: the entry may still be included
+                    // elsewhere until it lapses, so the outcome waits.
+                    return Ok(());
+                }
+                let closing = if resolution.state == State::Failed { "failed" } else { "expired" };
+                self.conclude(&[deposit], closing).await
+            }
+        }
+    }
+
+    /// Decides deposits whose authorization has lapsed from the contract's
+    /// deposit marker: credited if it exists, `closing` otherwise.
+    async fn conclude(&self, deposits: &[DepositRow], closing: &str) -> Result<(), WorkerError> {
+        let keys =
+            deposits.iter().map(|d| d.deployment.deposit_key(&d.owner, &d.deposit_id)).collect();
+        let markers = self.existing(keys).await?;
+        for deposit in deposits {
+            if markers
+                .contains_key(&deposit.deployment.deposit_key(&deposit.owner, &deposit.deposit_id))
+            {
+                self.confirm(deposit.id).await?;
+            } else {
+                self.close_deposit(
+                    deposit.id,
+                    closing,
+                    "authorization lapsed; the contract never processed it",
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Credits the deposit in the statement that moves it to `confirmed`, so
+    /// the credit happens exactly once.
+    async fn confirm(&self, id: Uuid) -> Result<(), WorkerError> {
+        sqlx::query!(
+            r#"
+            WITH confirmed AS (
+                UPDATE pay_stellar.deposits
+                SET state = 'confirmed', resolved_at = now()
+                WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')
+                RETURNING buyer_id, amount
+            )
+            UPDATE pay_stellar.buyers b
+            SET available = b.available + confirmed.amount
+            FROM confirmed WHERE b.id = confirmed.buyer_id
+            "#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("confirm deposit"))?;
+        Ok(())
+    }
+
+    async fn close_deposit(&self, id: Uuid, state: &str, reason: &str) -> Result<(), WorkerError> {
+        sqlx::query!(
+            r#"
+            UPDATE pay_stellar.deposits
+            SET state = $2, last_error = $3, resolved_at = now()
+            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')
+            "#,
+            id,
+            state,
+            reason,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("close deposit"))?;
+        Ok(())
+    }
+
+    async fn resend_deposit(&self, id: Uuid) -> Result<(), WorkerError> {
+        sqlx::query!(
+            r#"
+            UPDATE pay_stellar.deposits
+            SET state = 'signed', submission_id = NULL,
+                last_error = 'not included before its transaction expired; sending again'
+            WHERE id = $1 AND state = 'submitted'
+            "#,
+            id,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("requeue deposit"))?;
+        Ok(())
+    }
+
+    /// Deposits that were never sent, or were requeued, and whose
+    /// authorization has lapsed. The buyer holds the signed entry and may
+    /// have included it through a transaction of their own, so the marker
+    /// still decides.
+    async fn conclude_lapsed_deposits(&self) -> Result<(), WorkerError> {
+        let latest = self.latest_ledger().await?;
+        let rows = sqlx::query!(
+            r#"
+            SELECT d.id, d.deposit_id, d.expiration_ledger, b.wallet_address,
+                   l.contract_address, l.usdc_address, l.treasury_address
+            FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network
+            WHERE d.network = $1 AND l.operator_address = $2
+              AND d.state IN ('awaiting_signature', 'signed') AND d.expiration_ledger < $3
+            ORDER BY d.expiration_ledger
+            LIMIT 100
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+            latest,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("find lapsed deposits"))?;
+        let deposits = rows
+            .into_iter()
+            .map(|row| {
+                Ok(DepositRow {
+                    id: row.id,
+                    deposit_id: hash32(row.deposit_id)?,
+                    expiration_ledger: row.expiration_ledger,
+                    owner: address(&row.wallet_address)?,
+                    deployment: deployment(
+                        &row.contract_address,
+                        &row.usdc_address,
+                        &row.treasury_address,
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkerError>>()?;
+        self.conclude(&deposits, "expired").await
+    }
+
+    // ---- sending -----------------------------------------------------------
+
+    async fn submit_deposit(&self) -> Result<Option<Uuid>, WorkerError> {
+        let Some(row) = sqlx::query!(
+            r#"
+            SELECT d.id, d.amount, d.deposit_id,
+                   d.signed_authorization_xdr AS "signed_authorization_xdr!",
+                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address
+            FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network
+            WHERE d.network = $1 AND l.operator_address = $2 AND d.state = 'signed'
+              AND d.id <> ALL($3)
+            ORDER BY d.created_at
+            LIMIT 1
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+            &self.set_aside_ids(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store("find signed deposit"))?
+        else {
+            return Ok(None);
+        };
+        let deployment =
+            deployment(&row.contract_address, &row.usdc_address, &row.treasury_address)?;
+        let intent = DepositIntent {
+            owner: address(&row.wallet_address)?,
+            amount: i128::from(row.amount),
+            deposit_id: hash32(row.deposit_id)?,
+        };
+        let entry = SorobanAuthorizationEntry::from_xdr_base64(
+            &row.signed_authorization_xdr,
+            Limits::none(),
+        )
+        .map_err(|_| WorkerError::Corrupt("stored signed entry does not decode"))?;
+        // The API verified this entry against the same deposit; a mismatch
+        // here means the stored row changed, and nothing is sent for it.
+        if entry.root_invocation != deployment.deposit_authorization(&intent) {
+            tracing::error!(deposit_id = %row.id, "signed entry does not authorize this deposit");
+            self.set_aside(row.id);
+            return Ok(None);
+        }
+        let function = HostFunction::InvokeContract(deployment.deposit_call(&intent));
+        let prepared = match self.engine.prepare(Kind::Deposit, function, vec![entry]).await {
+            Ok(prepared) => prepared,
+            Err(error @ (EngineError::SimulationFailed(_) | EngineError::RestoreRequired)) => {
+                tracing::warn!(deposit_id = %row.id, error = %error, "network refused the deposit in simulation");
+                self.note_deposit(row.id, &error.to_string()).await?;
+                self.set_aside(row.id);
+                return Ok(None);
+            }
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut tx = self.pool.begin().await.map_err(store("begin deposit submission"))?;
+        match self.engine.record(&mut tx, &prepared).await {
+            Ok(_) => {}
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let linked = sqlx::query!(
+            r#"
+            UPDATE pay_stellar.deposits
+            SET state = 'submitted', submission_id = $2, last_error = NULL
+            WHERE id = $1 AND state = 'signed'
+            "#,
+            row.id,
+            prepared.id,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(store("link deposit"))?;
+        if linked.rows_affected() != 1 {
+            return Ok(None);
+        }
+        tx.commit().await.map_err(store("commit deposit submission"))?;
+        Ok(Some(prepared.id))
+    }
+
+    async fn note_deposit(&self, id: Uuid, error: &str) -> Result<(), WorkerError> {
+        sqlx::query!(
+            "UPDATE pay_stellar.deposits SET last_error = $2 WHERE id = $1 AND state = 'signed'",
+            id,
+            error,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("note deposit error"))?;
+        Ok(())
+    }
+
+    async fn submit_charges(&self) -> Result<Option<Uuid>, WorkerError> {
+        // Buyers with a charge in flight or in quarantine are skipped
+        // entirely: their next sequence is not known to be free.
+        let Some(target) = sqlx::query!(
+            r#"
+            SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address
+            FROM pay_stellar.ledger_contracts l
+            JOIN LATERAL (
+                SELECT min(c.created_at) AS oldest FROM pay_stellar.charges c
+                WHERE c.seller_deployment_id = l.seller_deployment_id AND c.state = 'admitted'
+                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p
+                                  WHERE p.buyer_id = c.buyer_id
+                                    AND p.state IN ('submitted', 'quarantined'))
+            ) o ON o.oldest IS NOT NULL
+            WHERE l.network = $1 AND l.operator_address = $2
+              AND l.seller_deployment_id <> ALL($3)
+            ORDER BY o.oldest
+            LIMIT 1
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+            &self.set_aside_ids(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store("find deployment with admitted charges"))?
+        else {
+            return Ok(None);
+        };
+        let deployment =
+            deployment(&target.contract_address, &target.usdc_address, &target.treasury_address)?;
+        let limit = i64::try_from(self.settings.max_batch.min(MAX_BATCH)).unwrap_or(1);
+        let candidates = sqlx::query!(
+            r#"
+            WITH eligible AS (
+                SELECT c.buyer_id, min(c.created_at) AS oldest
+                FROM pay_stellar.charges c
+                WHERE c.seller_deployment_id = $1 AND c.state = 'admitted'
+                  AND NOT EXISTS (SELECT 1 FROM pay_stellar.charges p
+                                  WHERE p.buyer_id = c.buyer_id
+                                    AND p.state IN ('submitted', 'quarantined'))
+                GROUP BY c.buyer_id
+                ORDER BY oldest
+                LIMIT $2
+            )
+            SELECT c.id, c.buyer_id, c.sequence, c.amount, b.wallet_address
+            FROM eligible e
+            JOIN pay_stellar.charges c ON c.buyer_id = e.buyer_id AND c.state = 'admitted'
+            JOIN pay_stellar.buyers b ON b.id = c.buyer_id
+            ORDER BY e.oldest, c.buyer_id, c.sequence
+            "#,
+            target.seller_deployment_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("read admitted charges"))?;
+        // Every eligible buyer's admitted charges, in sequence order: taking a
+        // prefix of that list keeps each buyer's charges contiguous from its
+        // next free sequence, which is the order the contract accepts.
+        let batch: Vec<_> =
+            candidates.into_iter().take(usize::try_from(limit).unwrap_or(1)).collect();
+        if batch.is_empty() {
+            return Ok(None);
+        }
+        let requests = batch
+            .iter()
+            .map(|c| {
+                Ok(ChargeRequest {
+                    owner: address(&c.wallet_address)?,
+                    seq: u64::try_from(c.sequence)
+                        .map_err(|_| WorkerError::Corrupt("negative charge sequence"))?,
+                    amount: i128::from(c.amount),
+                })
+            })
+            .collect::<Result<Vec<_>, WorkerError>>()?;
+
+        let latest = self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
+        let mut nonce = [0_u8; 8];
+        getrandom::fill(&mut nonce).map_err(WorkerError::Randomness)?;
+        let unsigned = SorobanAuthorizationEntry {
+            credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
+                address: ScAddress::Account(account_id(&self.operator_address)),
+                nonce: i64::from_le_bytes(nonce),
+                signature_expiration_ledger: latest
+                    .saturating_add(self.settings.operator_authorization_ledgers),
+                signature: ScVal::Void,
+            }),
+            root_invocation: deployment.charge_batch_authorization(&requests),
+        };
+        let signed = sign_entry(&unsigned, network_id(self.network()), &[&self.operator])
+            .map_err(WorkerError::Signing)?;
+        let function = HostFunction::InvokeContract(deployment.charge_batch_call(&requests));
+        let prepared = match self.engine.prepare(Kind::ChargeBatch, function, vec![signed]).await {
+            Ok(prepared) => prepared,
+            Err(error @ (EngineError::SimulationFailed(_) | EngineError::RestoreRequired)) => {
+                tracing::warn!(
+                    seller_deployment_id = %target.seller_deployment_id,
+                    error = %error,
+                    "network refused the charge batch in simulation"
+                );
+                self.set_aside(target.seller_deployment_id);
+                return Ok(None);
+            }
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        let ids: Vec<Uuid> = batch.iter().map(|c| c.id).collect();
+        let indexes: Vec<i16> =
+            (0..batch.len()).map(|i| i16::try_from(i).unwrap_or(i16::MAX)).collect();
+        let mut tx = self.pool.begin().await.map_err(store("begin batch submission"))?;
+        match self.engine.record(&mut tx, &prepared).await {
+            Ok(_) => {}
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let linked = sqlx::query!(
+            r#"
+            UPDATE pay_stellar.charges c
+            SET state = 'submitted', submission_id = $1, batch_index = u.batch_index,
+                last_error = NULL
+            FROM unnest($2::uuid[], $3::int2[]) AS u(id, batch_index)
+            WHERE c.id = u.id AND c.state = 'admitted'
+            "#,
+            prepared.id,
+            &ids,
+            &indexes,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(store("link charges"))?;
+        // Another worker linked some of these charges first; its batch is the
+        // one that settles them.
+        if linked.rows_affected() != u64::try_from(ids.len()).unwrap_or(u64::MAX) {
+            return Ok(None);
+        }
+        tx.commit().await.map_err(store("commit batch submission"))?;
+        Ok(Some(prepared.id))
+    }
+}

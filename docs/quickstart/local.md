@@ -44,9 +44,13 @@ The token is shown once. Store it; the database keeps only its digest.
 ```bash
 PAY_STELLAR_DATABASE_URL=postgres://pay_stellar_gateway:gateway-local@127.0.0.1:55433/pay_stellar \
 PAY_STELLAR_NETWORK=stellar:testnet \
+PAY_STELLAR_RPC_URL=https://soroban-testnet.stellar.org \
 PAY_STELLAR_LISTEN_ADDR=127.0.0.1:50051 \
-cargo run -q -p fermah-pay-stellar-gateway
+cargo run -q -p fermah-pay-stellar-gateway --bin fermah-pay-stellar-gateway
 ```
+
+The gateway checks at startup that the RPC endpoint serves the configured
+network.
 
 ## 4. Onboard a buyer on testnet
 

@@ -5,8 +5,8 @@
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use fermah_pay_stellar_domain::Network;
-use fermah_pay_stellar_gateway::issuance;
+use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -48,6 +48,20 @@ enum Command {
         #[arg(long)]
         label: String,
     },
+    /// Bind a deployment to the prepaid ledger contract it settles against,
+    /// with the treasury and operator accounts the contract was constructed
+    /// with. A binding is permanent.
+    BindLedger {
+        #[arg(long)]
+        deployment_id: Uuid,
+        /// `C...` address of the deployed contract.
+        #[arg(long)]
+        contract: String,
+        #[arg(long)]
+        treasury: AccountAddress,
+        #[arg(long)]
+        operator: AccountAddress,
+    },
     /// Revoke an API key.
     RevokeApiKey {
         #[arg(long)]
@@ -75,6 +89,14 @@ async fn main() -> anyhow::Result<()> {
         Command::IssueApiKey { deployment_id, label } => {
             let key = issuance::issue_api_key(&pool, deployment_id, &label).await?;
             serde_json::json!({ "key_id": key.id.to_string(), "token": key.token.as_str() })
+        }
+        Command::BindLedger { deployment_id, contract, treasury, operator } => {
+            let binding = LedgerBinding { contract, treasury, operator };
+            issuance::bind_ledger_contract(&pool, deployment_id, &binding).await?;
+            serde_json::json!({
+                "deployment_id": deployment_id.to_string(),
+                "contract": binding.contract,
+            })
         }
         Command::RevokeApiKey { key_id } => {
             let revoked = issuance::revoke_api_key(&pool, key_id).await?;

@@ -3,101 +3,19 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::net::SocketAddr;
+mod common;
 
+use common::{Harness, Tenant, assert_refused, authed, start, wallet};
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::issuance;
-use fermah_pay_stellar_gateway::server::serve;
-use fermah_pay_stellar_gateway::store::Store;
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::get_buyer_request::Lookup;
 use fermah_pay_stellar_proto::v1::{Buyer, CreateBuyerRequest, GetBuyerRequest};
+use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Executor, PgPool};
-use tokio::net::TcpListener;
 use tonic::transport::Channel;
-use tonic::{Code, Request, Status};
+use tonic::{Code, Request};
 use uuid::Uuid;
-
-struct Harness {
-    addr: SocketAddr,
-    owner: PgPool,
-    api: PgPool,
-    issuer: PgPool,
-    _shutdown: tokio::sync::oneshot::Sender<()>,
-}
-
-// The options `#[sqlx::test]` hands out draw from one master pool of 20
-// permits shared by every test in the binary. A test here holds several
-// connections at once (owner, API, issuer), so parented pools starve each
-// other under parallel execution. Only the owner pool stays parented; the role
-// pools are independent and small enough to stay under the server's limit.
-async fn pool_as(
-    connect: &PgConnectOptions,
-    set_role: &'static str,
-    max_connections: u32,
-) -> PgPool {
-    PgPoolOptions::new()
-        .max_connections(max_connections)
-        .after_connect(move |conn, _| {
-            Box::pin(async move {
-                conn.execute(set_role).await?;
-                Ok(())
-            })
-        })
-        .connect_with(connect.clone())
-        .await
-        .unwrap()
-}
-
-async fn start(opts: PgPoolOptions, connect: PgConnectOptions, network: Network) -> Harness {
-    let owner = opts.max_connections(1).connect_with(connect.clone()).await.unwrap();
-    let api = pool_as(&connect, "SET ROLE pay_stellar_api", 3).await;
-    let issuer = pool_as(&connect, "SET ROLE pay_stellar_issuer", 1).await;
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
-    tokio::spawn(serve(listener, Store::new(api.clone()), network, async {
-        let _ = stop.await;
-    }));
-    Harness { addr, owner, api, issuer, _shutdown: shutdown }
-}
-
-struct Tenant {
-    product_id: Uuid,
-    deployment_id: Uuid,
-    key_id: Uuid,
-    token: String,
-}
-
-impl Harness {
-    async fn client(&self) -> BuyerServiceClient<Channel> {
-        BuyerServiceClient::connect(format!("http://{}", self.addr)).await.unwrap()
-    }
-
-    async fn tenant(&self, product: &str, deployment: &str, network: Network) -> Tenant {
-        let product_id = match issuance::create_product(&self.issuer, product).await {
-            Ok(id) => id,
-            Err(_) => sqlx::query_scalar("SELECT id FROM pay_stellar.products WHERE name = $1")
-                .bind(product)
-                .fetch_one(&self.owner)
-                .await
-                .unwrap(),
-        };
-        let deployment_id =
-            issuance::create_seller_deployment(&self.issuer, product_id, deployment, network)
-                .await
-                .unwrap();
-        let key = issuance::issue_api_key(&self.issuer, deployment_id, "test").await.unwrap();
-        Tenant { product_id, deployment_id, key_id: key.id, token: key.token.to_string() }
-    }
-}
-
-fn authed<T>(message: T, token: &str) -> Request<T> {
-    let mut request = Request::new(message);
-    request.metadata_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
-    request
-}
 
 fn create(external_ref: &str, wallet: &str) -> CreateBuyerRequest {
     CreateBuyerRequest { external_ref: external_ref.to_owned(), wallet_address: wallet.to_owned() }
@@ -107,16 +25,12 @@ fn by_id(id: &str) -> GetBuyerRequest {
     GetBuyerRequest { lookup: Some(Lookup::BuyerId(id.to_owned())) }
 }
 
-fn wallet(seed: u8) -> String {
-    stellar_strkey::ed25519::PublicKey([seed; 32]).to_string().to_string()
-}
-
-fn assert_refused(status: &Status, code: Code, reason: &str) {
-    assert_eq!((status.code(), status.message()), (code, reason), "{status:?}");
+async fn client(h: &Harness) -> BuyerServiceClient<Channel> {
+    BuyerServiceClient::new(h.channel().await)
 }
 
 async fn create_buyer(h: &Harness, t: &Tenant, external_ref: &str, seed: u8) -> Buyer {
-    h.client()
+    client(h)
         .await
         .create_buyer(authed(create(external_ref, &wallet(seed)), &t.token))
         .await
@@ -134,8 +48,7 @@ async fn test_request_without_key_is_unauthenticated(
     connect: PgConnectOptions,
 ) {
     let h = start(opts, connect, Network::Testnet).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .get_buyer(Request::new(by_id(&Uuid::nil().to_string())))
         .await
@@ -150,8 +63,7 @@ async fn test_well_formed_unissued_key_is_unauthenticated(
 ) {
     let h = start(opts, connect, Network::Testnet).await;
     let forged = format!("fps_test_{}", "A".repeat(43));
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .get_buyer(authed(by_id(&Uuid::nil().to_string()), &forged))
         .await
@@ -165,11 +77,11 @@ async fn test_revoked_key_is_unauthenticated(opts: PgPoolOptions, connect: PgCon
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let buyer = create_buyer(&h, &t, "user-1", 1).await;
     // Pre-state: the key works before revocation.
-    h.client().await.get_buyer(authed(by_id(&buyer.buyer_id), &t.token)).await.unwrap();
+    client(&h).await.get_buyer(authed(by_id(&buyer.buyer_id), &t.token)).await.unwrap();
 
     assert!(issuance::revoke_api_key(&h.issuer, t.key_id).await.unwrap());
     let status =
-        h.client().await.get_buyer(authed(by_id(&buyer.buyer_id), &t.token)).await.unwrap_err();
+        client(&h).await.get_buyer(authed(by_id(&buyer.buyer_id), &t.token)).await.unwrap_err();
     assert_refused(&status, Code::Unauthenticated, "unauthenticated");
 }
 
@@ -180,8 +92,7 @@ async fn test_pubnet_key_is_refused_by_testnet_gateway(
 ) {
     let h = start(opts, connect, Network::Testnet).await;
     let live = h.tenant("alpha", "live", Network::Pubnet).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-1", &wallet(1)), &live.token))
         .await
@@ -211,8 +122,7 @@ async fn test_key_row_bound_to_pubnet_is_refused_despite_testnet_prefix(
     .execute(&h.owner)
     .await
     .unwrap();
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-1", &wallet(1)), &token))
         .await
@@ -256,10 +166,10 @@ async fn test_other_product_cannot_read_buyer_by_id(
     let b = h.tenant("beta", "main", Network::Testnet).await;
     let buyer = create_buyer(&h, &a, "user-1", 1).await;
     // Positive control: the owner reads it.
-    h.client().await.get_buyer(authed(by_id(&buyer.buyer_id), &a.token)).await.unwrap();
+    client(&h).await.get_buyer(authed(by_id(&buyer.buyer_id), &a.token)).await.unwrap();
 
     let status =
-        h.client().await.get_buyer(authed(by_id(&buyer.buyer_id), &b.token)).await.unwrap_err();
+        client(&h).await.get_buyer(authed(by_id(&buyer.buyer_id), &b.token)).await.unwrap_err();
     assert_refused(&status, Code::NotFound, "buyer_not_found");
 }
 
@@ -275,10 +185,9 @@ async fn test_other_deployment_of_same_product_cannot_read_buyer(
     let buyer = create_buyer(&h, &first, "user-1", 1).await;
 
     let request = GetBuyerRequest { lookup: Some(Lookup::ExternalRef("user-1".to_owned())) };
-    let status = h.client().await.get_buyer(authed(request, &second.token)).await.unwrap_err();
+    let status = client(&h).await.get_buyer(authed(request, &second.token)).await.unwrap_err();
     assert_refused(&status, Code::NotFound, "buyer_not_found");
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .get_buyer(authed(by_id(&buyer.buyer_id), &second.token))
         .await
@@ -296,9 +205,8 @@ async fn test_cross_scope_not_found_is_indistinguishable_from_unknown_id(
     let b = h.tenant("beta", "main", Network::Testnet).await;
     let buyer = create_buyer(&h, &a, "user-1", 1).await;
     let foreign =
-        h.client().await.get_buyer(authed(by_id(&buyer.buyer_id), &b.token)).await.unwrap_err();
-    let unknown = h
-        .client()
+        client(&h).await.get_buyer(authed(by_id(&buyer.buyer_id), &b.token)).await.unwrap_err();
+    let unknown = client(&h)
         .await
         .get_buyer(authed(by_id(&Uuid::now_v7().to_string()), &b.token))
         .await
@@ -319,8 +227,7 @@ async fn test_same_reference_in_two_deployments_creates_independent_buyers(
     let second = h.tenant("alpha", "second", Network::Testnet).await;
     let original = create_buyer(&h, &first, "user-1", 1).await;
 
-    let response = h
-        .client()
+    let response = client(&h)
         .await
         .create_buyer(authed(create("user-1", &wallet(1)), &second.token))
         .await
@@ -329,7 +236,7 @@ async fn test_same_reference_in_two_deployments_creates_independent_buyers(
     assert!(response.created);
     assert_ne!(response.buyer.unwrap().buyer_id, original.buyer_id);
     let still =
-        h.client().await.get_buyer(authed(by_id(&original.buyer_id), &first.token)).await.unwrap();
+        client(&h).await.get_buyer(authed(by_id(&original.buyer_id), &first.token)).await.unwrap();
     assert_eq!(still.into_inner().buyer.unwrap(), original);
 }
 
@@ -343,8 +250,7 @@ async fn test_identical_registration_replays_original_buyer(
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let original = create_buyer(&h, &t, "user-1", 1).await;
-    let replay = h
-        .client()
+    let replay = client(&h)
         .await
         .create_buyer(authed(create("user-1", &wallet(1)), &t.token))
         .await
@@ -361,15 +267,14 @@ async fn test_reference_reused_with_other_wallet_conflicts_and_keeps_link(
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let original = create_buyer(&h, &t, "user-1", 1).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-1", &wallet(2)), &t.token))
         .await
         .unwrap_err();
     assert_refused(&status, Code::AlreadyExists, "buyer_conflict");
     let stored =
-        h.client().await.get_buyer(authed(by_id(&original.buyer_id), &t.token)).await.unwrap();
+        client(&h).await.get_buyer(authed(by_id(&original.buyer_id), &t.token)).await.unwrap();
     assert_eq!(stored.into_inner().buyer.unwrap().wallet_address, wallet(1));
 }
 
@@ -381,8 +286,7 @@ async fn test_wallet_already_linked_to_other_reference_conflicts(
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     create_buyer(&h, &t, "user-1", 1).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-2", &wallet(1)), &t.token))
         .await
@@ -424,8 +328,7 @@ async fn test_wallet_with_bad_checksum_is_invalid(opts: PgPoolOptions, connect: 
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let mut corrupted = wallet(1);
     corrupted.replace_range(55.., if corrupted.ends_with('A') { "B" } else { "A" });
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-1", &corrupted), &t.token))
         .await
@@ -439,8 +342,7 @@ async fn test_muxed_wallet_is_unsupported(opts: PgPoolOptions, connect: PgConnec
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let muxed =
         stellar_strkey::ed25519::MuxedAccount { ed25519: [1; 32], id: 7 }.to_string().to_string();
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user-1", &muxed), &t.token))
         .await
@@ -455,8 +357,7 @@ async fn test_invalid_external_reference_is_refused(
 ) {
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .create_buyer(authed(create("user 1", &wallet(1)), &t.token))
         .await
@@ -468,8 +369,7 @@ async fn test_invalid_external_reference_is_refused(
 async fn test_lookup_without_selector_is_refused(opts: PgPoolOptions, connect: PgConnectOptions) {
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
-    let status = h
-        .client()
+    let status = client(&h)
         .await
         .get_buyer(authed(GetBuyerRequest { lookup: None }, &t.token))
         .await
@@ -482,7 +382,7 @@ async fn test_malformed_buyer_id_is_refused(opts: PgPoolOptions, connect: PgConn
     let h = start(opts, connect, Network::Testnet).await;
     let t = h.tenant("alpha", "main", Network::Testnet).await;
     let status =
-        h.client().await.get_buyer(authed(by_id("not-a-uuid"), &t.token)).await.unwrap_err();
+        client(&h).await.get_buyer(authed(by_id("not-a-uuid"), &t.token)).await.unwrap_err();
     assert_refused(&status, Code::InvalidArgument, "invalid_buyer_id");
 }
 
@@ -580,14 +480,31 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_api", "api_keys", "SELECT"),
         ("pay_stellar_api", "buyers", "INSERT"),
         ("pay_stellar_api", "buyers", "SELECT"),
+        ("pay_stellar_api", "buyers", "UPDATE"),
+        ("pay_stellar_api", "charges", "INSERT"),
+        ("pay_stellar_api", "charges", "SELECT"),
+        ("pay_stellar_api", "deposits", "INSERT"),
+        ("pay_stellar_api", "deposits", "SELECT"),
+        ("pay_stellar_api", "deposits", "UPDATE"),
+        ("pay_stellar_api", "ledger_contracts", "SELECT"),
         ("pay_stellar_api", "seller_deployments", "SELECT"),
+        ("pay_stellar_api", "submissions", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "INSERT"),
         ("pay_stellar_issuer", "api_keys", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "UPDATE"),
+        ("pay_stellar_issuer", "ledger_contracts", "INSERT"),
+        ("pay_stellar_issuer", "ledger_contracts", "SELECT"),
         ("pay_stellar_issuer", "products", "INSERT"),
         ("pay_stellar_issuer", "products", "SELECT"),
         ("pay_stellar_issuer", "seller_deployments", "INSERT"),
         ("pay_stellar_issuer", "seller_deployments", "SELECT"),
+        ("pay_stellar_worker", "buyers", "SELECT"),
+        ("pay_stellar_worker", "buyers", "UPDATE"),
+        ("pay_stellar_worker", "charges", "SELECT"),
+        ("pay_stellar_worker", "charges", "UPDATE"),
+        ("pay_stellar_worker", "deposits", "SELECT"),
+        ("pay_stellar_worker", "deposits", "UPDATE"),
+        ("pay_stellar_worker", "ledger_contracts", "SELECT"),
         ("pay_stellar_worker", "submissions", "INSERT"),
         ("pay_stellar_worker", "submissions", "SELECT"),
         ("pay_stellar_worker", "submissions", "UPDATE"),
@@ -596,4 +513,108 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
     .map(|(r, t, p)| (r.to_owned(), t.to_owned(), p.to_owned()))
     .collect();
     assert_eq!(privilege_map(&h.owner).await, expected);
+}
+
+/// Which columns each runtime role may write, on the tables where a write
+/// moves money or rebinds identity. Table-level presence is swept above; this
+/// pins the columns, so e.g. a grant letting the API insert a buyer with a
+/// balance, or letting the worker rewrite a charge's amount, shows up here.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_runtime_roles_write_exactly_the_documented_columns(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT r.role, a.attrelid::regclass::text, a.attname::text, p.privilege
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
+         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker')) AS r(role)
+         CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS p(privilege)
+         WHERE c.relname IN ('buyers', 'deposits', 'charges')
+           AND a.attnum > 0 AND NOT a.attisdropped
+           AND has_column_privilege(r.role, a.attrelid, a.attnum, p.privilege)",
+    )
+    .fetch_all(&h.owner)
+    .await
+    .unwrap();
+    let actual: std::collections::BTreeSet<String> =
+        rows.into_iter().map(|(r, t, c, p)| format!("{r} {p} {t}.{c}")).collect();
+
+    let columns = |role: &str, privilege: &str, table: &str, columns: &[&str]| {
+        columns
+            .iter()
+            .map(|c| format!("{role} {privilege} pay_stellar.{table}.{c}"))
+            .collect::<Vec<_>>()
+    };
+    let expected: std::collections::BTreeSet<String> = [
+        columns(
+            "pay_stellar_api",
+            "INSERT",
+            "buyers",
+            &[
+                "id",
+                "product_id",
+                "seller_deployment_id",
+                "network",
+                "external_ref",
+                "wallet_address",
+            ],
+        ),
+        columns("pay_stellar_api", "UPDATE", "buyers", &["available", "next_charge_seq"]),
+        columns(
+            "pay_stellar_api",
+            "INSERT",
+            "deposits",
+            &[
+                "id",
+                "buyer_id",
+                "seller_deployment_id",
+                "network",
+                "idempotency_key",
+                "amount",
+                "deposit_id",
+                "authorization_xdr",
+                "expiration_ledger",
+            ],
+        ),
+        columns(
+            "pay_stellar_api",
+            "UPDATE",
+            "deposits",
+            &["state", "signed_authorization_xdr", "signed_at"],
+        ),
+        columns(
+            "pay_stellar_api",
+            "INSERT",
+            "charges",
+            &[
+                "id",
+                "buyer_id",
+                "seller_deployment_id",
+                "network",
+                "idempotency_key",
+                "amount",
+                "sequence",
+            ],
+        ),
+        columns("pay_stellar_worker", "UPDATE", "buyers", &["available"]),
+        columns(
+            "pay_stellar_worker",
+            "UPDATE",
+            "deposits",
+            &["state", "submission_id", "last_error", "resolved_at"],
+        ),
+        columns(
+            "pay_stellar_worker",
+            "UPDATE",
+            "charges",
+            &["state", "outcome", "submission_id", "batch_index", "last_error", "settled_at"],
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert_eq!(actual, expected);
 }
