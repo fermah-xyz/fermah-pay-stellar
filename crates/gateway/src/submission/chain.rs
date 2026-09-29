@@ -1,11 +1,13 @@
-//! The four network operations the submission engine needs. `RpcClient`
-//! provides them; tests substitute a scripted network to reach crash and
-//! ambiguity windows a live network cannot be made to produce on demand.
+//! The network operations the submission engine and the settlement worker
+//! need. `RpcClient` provides them; tests substitute a scripted network to
+//! reach crash and ambiguity windows a live network cannot be made to produce
+//! on demand.
 
 use std::future::Future;
 
 use fermah_pay_stellar_chain::rpc::{
-    AuthMode, RpcClient, RpcError, SendOutcome, SimulationOutcome, TransactionStatus,
+    AuthMode, LedgerEntryRecord, RpcClient, RpcError, SendOutcome, SimulationOutcome,
+    TransactionStatus,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{
     LedgerEntryData, LedgerKey, LedgerKeyAccount, TransactionEnvelope,
@@ -35,6 +37,14 @@ pub trait Chain: Send + Sync {
         &self,
         hash: &[u8; 32],
     ) -> impl Future<Output = Result<TransactionStatus, RpcError>> + Send;
+
+    fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
+
+    /// The entries that exist among `keys`; absent keys are omitted.
+    fn ledger_entries(
+        &self,
+        keys: &[LedgerKey],
+    ) -> impl Future<Output = Result<Vec<LedgerEntryRecord>, RpcError>> + Send;
 }
 
 impl Chain for RpcClient {
@@ -60,5 +70,13 @@ impl Chain for RpcClient {
 
     async fn transaction(&self, hash: &[u8; 32]) -> Result<TransactionStatus, RpcError> {
         self.get_transaction(hash).await
+    }
+
+    async fn latest_ledger(&self) -> Result<u32, RpcError> {
+        self.get_latest_ledger().await
+    }
+
+    async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<Vec<LedgerEntryRecord>, RpcError> {
+        self.get_ledger_entries(keys).await
     }
 }

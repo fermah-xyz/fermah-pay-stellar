@@ -1,0 +1,476 @@
+//! `LedgerService` gRPC handlers: deposits, charges and balances.
+//!
+//! The API process never signs or submits a transaction. It prepares what the
+//! buyer signs, verifies what the buyer returns, and admits charges against
+//! the database balance; the worker settles both on-chain.
+
+pub mod store;
+
+use std::future::Future;
+use std::sync::Arc;
+
+use fermah_pay_stellar_chain::authorization::{
+    SignedEntryRefusal, signature_payload, verify_signed_entry,
+};
+use fermah_pay_stellar_chain::network_id;
+use fermah_pay_stellar_chain::prepaid::DepositIntent;
+use fermah_pay_stellar_chain::rpc::{RpcClient, RpcError, hex_lower};
+use fermah_pay_stellar_chain::stellar_xdr::{
+    Limits, ReadXdr, ScAddress, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    SorobanCredentials, WriteXdr,
+};
+use fermah_pay_stellar_chain::transaction::account_id;
+use fermah_pay_stellar_domain::{IdempotencyKey, Network};
+use fermah_pay_stellar_proto::v1::ledger_service_server::LedgerService;
+use fermah_pay_stellar_proto::v1::{
+    Charge, ChargeState as WireChargeState, CreateChargeRequest, CreateChargeResponse, Deposit,
+    DepositState as WireDepositState, GetBalanceRequest, GetBalanceResponse, GetChargeRequest,
+    GetChargeResponse, GetDepositRequest, GetDepositResponse, PrepareDepositRequest,
+    PrepareDepositResponse, SubmitDepositRequest, SubmitDepositResponse,
+};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tonic::{Request, Response, Status};
+use uuid::Uuid;
+
+use self::store::{Admission, ChargeRecord, ChargeState, DepositRecord, DepositState, NewDeposit};
+use crate::auth::scope_of;
+use crate::refusal::Refusal;
+use crate::scope::Scope;
+use crate::store::{Store, StoreError};
+
+/// The one network read the API needs: the current ledger, which bounds how
+/// long a buyer's signature stays valid.
+pub trait LatestLedger: Send + Sync + 'static {
+    fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
+}
+
+impl LatestLedger for RpcClient {
+    async fn latest_ledger(&self) -> Result<u32, RpcError> {
+        self.get_latest_ledger().await
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DepositPolicy {
+    /// Ledgers a buyer's deposit authorization stays valid after it is
+    /// prepared. It covers the time a person takes to approve in a wallet;
+    /// the worker can resubmit the same signed entry until it lapses.
+    pub authorization_validity_ledgers: u32,
+}
+
+pub struct LedgerApi<L> {
+    store: Store,
+    ledger: Arc<L>,
+    network: Network,
+    policy: DepositPolicy,
+}
+
+impl<L> LedgerApi<L> {
+    pub fn new(store: Store, ledger: L, network: Network, policy: DepositPolicy) -> Self {
+        Self { store, ledger: Arc::new(ledger), network, policy }
+    }
+}
+
+fn internal(error: &StoreError) -> Status {
+    tracing::error!(error = %error, source = ?std::error::Error::source(error), "store failure");
+    Refusal::Internal.into()
+}
+
+fn corrupt(what: &'static str) -> Status {
+    tracing::error!(what, "stored ledger row does not decode");
+    Refusal::Internal.into()
+}
+
+fn network_unavailable(error: &RpcError) -> Status {
+    tracing::warn!(error = %error, "reading the latest ledger");
+    Refusal::NetworkUnavailable.into()
+}
+
+fn parse_id(raw: &str, refusal: Refusal) -> Result<Uuid, Refusal> {
+    Uuid::parse_str(raw).map_err(|_| refusal)
+}
+
+fn parse_amount(amount: i64) -> Result<i64, Refusal> {
+    if amount > 0 { Ok(amount) } else { Err(Refusal::InvalidAmount) }
+}
+
+fn parse_key(raw: &str) -> Result<IdempotencyKey, Refusal> {
+    raw.parse().map_err(|_| Refusal::InvalidIdempotencyKey)
+}
+
+fn timestamp(at: OffsetDateTime) -> Result<String, Status> {
+    at.format(&Rfc3339).map_err(|error| {
+        tracing::error!(error = %error, "formatting timestamp");
+        Status::from(Refusal::Internal)
+    })
+}
+
+fn wire_ledger(ledger: Option<i32>) -> u32 {
+    ledger.and_then(|l| u32::try_from(l).ok()).unwrap_or(0)
+}
+
+fn random<const N: usize>() -> Result<[u8; N], Status> {
+    let mut bytes = [0_u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        tracing::error!(error = %error, "operating system randomness unavailable");
+        Status::from(Refusal::Internal)
+    })?;
+    Ok(bytes)
+}
+
+fn decode_entry(xdr: &str) -> Option<SorobanAuthorizationEntry> {
+    SorobanAuthorizationEntry::from_xdr_base64(xdr, Limits::none()).ok()
+}
+
+/// `entry` with its signature cleared: what the buyer agreed to, which must
+/// equal the prepared entry field for field.
+fn unsigned(entry: &SorobanAuthorizationEntry) -> SorobanAuthorizationEntry {
+    let clear = |creds: &SorobanAddressCredentials| SorobanAddressCredentials {
+        signature: ScVal::Void,
+        ..creds.clone()
+    };
+    let credentials = match &entry.credentials {
+        SorobanCredentials::Address(creds) => SorobanCredentials::Address(clear(creds)),
+        SorobanCredentials::AddressV2(creds) => SorobanCredentials::AddressV2(clear(creds)),
+        other => other.clone(),
+    };
+    SorobanAuthorizationEntry { credentials, root_invocation: entry.root_invocation.clone() }
+}
+
+const fn signature_refusal(refusal: &SignedEntryRefusal) -> Refusal {
+    match refusal {
+        SignedEntryRefusal::Expired { .. } => Refusal::DepositExpired,
+        SignedEntryRefusal::BadSignature | SignedEntryRefusal::UnsupportedSignature => {
+            Refusal::InvalidSignature
+        }
+        SignedEntryRefusal::NotAnAddressEntry
+        | SignedEntryRefusal::WrongSigner
+        | SignedEntryRefusal::InvocationMismatch
+        | SignedEntryRefusal::ValidityTooLong { .. } => Refusal::AuthorizationMismatch,
+    }
+}
+
+enum Signing {
+    /// The deposit awaits a signature.
+    Open,
+    /// The deposit already holds exactly this signed entry: a retry of a
+    /// submission that succeeded, which changes nothing.
+    Replay,
+    Closed(Refusal),
+}
+
+fn signing(record: &DepositRecord, signed: &SorobanAuthorizationEntry) -> Signing {
+    let stored = record.signed_authorization_xdr.as_deref().and_then(decode_entry);
+    match record.state {
+        DepositState::AwaitingSignature => Signing::Open,
+        _ if stored.as_ref() == Some(signed) => Signing::Replay,
+        DepositState::Expired => Signing::Closed(Refusal::DepositExpired),
+        _ => Signing::Closed(Refusal::DepositAlreadySigned),
+    }
+}
+
+const fn deposit_state(state: DepositState) -> WireDepositState {
+    match state {
+        DepositState::AwaitingSignature => WireDepositState::AwaitingSignature,
+        DepositState::Signed => WireDepositState::Signed,
+        DepositState::Submitted => WireDepositState::Submitted,
+        DepositState::Confirmed => WireDepositState::Confirmed,
+        DepositState::Failed => WireDepositState::Failed,
+        DepositState::Expired => WireDepositState::Expired,
+        DepositState::Quarantined => WireDepositState::Quarantined,
+    }
+}
+
+const fn charge_state(state: ChargeState) -> WireChargeState {
+    match state {
+        ChargeState::Admitted => WireChargeState::Admitted,
+        ChargeState::Submitted => WireChargeState::Submitted,
+        ChargeState::Charged => WireChargeState::Charged,
+        ChargeState::Refused => WireChargeState::Refused,
+        ChargeState::Quarantined => WireChargeState::Quarantined,
+    }
+}
+
+impl<L> LedgerApi<L> {
+    fn deposit_to_wire(&self, record: DepositRecord) -> Result<Deposit, Status> {
+        let entry = decode_entry(&record.authorization_xdr)
+            .ok_or_else(|| corrupt("authorization entry"))?;
+        let payload =
+            signature_payload(network_id(self.network), &entry.credentials, &entry.root_invocation)
+                .map_err(|_| corrupt("authorization credentials"))?;
+        Ok(Deposit {
+            deposit_id: record.id.to_string(),
+            buyer_id: record.buyer_id.to_string(),
+            amount: record.amount,
+            state: deposit_state(record.state).into(),
+            authorization_entry_xdr: record.authorization_xdr,
+            signature_payload: hex_lower(&payload),
+            expiration_ledger: u32::try_from(record.expiration_ledger)
+                .map_err(|_| corrupt("expiration ledger"))?,
+            transaction_hash: record.transaction_hash.as_deref().map(hex_lower).unwrap_or_default(),
+            ledger: wire_ledger(record.ledger),
+            created_at: timestamp(record.created_at)?,
+        })
+    }
+}
+
+fn charge_to_wire(record: ChargeRecord) -> Result<Charge, Status> {
+    Ok(Charge {
+        charge_id: record.id.to_string(),
+        buyer_id: record.buyer_id.to_string(),
+        amount: record.amount,
+        sequence: u64::try_from(record.sequence).map_err(|_| corrupt("charge sequence"))?,
+        state: charge_state(record.state).into(),
+        outcome: record.outcome.unwrap_or_default(),
+        transaction_hash: record.transaction_hash.as_deref().map(hex_lower).unwrap_or_default(),
+        ledger: wire_ledger(record.ledger),
+        created_at: timestamp(record.created_at)?,
+    })
+}
+
+fn record_scope(scope: &Scope) {
+    tracing::Span::current()
+        .record("seller_deployment_id", tracing::field::display(scope.seller_deployment_id()));
+}
+
+impl<L: LatestLedger> LedgerApi<L> {
+    /// The existing deposit under `key`, if the request repeats it exactly.
+    fn replay_deposit(
+        &self,
+        existing: DepositRecord,
+        buyer_id: Uuid,
+        amount: i64,
+    ) -> Result<Response<PrepareDepositResponse>, Status> {
+        if existing.buyer_id != buyer_id || existing.amount != amount {
+            return Err(Refusal::IdempotencyConflict.into());
+        }
+        Ok(Response::new(PrepareDepositResponse {
+            deposit: Some(self.deposit_to_wire(existing)?),
+            created: false,
+        }))
+    }
+
+    async fn existing_deposit(
+        &self,
+        scope: &Scope,
+        id: Option<Uuid>,
+        key: Option<&IdempotencyKey>,
+    ) -> Result<Option<DepositRecord>, Status> {
+        self.store.deposit(scope, id, key).await.map_err(|e| internal(&e))
+    }
+}
+
+#[tonic::async_trait]
+impl<L: LatestLedger> LedgerService for LedgerApi<L> {
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_deposit(
+        &self,
+        request: Request<PrepareDepositRequest>,
+    ) -> Result<Response<PrepareDepositResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let body = request.into_inner();
+        let buyer_id = parse_id(&body.buyer_id, Refusal::InvalidBuyerId)?;
+        let amount = parse_amount(body.amount)?;
+        let key = parse_key(&body.idempotency_key)?;
+        if let Some(existing) = self.existing_deposit(&scope, None, Some(&key)).await? {
+            return self.replay_deposit(existing, buyer_id, amount);
+        }
+
+        let deployment = self
+            .store
+            .ledger_binding(&scope)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or(Refusal::LedgerNotConfigured)?;
+        let wallet = self
+            .store
+            .buyer_wallet(&scope, buyer_id)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or(Refusal::BuyerNotFound)?;
+        let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+        let expiration_ledger = latest
+            .checked_add(self.policy.authorization_validity_ledgers)
+            .ok_or(Refusal::Internal)?;
+        let intent = DepositIntent {
+            owner: wallet.clone(),
+            amount: i128::from(amount),
+            deposit_id: random()?,
+        };
+        // `AddressV2` credentials commit the signature to the buyer's address
+        // as well as the call, so it cannot authorize another account that
+        // shares the key.
+        let entry = SorobanAuthorizationEntry {
+            credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
+                address: ScAddress::Account(account_id(&wallet)),
+                nonce: i64::from_le_bytes(random()?),
+                signature_expiration_ledger: expiration_ledger,
+                signature: ScVal::Void,
+            }),
+            root_invocation: deployment.deposit_authorization(&intent),
+        };
+        let authorization_xdr =
+            entry.to_xdr_base64(Limits::none()).map_err(|_| corrupt("new authorization entry"))?;
+
+        let inserted = self
+            .store
+            .insert_deposit(
+                &scope,
+                &NewDeposit {
+                    buyer_id,
+                    key: &key,
+                    amount,
+                    deposit_id: intent.deposit_id,
+                    authorization_xdr: &authorization_xdr,
+                    expiration_ledger,
+                },
+            )
+            .await
+            .map_err(|e| internal(&e))?;
+        let Some(id) = inserted else {
+            // A concurrent request with the same key committed first.
+            let existing =
+                self.existing_deposit(&scope, None, Some(&key)).await?.ok_or(Refusal::Internal)?;
+            return self.replay_deposit(existing, buyer_id, amount);
+        };
+        let created =
+            self.existing_deposit(&scope, Some(id), None).await?.ok_or(Refusal::Internal)?;
+        Ok(Response::new(PrepareDepositResponse {
+            deposit: Some(self.deposit_to_wire(created)?),
+            created: true,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_deposit(
+        &self,
+        request: Request<SubmitDepositRequest>,
+    ) -> Result<Response<SubmitDepositResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let body = request.into_inner();
+        let id = parse_id(&body.deposit_id, Refusal::InvalidDepositId)?;
+        let signed = decode_entry(&body.signed_authorization_entry_xdr)
+            .ok_or(Refusal::InvalidAuthorizationEntry)?;
+        let respond = |record: DepositRecord| -> Result<Response<SubmitDepositResponse>, Status> {
+            Ok(Response::new(SubmitDepositResponse {
+                deposit: Some(self.deposit_to_wire(record)?),
+            }))
+        };
+
+        let record =
+            self.existing_deposit(&scope, Some(id), None).await?.ok_or(Refusal::DepositNotFound)?;
+        match signing(&record, &signed) {
+            Signing::Open => {}
+            Signing::Replay => return respond(record),
+            Signing::Closed(refusal) => return Err(refusal.into()),
+        }
+        let prepared = decode_entry(&record.authorization_xdr)
+            .ok_or_else(|| corrupt("authorization entry"))?;
+        if unsigned(&signed) != prepared {
+            return Err(Refusal::AuthorizationMismatch.into());
+        }
+        let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+        verify_signed_entry(
+            &signed,
+            &record.wallet,
+            &prepared.root_invocation,
+            network_id(self.network),
+            latest,
+            self.policy.authorization_validity_ledgers,
+        )
+        .map_err(|refusal| signature_refusal(&refusal))?;
+
+        let signed_xdr = signed
+            .to_xdr_base64(Limits::none())
+            .map_err(|_| corrupt("signed authorization entry"))?;
+        self.store.sign_deposit(&scope, id, &signed_xdr).await.map_err(|e| internal(&e))?;
+        // Whether this request or a concurrent one stored the signature, the
+        // stored row now decides the answer.
+        let record =
+            self.existing_deposit(&scope, Some(id), None).await?.ok_or(Refusal::Internal)?;
+        match signing(&record, &signed) {
+            Signing::Replay => respond(record),
+            Signing::Closed(refusal) => Err(refusal.into()),
+            Signing::Open => Err(corrupt("deposit still unsigned after signing")),
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_deposit(
+        &self,
+        request: Request<GetDepositRequest>,
+    ) -> Result<Response<GetDepositResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let id = parse_id(&request.into_inner().deposit_id, Refusal::InvalidDepositId)?;
+        let record =
+            self.existing_deposit(&scope, Some(id), None).await?.ok_or(Refusal::DepositNotFound)?;
+        Ok(Response::new(GetDepositResponse { deposit: Some(self.deposit_to_wire(record)?) }))
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn create_charge(
+        &self,
+        request: Request<CreateChargeRequest>,
+    ) -> Result<Response<CreateChargeResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let body = request.into_inner();
+        let buyer_id = parse_id(&body.buyer_id, Refusal::InvalidBuyerId)?;
+        let amount = parse_amount(body.amount)?;
+        let key = parse_key(&body.idempotency_key)?;
+        let (record, created) = match self
+            .store
+            .admit_charge(&scope, buyer_id, amount, &key)
+            .await
+            .map_err(|e| internal(&e))?
+        {
+            Admission::Admitted(record) => (record, true),
+            Admission::Replayed(record) => (record, false),
+            Admission::Conflict => return Err(Refusal::IdempotencyConflict.into()),
+            Admission::BuyerNotFound => return Err(Refusal::BuyerNotFound.into()),
+            Admission::InsufficientBalance => return Err(Refusal::InsufficientBalance.into()),
+        };
+        Ok(Response::new(CreateChargeResponse { charge: Some(charge_to_wire(record)?), created }))
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_charge(
+        &self,
+        request: Request<GetChargeRequest>,
+    ) -> Result<Response<GetChargeResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let id = parse_id(&request.into_inner().charge_id, Refusal::InvalidChargeId)?;
+        let record = self
+            .store
+            .charge(&scope, id)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or(Refusal::ChargeNotFound)?;
+        Ok(Response::new(GetChargeResponse { charge: Some(charge_to_wire(record)?) }))
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_balance(
+        &self,
+        request: Request<GetBalanceRequest>,
+    ) -> Result<Response<GetBalanceResponse>, Status> {
+        let scope = scope_of(&request)?;
+        record_scope(&scope);
+        let buyer_id = parse_id(&request.into_inner().buyer_id, Refusal::InvalidBuyerId)?;
+        let balance = self
+            .store
+            .balance(&scope, buyer_id)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or(Refusal::BuyerNotFound)?;
+        Ok(Response::new(GetBalanceResponse {
+            available: balance.available,
+            pending_charges: balance.pending_charges,
+        }))
+    }
+}

@@ -1,0 +1,173 @@
+syntax = "proto3";
+
+package fermah.pay.stellar.v1;
+
+// Deposits into and charges against buyer balances on the deployment's
+// prepaid ledger contract.
+//
+// Scope and refusals follow the same rules as `BuyerService`: the API key
+// selects the deployment, a resource of another deployment is reported as
+// not found, and each refusal is one stable reason token documented in
+// docs/api/ledger.md.
+//
+// Amounts are USDC base units: one USDC is 10,000,000 units.
+service LedgerService {
+  // Creates a deposit and returns the authorization entry the buyer's wallet
+  // must sign. The buyer pays no network fee and needs no XLM. Repeating a
+  // request with the same idempotency key, buyer and amount returns the
+  // existing deposit with `created = false`; any other reuse of the key is
+  // refused.
+  rpc PrepareDeposit(PrepareDepositRequest) returns (PrepareDepositResponse);
+
+  // Stores the buyer's signed authorization entry after verifying it against
+  // the prepared one. The deposit is then submitted asynchronously; poll
+  // `GetDeposit` for the outcome. Submitting the same signed entry again is
+  // accepted and changes nothing.
+  rpc SubmitDeposit(SubmitDepositRequest) returns (SubmitDepositResponse);
+
+  rpc GetDeposit(GetDepositRequest) returns (GetDepositResponse);
+
+  // Admits a charge: debits the buyer's available balance at once and queues
+  // the charge for on-chain settlement in a batch. Repeating a request with
+  // the same idempotency key, buyer and amount returns the existing charge
+  // with `created = false` and debits nothing; any other reuse of the key is
+  // refused.
+  rpc CreateCharge(CreateChargeRequest) returns (CreateChargeResponse);
+
+  rpc GetCharge(GetChargeRequest) returns (GetChargeResponse);
+
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+}
+
+enum DepositState {
+  DEPOSIT_STATE_UNSPECIFIED = 0;
+  // Waiting for the buyer's signed authorization entry.
+  DEPOSIT_STATE_AWAITING_SIGNATURE = 1;
+  // Signed and verified; waiting to be submitted.
+  DEPOSIT_STATE_SIGNED = 2;
+  // In a transaction sent to the network.
+  DEPOSIT_STATE_SUBMITTED = 3;
+  // Included on-chain and credited to the available balance.
+  DEPOSIT_STATE_CONFIRMED = 4;
+  // Refused or included as failed; nothing was credited.
+  DEPOSIT_STATE_FAILED = 5;
+  // The authorization lapsed before the deposit was included.
+  DEPOSIT_STATE_EXPIRED = 6;
+  // The gateway could not establish the outcome; an operator is reviewing.
+  DEPOSIT_STATE_QUARANTINED = 7;
+}
+
+message Deposit {
+  string deposit_id = 1;
+  string buyer_id = 2;
+  int64 amount = 3;
+  DepositState state = 4;
+  // Base64 XDR `SorobanAuthorizationEntry` for the buyer's wallet to sign.
+  // It authorizes exactly this deposit and the USDC transfer to the
+  // deployment's treasury, and nothing else.
+  string authorization_entry_xdr = 5;
+  // Hex SHA-256 payload the wallet key signs to authorize the entry, for
+  // signers that sign raw payloads rather than entries.
+  string signature_payload = 6;
+  // Last ledger in which the signed entry is valid.
+  uint32 expiration_ledger = 7;
+  // Hex hash of the transaction that carries the deposit, once submitted.
+  string transaction_hash = 8;
+  // Ledger that included it, once confirmed or failed on-chain.
+  uint32 ledger = 9;
+  string created_at = 10;
+}
+
+message PrepareDepositRequest {
+  string buyer_id = 1;
+  int64 amount = 2;
+  // 1-128 characters of [A-Za-z0-9._:@+-], unique within the deployment.
+  string idempotency_key = 3;
+}
+
+message PrepareDepositResponse {
+  Deposit deposit = 1;
+  bool created = 2;
+}
+
+message SubmitDepositRequest {
+  string deposit_id = 1;
+  // Base64 XDR of the entry from `PrepareDeposit`, with the wallet's
+  // signature set and every other field unchanged.
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitDepositResponse {
+  Deposit deposit = 1;
+}
+
+message GetDepositRequest {
+  string deposit_id = 1;
+}
+
+message GetDepositResponse {
+  Deposit deposit = 1;
+}
+
+enum ChargeState {
+  CHARGE_STATE_UNSPECIFIED = 0;
+  // Debited from the available balance; waiting for a batch.
+  CHARGE_STATE_ADMITTED = 1;
+  // In a batch sent to the network.
+  CHARGE_STATE_SUBMITTED = 2;
+  // Settled on-chain.
+  CHARGE_STATE_CHARGED = 3;
+  // Refused by the contract; the amount was returned to the available
+  // balance. `outcome` says why.
+  CHARGE_STATE_REFUSED = 4;
+  // The contract's answer contradicts the gateway's records; the amount
+  // stays debited while an operator reviews.
+  CHARGE_STATE_QUARANTINED = 5;
+}
+
+message Charge {
+  string charge_id = 1;
+  string buyer_id = 2;
+  int64 amount = 3;
+  // The buyer account's charge sequence number on the contract.
+  uint64 sequence = 4;
+  ChargeState state = 5;
+  // The contract's outcome token once settled: `charged`,
+  // `insufficient_balance`, `above_limit`, `duplicate`, `out_of_order` or
+  // `unknown_account`.
+  string outcome = 6;
+  string transaction_hash = 7;
+  uint32 ledger = 8;
+  string created_at = 9;
+}
+
+message CreateChargeRequest {
+  string buyer_id = 1;
+  int64 amount = 2;
+  // 1-128 characters of [A-Za-z0-9._:@+-], unique within the deployment.
+  string idempotency_key = 3;
+}
+
+message CreateChargeResponse {
+  Charge charge = 1;
+  bool created = 2;
+}
+
+message GetChargeRequest {
+  string charge_id = 1;
+}
+
+message GetChargeResponse {
+  Charge charge = 1;
+}
+
+message GetBalanceRequest {
+  string buyer_id = 1;
+}
+
+message GetBalanceResponse {
+  // What new charges may still debit.
+  int64 available = 1;
+  // Admitted or submitted charges not yet settled on-chain.
+  int64 pending_charges = 2;
+}

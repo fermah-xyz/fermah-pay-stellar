@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.deposits\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, deposit_id,\n                 authorization_xdr, expiration_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Bytea",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0a1cde0d41e8858e57121fec2e853c296aa4ca41647248cfce24913792691a4c"
+}

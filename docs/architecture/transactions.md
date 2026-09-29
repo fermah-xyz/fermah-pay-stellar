@@ -84,6 +84,48 @@ schema in [`0002_submissions.sql`](../../db/migrations/0002_submissions.sql)):
   bytes unchanged and resolves it by hash. After `expired`, the next envelope
   reuses the sequence that was never consumed.
 
+## Settlement
+
+The worker ([`crates/gateway/src/worker.rs`](../../crates/gateway/src/worker.rs))
+turns signed deposits and admitted charges into submissions and applies the
+outcomes:
+
+- **Recorded with what it settles.** A submission is recorded in the same
+  database transaction that marks its deposit or charges as submitted and
+  records each charge's position in the batch. A crash leaves either both or
+  neither, so there is never an envelope in flight without a record of what
+  it settles.
+- **Outcomes applied once.** A deposit is credited, and a refused charge's
+  amount returned, in the same statement that moves the row into its final
+  state; final states cannot be left, so each balance change happens once.
+- **Charges in contract order.** A batch takes each buyer's admitted charges
+  in sequence order, starting at the buyer's next unconsumed sequence. A buyer
+  with a charge in flight or in quarantine gets no new batch until it is
+  resolved.
+- **A lapsed authorization decides, not a missing transaction.** When a
+  submission fails or expires, the authorizations in its broadcast envelope
+  could still be included by someone else's transaction until their
+  expiration ledger. So the worker waits for them to lapse and then reads the
+  contract's own state: for a deposit, the marker the contract writes when it
+  processes that deposit ID; for a charge, the account's last consumed
+  sequence. A deposit whose marker exists is credited; a charge whose sequence
+  is still free is admitted again for the next batch; a charge whose sequence
+  was consumed outside the gateway's batch is quarantined. A deposit whose
+  transaction expired while the buyer's signature is still valid is sent
+  again with the same signed entry, which its nonce lets land at most once.
+
+| Contract outcome | Charge becomes | Available balance |
+|---|---|---|
+| `charged` | `charged` | stays debited |
+| `insufficient_balance`, `above_limit` | `refused` | amount returned |
+| `duplicate`, `out_of_order`, `unknown_account` | `quarantined` | stays debited |
+
+The last row contradicts the gateway's own records: it sends an account's
+sequence only after every earlier one settled, and charges only accounts a
+confirmed deposit created. The charge is held for an operator rather than
+guessed at. A charge is also quarantined when its batch's outcome cannot be
+established.
+
 ## Credentials
 
 Authorization entries can use legacy `Address` credentials or `AddressV2`,

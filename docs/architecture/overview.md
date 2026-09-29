@@ -6,7 +6,7 @@
 |---|---|---|
 | Buyer | A classic Stellar `G...` account owned by an end user | Its own key and USDC |
 | Seller | A product that bills buyers, identified by a seller deployment | API keys for the gateway |
-| Operator | Whoever runs the gateway | Sponsor key that pays onboarding fees and reserves |
+| Operator | Whoever runs the gateway | Sponsor key that pays onboarding fees and reserves; the keys that submit transactions, pay their fees and authorize charges |
 
 Paying a transaction fee on someone's behalf and paying their account
 reserves are different things on Stellar. The system keeps them separate,
@@ -15,15 +15,23 @@ and its evidence shows each one separately.
 ## Components
 
 ```text
-seller ──gRPC + API key──> gateway ──> PostgreSQL
-
-operator tools ──> Stellar RPC (reads, submission)
-buyer key ── signs ──> onboarding transaction
+seller ──gRPC + API key──> gateway ──> PostgreSQL <── worker ──> Stellar RPC
+                              │                                     ▲
+buyer wallet ── signs the deposit authorization the gateway prepared │
+                                                                     │
+operator tools ──────────────────────────────────────────────────────┘
 ```
 
-- **Gateway** (`crates/gateway`): the authenticated gRPC API. It resolves each
-  API key to one tenancy scope and serves only data in that scope. It holds
-  no Stellar signing keys.
+- **Gateway** (`crates/gateway`, binary `fermah-pay-stellar-gateway`): the
+  authenticated gRPC API. It resolves each API key to one tenancy scope and
+  serves only data in that scope. It prepares the deposit authorizations
+  buyers sign, verifies what they return, and admits charges against the
+  buyer's available balance. It holds no Stellar signing keys.
+- **Worker** (binary `fermah-pay-stellar-worker`): the only process that
+  signs and sends transactions. It submits signed deposits and batches of
+  admitted charges through the durable submission engine and applies each
+  outcome to the rows it settles; see
+  [settlement](transactions.md#settlement).
 - **Stellar access** (`crates/stellar-chain`): key handling, transaction
   signing, the USDC asset identity per network, a typed Stellar RPC client,
   and sponsored buyer onboarding.
@@ -42,6 +50,28 @@ and the key determines the product, deployment and network the request acts
 in; no request field can select or override them. Every buyer query binds
 that scope, and a buyer of another deployment is reported exactly like a
 buyer that does not exist. See [tenancy and authentication](tenancy.md).
+
+## Deposits and charges
+
+A buyer's balance lives in the deployment's
+[prepaid ledger contract](prepaid-contract.md), and its USDC in the
+deployment's treasury account. The gateway keeps an admission view of each
+buyer:
+
+- a **deposit** is prepared by the gateway, authorized by the buyer's wallet
+  with one signature, and submitted and paid for by the worker; once the
+  contract has processed it, the amount is added to the buyer's `available`
+  balance;
+- a **charge** is admitted by the gateway only if `available` covers it: it is
+  debited at once and given the buyer's next contract sequence number, then
+  settled on-chain in a batch of up to 100.
+
+The database balance is an admission limit, not the authority. The contract
+refuses any charge above the on-chain balance and accepts each account's
+sequence numbers once and in order, so neither a gateway bug nor a
+compromised API process can settle the same charge twice or overdraw a buyer
+on-chain.
+See the [ledger API](../api/ledger.md).
 
 ## Assets
 

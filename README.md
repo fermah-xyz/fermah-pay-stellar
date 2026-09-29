@@ -11,6 +11,11 @@ It provides:
   and API keys scoped to a single deployment.
 - **Buyer API**: a gRPC service to register buyers and link their Stellar
   wallets ([reference](docs/api/buyer.md)).
+- **Ledger API and settlement**: deposits the buyer authorizes with one
+  wallet signature and never pays a fee for, charges admitted against the
+  buyer's balance and settled in batches of up to 100, and idempotent retries
+  ([reference](docs/api/ledger.md),
+  [settlement](docs/architecture/transactions.md#settlement)).
 - **Prepaid ledger contract** (Soroban): buyer credit and seller revenue over
   USDC held in a separate treasury, with per-account replay protection and
   batches of up to 100 charges in one call
@@ -31,7 +36,8 @@ It provides:
 contracts/prepaid     Soroban prepaid ledger contract
 crates/domain         validated values (network, account address, external reference)
 crates/stellar-chain  keys, transaction signing, USDC identity, Stellar RPC client, onboarding
-crates/gateway        gRPC API daemon, authentication, PostgreSQL store, key issuance
+crates/gateway        gRPC API and settlement worker daemons, authentication, PostgreSQL store,
+                      durable submission, key issuance
 crates/proto          generated gRPC types
 crates/cli            operator tools: fermah-pay-stellar-admin, fermah-pay-stellar-testnet
 proto/                gRPC API definitions
@@ -58,6 +64,7 @@ Continue with the [quickstart](docs/quickstart/local.md).
 
 - [Architecture](docs/architecture/overview.md)
 - [Buyer API](docs/api/buyer.md)
+- [Ledger API](docs/api/ledger.md)
 - [Local quickstart](docs/quickstart/local.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
 - [Evidence](docs/evidence/README.md)

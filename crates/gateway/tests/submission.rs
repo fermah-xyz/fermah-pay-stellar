@@ -10,13 +10,15 @@ use std::time::Duration;
 
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::rpc::{
-    IncludedTransaction, RpcError, SendOutcome, Simulation, SimulationOutcome, TransactionStatus,
+    IncludedTransaction, LedgerEntryRecord, RpcError, SendOutcome, Simulation, SimulationOutcome,
+    TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    ContractId, Hash, HostFunction, InvokeContractArgs, LedgerFootprint, Limits, ReadXdr,
-    ScAddress, ScSymbol, SorobanResources, SorobanTransactionData, SorobanTransactionDataExt,
-    TransactionEnvelope, TransactionResult, TransactionResultExt, TransactionResultResult, VecM,
+    ContractId, Hash, HostFunction, InvokeContractArgs, LedgerFootprint, LedgerKey, Limits,
+    ReadXdr, ScAddress, ScSymbol, SorobanResources, SorobanTransactionData,
+    SorobanTransactionDataExt, TransactionEnvelope, TransactionResult, TransactionResultExt,
+    TransactionResultResult, VecM,
 };
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::submission::{
@@ -168,6 +170,14 @@ impl Chain for FakeChain {
 
     async fn transaction(&self, hash: &[u8; 32]) -> Result<TransactionStatus, RpcError> {
         Ok(self.with(|n| n.included.get(hash).cloned()).unwrap_or(TransactionStatus::NotFound))
+    }
+
+    async fn latest_ledger(&self) -> Result<u32, RpcError> {
+        Ok(1)
+    }
+
+    async fn ledger_entries(&self, _: &[LedgerKey]) -> Result<Vec<LedgerEntryRecord>, RpcError> {
+        Ok(Vec::new())
     }
 }
 

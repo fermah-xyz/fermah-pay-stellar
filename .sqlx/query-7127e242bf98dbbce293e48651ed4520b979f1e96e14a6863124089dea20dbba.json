@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE pay_stellar.charges\n                        SET state = 'charged', outcome = 'charged', settled_at = now()\n                        WHERE id = $1 AND state = 'submitted'\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7127e242bf98dbbce293e48651ed4520b979f1e96e14a6863124089dea20dbba"
+}

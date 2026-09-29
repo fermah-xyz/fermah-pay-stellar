@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 use clap::Parser;
 use fermah_pay_stellar_domain::Network;
@@ -22,7 +23,28 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_NETWORK")]
     pub network: Network,
 
+    /// Stellar RPC endpoint of `network`; checked against the network at
+    /// startup.
+    #[arg(long, env = "PAY_STELLAR_RPC_URL")]
+    pub rpc_url: String,
+
+    /// Timeout for one RPC request, in seconds.
+    #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
+    pub rpc_timeout_secs: u64,
+
+    /// Ledgers a buyer's deposit authorization stays valid (about five
+    /// seconds each; 720 is about an hour).
+    #[arg(long, env = "PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS", default_value = "720")]
+    pub deposit_authorization_ledgers: NonZeroU32,
+
     /// Maximum database connections.
     #[arg(long, env = "PAY_STELLAR_DATABASE_MAX_CONNECTIONS", default_value = "16")]
     pub database_max_connections: NonZeroU32,
+}
+
+impl Config {
+    #[must_use]
+    pub const fn rpc_timeout(&self) -> Duration {
+        Duration::from_secs(self.rpc_timeout_secs)
+    }
 }

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.deposits\n            SET state = $2, last_error = $3, resolved_at = now()\n            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96e81768b51ed43211387626dbb17d1f6d025510d5b817abe64a34d22e87e57c"
+}
