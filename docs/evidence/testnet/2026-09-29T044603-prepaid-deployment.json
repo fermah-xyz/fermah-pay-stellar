@@ -1,0 +1,49 @@
+{
+  "create": {
+    "fee_charged_stroops": 1216721,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "2931a2db9d72f1cd0f09138c5ff7fcd7e0997c9c57de280129ca2c4cc70101d9",
+    "ledger": 4926715,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/f8cca7ddc67cf56e44142ba96e4f9f89367e85594fd3ec6c9d4614967cbcec42",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 1,
+      "footprint_read_write": 1,
+      "instructions": 1094080,
+      "write_bytes": 688
+    },
+    "transaction_hash": "f8cca7ddc67cf56e44142ba96e4f9f89367e85594fd3ec6c9d4614967cbcec42"
+  },
+  "criterion": "prepaid-ledger-deployment",
+  "deployment": {
+    "admin": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+    "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+    "max_charge": 10000000,
+    "min_deposit": 100000,
+    "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
+    "seller": "GDLT7M7IAMPMGMDOQ2C6XOKTBLZ7Q7AXEZ6WFWRFKIMTGPOCPAN4EVYN",
+    "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN",
+    "usdc": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    "wasm_sha256": "02d80b2f46852ef2e1548d5b90c51edc46d53a768a0cf9015795c17bd751428c"
+  },
+  "expected": "contract created from the recorded Wasm with its constructor pinning the roles, Circle testnet USDC and limits",
+  "network": "stellar:testnet",
+  "recorded_at": "2026-09-29T04:46:03.737190268Z",
+  "upload": {
+    "fee_charged_stroops": 84515,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "c722ec18e80d27533386c12aadad22b2793424552a16844a702db05aaf83d92d",
+    "ledger": 4926714,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/f4af58e84415f327c6ab36c998987639f5884840eca99cdf939e67bb8d204232",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 1,
+      "footprint_read_write": 0,
+      "instructions": 15389028,
+      "write_bytes": 0
+    },
+    "transaction_hash": "f4af58e84415f327c6ab36c998987639f5884840eca99cdf939e67bb8d204232"
+  }
+}

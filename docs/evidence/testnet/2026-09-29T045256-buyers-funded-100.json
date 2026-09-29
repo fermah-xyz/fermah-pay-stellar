@@ -506,9 +506,9 @@
   "network": "stellar:testnet",
   "onboarding_transactions": [],
   "payment_transactions": [
-    "2f75b8b29d0ebd00fd58fed71866f466dbf1c81883afcc703f8cf882d495bc10"
+    "5721c3bd0746ac7e7bc6e20a169701917377337a051a1b25f393b21bf4231707"
   ],
-  "recorded_at": "2026-09-29T02:10:58.589404772Z",
+  "recorded_at": "2026-09-29T04:52:56.964912341Z",
   "sponsor": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
   "usdc_reserve": "GAMZ4E2INHPZ767IFZYU55ZAK75RXY3CWCRCTU6H5ERVWGFXNMK32J3W"
 }

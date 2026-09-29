@@ -55,26 +55,31 @@ lists the outer (fee-bump) and inner transaction hashes.
 
 | Record | Shows |
 |---|---|
-| [`prepaid-deployment`](testnet/2026-09-29T020953-prepaid-deployment.json) | Wasm upload and contract creation; the deployed code hash equals the Wasm built in CI from the same source |
-| [`buyers-funded-100`](testnet/2026-09-29T021058-buyers-funded-100.json) | 100 buyers created with 0 XLM and sponsored reserves, each funded with Circle USDC |
-| [`deposits-1-100`](testnet/2026-09-29T022059-deposits-1-100.json) | 100 deposits: USDC moves from each buyer to the separate treasury and the ledger credits the buyer's account; the buyer only signs its authorization entry and pays no fee |
-| [`charge-batch-100-seq1`](testnet/2026-09-29T022108-charge-batch-100-seq1.json) | **one transaction charging 100 distinct buyers**, all `Charged` |
-| [`charge-buyer-1-seq2` (02:21:14)](testnet/2026-09-29T022114-charge-buyer-1-seq2.json) | a single charge |
-| [`charge-buyer-1-seq2` (02:21:16)](testnet/2026-09-29T022116-charge-buyer-1-seq2.json) | the same charge again: refused as `DuplicateCharge` (contract error 110) before submission; the balance is unchanged |
-| [`withdraw-buyer-2`](testnet/2026-09-29T022124-withdraw-buyer-2.json) | a withdrawal authorized by the buyer and the treasury: credit debited and USDC moved from the treasury back to the buyer in one invocation |
-| [`charge-batch-100-seq2`](testnet/2026-09-29T022134-charge-batch-100-seq2.json) | one 100-entry transaction with mixed outcomes: 98 `Charged`, 1 `Duplicate`, 1 `InsufficientBalance` |
-| [`treasury-solvency`](testnet/2026-09-29T022135-treasury-solvency.json) | the treasury's USDC equals buyer liabilities plus unwithdrawn revenue, read from the network: 2.985 USDC held, 0.505 owed to buyers and 2.48 earned by the seller |
+| [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation; the deployed code hash equals the Wasm built in CI from the same source |
+| [`buyers-funded-100`](testnet/2026-09-29T045256-buyers-funded-100.json) | 100 buyers holding 0 XLM with sponsored reserves, each topped up with Circle USDC |
+| [`deposits-1-100`](testnet/2026-09-29T050720-deposits-1-100.json) | 100 deposits: USDC moves from each buyer to the separate treasury and the ledger credits the buyer's account; the buyer only signs its authorization entry, pays no fee and holds 0 XLM before and after |
+| [`charge-batch-98-first`](testnet/2026-09-29T050954-charge-batch-98-first.json) | **one transaction charging 98 distinct buyers**, all `Charged`, each under its own charge identifier |
+| [`charge-buyer-1-single` (05:10:10)](testnet/2026-09-29T051010-charge-buyer-1-single.json) | a single charge |
+| [`charge-buyer-1-single` (05:10:15)](testnet/2026-09-29T051015-charge-buyer-1-single.json) | the same charge identifier again: refused as `DuplicateCharge` (contract error 110) before submission; the balance is unchanged |
+| [`withdraw-buyer-2`](testnet/2026-09-29T051027-withdraw-buyer-2.json) | a withdrawal authorized by the buyer and the treasury: credit debited and USDC moved from the treasury back to the buyer in one invocation |
+| [`charge-batch-98-second`](testnet/2026-09-29T051043-charge-batch-98-second.json) | one 98-entry transaction with mixed outcomes: 96 `Charged`, 2 `InsufficientBalance` (buyer 1, already charged twice, and buyer 2, after its withdrawal) |
+| [`treasury-solvency`](testnet/2026-09-29T051046-treasury-solvency.json) | the treasury's USDC equals buyer liabilities plus unwithdrawn revenue, read from the network: 2.985 USDC held, 0.555 owed to buyers and 2.43 earned by the seller |
+| [`charge-batch-98-first-replayed`](testnet/2026-09-29T051328-charge-batch-98-first-replayed.json) | the first batch's 98 charges sent again, included on-chain: every entry `Duplicate`, nothing debited |
 
-Measured fees for a charge on testnet:
+Measured fees on testnet:
 
-| Charges | Transactions | Fee charged | Per charge |
-|---:|---:|---:|---:|
-| 1 (`charge`) | 1 | 20,318 stroops | 20,318 stroops |
-| 100 (`charge_batch`) | 1 | 479,601 stroops | 4,796 stroops |
+| Operation | Transactions | Fee charged | Per charge |
+|---|---:|---:|---:|
+| 1 charge (`charge`) | 1 | 27,109 stroops | 27,109 stroops |
+| 98 charges (`charge_batch`) | 1 | 1,154,114 stroops | 11,777 stroops |
+| 98 replayed charges, all `Duplicate` | 1 | 262,594 stroops | 2,680 stroops |
+| Deposit | 1 | about 649,100 stroops | |
+| Withdrawal | 1 | 355,896 stroops | |
 
-Batching settles 100 charges in one transaction instead of 100, and costs
-about a quarter of the per-charge fee of single charges: most of a charge's
-fee is for the ledger entry it writes, which a batch cannot share.
+Batching settles 98 charges in one transaction instead of 98, at about 2.3
+times lower fee per charge than single charges. Most of a charge's fee pays
+for the two ledger entries it writes, the buyer's account and the charge's
+record, which a batch cannot share. A replayed charge writes nothing.
 
 ### API end to end on testnet
 

@@ -1,0 +1,33 @@
+{
+  "amount": "100000",
+  "buyer": "GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H",
+  "charge_id": "059c3614aa1ff10dba16080afd5212d4b5bf559aab26a19c45dc0ba8efd68264",
+  "charge_tag": "single",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "single-charge",
+  "network": "stellar:testnet",
+  "observed": {
+    "ledger_balance_after": "100000",
+    "ledger_balance_before": "200000"
+  },
+  "outcome": {
+    "receipt": {
+      "fee_charged_stroops": 27109,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+      "inner_transaction_hash": "dddf4833c935dbf5a9868b48aca89119255cf4a99cf99cd90a6ff9cda72bfb1d",
+      "ledger": 4927004,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/ecc3765e8a25b51400685183b1d0385c90edafdb52e3bb5489fbae8776d3c9af",
+      "resources": {
+        "disk_read_bytes": 188,
+        "footprint_read_only": 2,
+        "footprint_read_write": 4,
+        "instructions": 1460018,
+        "write_bytes": 1116
+      },
+      "transaction_hash": "ecc3765e8a25b51400685183b1d0385c90edafdb52e3bb5489fbae8776d3c9af"
+    },
+    "result": "charged"
+  },
+  "recorded_at": "2026-09-29T05:10:10.264001435Z"
+}
