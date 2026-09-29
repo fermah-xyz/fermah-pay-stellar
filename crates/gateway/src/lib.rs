@@ -5,8 +5,10 @@
 pub mod auth;
 pub mod buyers;
 pub mod config;
+pub mod events;
 pub mod issuance;
 pub mod ledger;
+pub mod observer;
 pub mod quarantine;
 pub mod refusal;
 pub mod scope;

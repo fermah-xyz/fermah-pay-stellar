@@ -1672,3 +1672,198 @@ fn test_gateway_mirrors_the_contract_limits() {
         (MAX_BATCH, MAX_CHARGE_WINDOW, CHARGE_RECORD_GRACE)
     );
 }
+
+/// The events of the last invocation, as this contract emitted them, decoded
+/// the way the chain observer decodes what `getEvents` returns.
+fn observed(w: &World) -> std::vec::Vec<fermah_pay_stellar_chain::prepaid::LedgerEvent> {
+    w.env
+        .events()
+        .all()
+        .filter_by_contract(&w.contract)
+        .events()
+        .iter()
+        .map(|event| {
+            let xdr::ContractEventBody::V0(body) = &event.body;
+            fermah_pay_stellar_chain::prepaid::ledger_event(&body.topics, &body.data)
+                .unwrap_or_else(|| panic!("undecodable event {body:?}"))
+        })
+        .collect()
+}
+
+/// The chain observer matches every event the contract publishes against the
+/// gateway's records, so each layout is pinned here against the real host.
+#[test]
+fn test_observer_decodes_every_event_the_contract_publishes() {
+    use fermah_pay_stellar_chain::prepaid::{
+        ChainAddress, ChargeEntry, LedgerEvent, Outcome as Decoded, Role,
+    };
+    let w = world();
+    let buyer = w.party(10 * USDC);
+    w.deposit(&buyer, 1, 3 * USDC, 7).unwrap();
+    let owner = ChainAddress::Account(buyer.key.address());
+    assert_eq!(
+        observed(&w),
+        [LedgerEvent::Deposited { owner: owner.clone(), amount: 3 * USDC, deposit_id: id32(7) }]
+    );
+
+    let now = w.env.ledger().sequence();
+    w.charge_batch(&[
+        w.charge(1, 1, USDC),
+        w.charge(1, 2, MAX_CHARGE + 1),
+        w.charge(1, 1, USDC),
+        w.charge_until(1, 3, USDC, now - 1),
+        w.charge(1, 4, 5 * USDC),
+        w.charge(2, 5, USDC),
+    ])
+    .unwrap();
+    let stranger = ChainAddress::Account(w.owner_of(2));
+    let entry = |owner: &ChainAddress, id, amount, outcome| ChargeEntry {
+        owner: owner.clone(),
+        charge_id: charge_id(id),
+        amount,
+        outcome,
+    };
+    assert_eq!(
+        observed(&w),
+        [LedgerEvent::Charges(std::vec![
+            entry(&owner, 1, USDC, Decoded::Charged),
+            entry(&owner, 2, MAX_CHARGE + 1, Decoded::AboveLimit),
+            entry(&owner, 1, USDC, Decoded::Duplicate),
+            entry(&owner, 3, USDC, Decoded::Expired),
+            entry(&owner, 4, 5 * USDC, Decoded::InsufficientBalance),
+            entry(&stranger, 5, USDC, Decoded::UnknownAccount),
+        ])]
+    );
+
+    let destination = w.party(0);
+    let intent = w.withdraw_intent(&buyer, USDC / 2, &destination, 8);
+    let auths = [
+        w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+    ];
+    withdraw_with(&w, &intent, &buyer, &destination, &auths).unwrap();
+    assert_eq!(
+        observed(&w),
+        [LedgerEvent::Withdrawn {
+            owner: owner.clone(),
+            destination: ChainAddress::Account(destination.key.address()),
+            amount: USDC / 2,
+            withdrawal_id: id32(8),
+        }]
+    );
+
+    withdraw_revenue(&w, USDC / 4, 9).unwrap();
+    assert_eq!(
+        observed(&w),
+        [LedgerEvent::RevenueWithdrawn {
+            destination: ChainAddress::Account(w.seller.key.address()),
+            amount: USDC / 4,
+            withdrawal_id: id32(9),
+        }]
+    );
+
+    for (function, role) in [
+        ("set_operator", Role::Operator),
+        ("set_treasury", Role::Treasury),
+        ("set_seller", Role::Seller),
+        ("set_admin", Role::Admin),
+    ] {
+        let config = w.client().get_config();
+        let previous = match role {
+            Role::Operator => config.operator,
+            Role::Treasury => config.treasury,
+            Role::Seller => config.seller,
+            Role::Admin => config.admin,
+        };
+        // The admin rotates last, so `w.admin` authorizes every rotation.
+        let successor = w.party(0);
+        signed_call(
+            &w,
+            &[&w.admin, &successor],
+            function,
+            (successor.address.clone(),).into_val(&w.env),
+        )
+        .unwrap();
+        let account = |address: &Address| {
+            let xdr::ScAddress::Account(account) = xdr::ScAddress::from(address) else {
+                panic!("roles are classic accounts")
+            };
+            ChainAddress::Account(fermah_pay_stellar_chain::transaction::address_of(&account))
+        };
+        assert_eq!(
+            observed(&w),
+            [LedgerEvent::RoleChanged {
+                role,
+                previous: account(&previous),
+                current: ChainAddress::Account(successor.key.address()),
+            }],
+            "{function}"
+        );
+    }
+}
+
+/// The observer reads the configuration and totals from the instance entry,
+/// in one ledger-entry read, so that the treasury balance it compares them
+/// with is read at the same ledger. The layout is pinned against the host.
+#[test]
+fn test_observer_reads_config_and_totals_from_the_instance_entry() {
+    use fermah_pay_stellar_chain::prepaid::{InstanceState, Totals as Decoded, instance_state};
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
+    withdraw_revenue(&w, USDC / 2, 1).unwrap();
+
+    let snapshot = w.env.to_ledger_snapshot();
+    let key = w.deployment().instance_key();
+    let entry = snapshot
+        .ledger_entries
+        .iter()
+        .find(|(k, _)| **k == key)
+        .map(|(_, (e, _))| e.data.clone())
+        .expect("instance entry at the derived key");
+    // Expected from the contract's own getters, and from arithmetic on the
+    // calls above: 10 deposited, 2 charged, 0.5 of revenue paid out.
+    assert_eq!(w.client().get_totals(), Totals { liabilities: 8 * USDC, revenue: 3 * USDC / 2 });
+    assert_eq!(
+        instance_state(&entry),
+        Some(InstanceState {
+            config: ContractConfig {
+                admin: w.admin.key.address(),
+                operator: w.operator.key.address(),
+                seller: w.seller.key.address(),
+                treasury: w.treasury.key.address(),
+                usdc: contract_bytes(&w.usdc),
+                paused: false,
+            },
+            totals: Decoded { liabilities: 8 * USDC, revenue: 3 * USDC / 2 },
+        })
+    );
+    // Control: another contract's entry of the same kind is not read as it.
+    let other = snapshot
+        .ledger_entries
+        .iter()
+        .find(|(k, _)| {
+            matches!(&**k, xdr::LedgerKey::ContractData(d)
+                if d.key == xdr::ScVal::LedgerKeyContractInstance && **k != key)
+        })
+        .map(|(_, (e, _))| e.data.clone())
+        .expect("the USDC contract's instance entry");
+    assert_eq!(instance_state(&other), None);
+}
+
+#[test]
+fn test_solvency_tooling_reads_get_totals() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    w.charge_batch(&[w.charge(1, 1, 3 * USDC)]).unwrap();
+    let val: Val = w.client().get_totals().into_val(&w.env);
+    let encoded =
+        <xdr::ScVal as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(&w.env, &val).unwrap();
+    assert_eq!(
+        fermah_pay_stellar_chain::prepaid::contract_totals(&encoded),
+        Some(fermah_pay_stellar_chain::prepaid::Totals {
+            liabilities: 7 * USDC,
+            revenue: 3 * USDC
+        })
+    );
+}

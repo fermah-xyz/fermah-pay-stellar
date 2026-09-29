@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT start_ledger, cursor FROM pay_stellar.observer_cursors\n                WHERE seller_deployment_id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "start_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.observer_cursors",
+            "name": "start_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "cursor",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.observer_cursors",
+            "name": "cursor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "f28b980b8f4f667afdaa998b50e2ffad866f1eaae11b91f52655fd3520c50812"
+}

@@ -453,7 +453,7 @@ async fn test_runtime_roles_cannot_connect_through_public(
     let connectable: Vec<(String, bool)> = sqlx::query_as(
         "SELECT r, has_database_privilege(r, current_database(), 'CONNECT')
          FROM unnest(ARRAY['pay_stellar_api', 'pay_stellar_issuer', 'pay_stellar_worker',
-                           'pay_stellar_operator']) AS r",
+                           'pay_stellar_operator', 'pay_stellar_observer']) AS r",
     )
     .fetch_all(&h.owner)
     .await
@@ -494,7 +494,7 @@ async fn privilege_map(owner: &PgPool) -> std::collections::BTreeSet<(String, St
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
          CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_issuer'), ('pay_stellar_worker'),
-                            ('pay_stellar_operator')) AS r(role)
+                            ('pay_stellar_operator'), ('pay_stellar_observer')) AS r(role)
          CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) AS p(privilege)
          WHERE c.relkind = 'r'
            AND CASE
@@ -528,10 +528,28 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_api", "ledger_contracts", "SELECT"),
         ("pay_stellar_api", "seller_deployments", "SELECT"),
         ("pay_stellar_api", "submissions", "SELECT"),
+        ("pay_stellar_observer", "buyers", "SELECT"),
+        ("pay_stellar_observer", "chain_charge_entries", "INSERT"),
+        ("pay_stellar_observer", "chain_charge_entries", "SELECT"),
+        ("pay_stellar_observer", "chain_event_checks", "INSERT"),
+        ("pay_stellar_observer", "chain_event_checks", "SELECT"),
+        ("pay_stellar_observer", "chain_events", "INSERT"),
+        ("pay_stellar_observer", "chain_events", "SELECT"),
+        ("pay_stellar_observer", "charges", "SELECT"),
+        ("pay_stellar_observer", "deposits", "SELECT"),
+        ("pay_stellar_observer", "ledger_contracts", "SELECT"),
+        ("pay_stellar_observer", "observer_cursors", "INSERT"),
+        ("pay_stellar_observer", "observer_cursors", "SELECT"),
+        ("pay_stellar_observer", "observer_cursors", "UPDATE"),
+        ("pay_stellar_observer", "reconciliation_findings", "INSERT"),
+        ("pay_stellar_observer", "reconciliation_findings", "SELECT"),
         ("pay_stellar_operator", "buyers", "SELECT"),
+        ("pay_stellar_operator", "chain_charge_entries", "SELECT"),
+        ("pay_stellar_operator", "chain_events", "SELECT"),
         ("pay_stellar_operator", "charge_resolutions", "SELECT"),
         ("pay_stellar_operator", "charges", "SELECT"),
         ("pay_stellar_operator", "ledger_contracts", "SELECT"),
+        ("pay_stellar_operator", "reconciliation_findings", "SELECT"),
         ("pay_stellar_operator", "submissions", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "INSERT"),
         ("pay_stellar_issuer", "api_keys", "SELECT"),
@@ -561,9 +579,10 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
 }
 
 /// Which columns each runtime role may write, on the tables where a write
-/// moves money or rebinds identity. Table-level presence is swept above; this
-/// pins the columns, so e.g. a grant letting the API insert a buyer with a
-/// balance, or letting the worker rewrite a charge's amount, shows up here.
+/// moves money, rebinds identity or moves the observer's position. Table-level
+/// presence is swept above; this pins the columns, so e.g. a grant letting the
+/// API insert a buyer with a balance, or letting the worker rewrite a charge's
+/// amount, shows up here.
 #[sqlx::test(migrations = "../../db/migrations")]
 async fn test_runtime_roles_write_exactly_the_documented_columns(
     opts: PgPoolOptions,
@@ -575,9 +594,10 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
          FROM pg_attribute a
          JOIN pg_class c ON c.oid = a.attrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
-         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker'), ('pay_stellar_operator')) AS r(role)
+         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker'), ('pay_stellar_operator'),
+                            ('pay_stellar_observer')) AS r(role)
          CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS p(privilege)
-         WHERE c.relname IN ('buyers', 'deposits', 'charges')
+         WHERE c.relname IN ('buyers', 'deposits', 'charges', 'observer_cursors')
            AND a.attnum > 0 AND NOT a.attisdropped
            AND has_column_privilege(r.role, a.attrelid, a.attnum, p.privilege)",
     )
@@ -657,6 +677,26 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
             "UPDATE",
             "charges",
             &["state", "outcome", "submission_id", "batch_index", "last_error", "settled_at"],
+        ),
+        // The observer creates its position and moves it; it cannot rewrite
+        // where observation began.
+        columns(
+            "pay_stellar_observer",
+            "INSERT",
+            "observer_cursors",
+            &[
+                "seller_deployment_id",
+                "observed_from_ledger",
+                "start_ledger",
+                "cursor",
+                "updated_at",
+            ],
+        ),
+        columns(
+            "pay_stellar_observer",
+            "UPDATE",
+            "observer_cursors",
+            &["start_ledger", "cursor", "updated_at"],
         ),
     ]
     .into_iter()

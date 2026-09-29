@@ -194,7 +194,21 @@ outcomes:
   marker exists is credited, otherwise it ends `failed` or `expired`. A charge
   whose record exists takes the recorded outcome, however it was applied; one
   with no record is admitted again while within its last ledger, and refused
-  as `expired` after it, while a record would still live. A deposit whose
+  as `expired` after it, while a record would still live.
+- **Past the record's lifetime, the events decide.** A charge decided only
+  after its record would have lapsed, for example after an outage, is decided
+  from the contract's `charges` events. Each charge batch's submission
+  records the latest ledger the worker saw before the operator signed it;
+  no transaction can include the batch's authorization earlier, and after the
+  charge's last ledger the contract refuses it whoever sends it. The worker
+  reads every event from that ledger through the charge's last ledger: an
+  entry for the charge is its settlement, and no entry proves it was never
+  applied, so it is refused as `expired`. The search is used only when the
+  node served the whole range, which it does only while it still retains the
+  first ledger; otherwise the charge is quarantined with the missing range.
+  The worker reads the node directly rather than the
+  [chain observer](observer.md)'s stored events, so the decision does not
+  depend on another process having run. A deposit whose
   transaction expired while the buyer's signature is still valid is sent
   again with the same signed entry, which its nonce lets land at most once.
 - **Archived state is restored, not skipped.** Since protocol 23 the network
@@ -215,8 +229,8 @@ outcomes:
 `unknown_account` contradicts the gateway's own records, which charge only
 accounts a confirmed deposit created. A charge is also quarantined when the
 network reports its batch applied yet the contract holds no record of it, or
-when its record would already have lapsed. Each is held for an operator
-rather than guessed at; see
+when its record has lapsed and the events of the whole range cannot be read.
+Each is held for an operator rather than guessed at; see
 [resolving quarantined charges](../self-hosting/quarantine.md).
 
 ## Credentials

@@ -38,6 +38,11 @@ revenue. `fermah-pay-stellar-testnet solvency` compares the two on testnet.
 Deposits prepared before the rotation were signed for the previous treasury;
 the contract refuses them, and the buyer prepares a new deposit.
 
+The [chain observer](observer.md) reads every `role` event: it reports an
+operator or treasury rotation the binding has not followed within its
+settlement grace as `binding_out_of_date`, and every admin or seller
+rotation as `role_changed`.
+
 ## Admin or seller
 
 Neither is part of the gateway's binding; rotate them on the contract only.

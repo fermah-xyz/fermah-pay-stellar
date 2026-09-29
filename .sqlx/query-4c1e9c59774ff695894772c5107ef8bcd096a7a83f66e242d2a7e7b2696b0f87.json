@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT operator_address, treasury_address FROM pay_stellar.ledger_contracts\n        WHERE seller_deployment_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "operator_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "operator_address"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4c1e9c59774ff695894772c5107ef8bcd096a7a83f66e242d2a7e7b2696b0f87"
+}

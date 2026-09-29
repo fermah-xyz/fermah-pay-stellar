@@ -28,7 +28,7 @@ gate: db-up
 
 # Checks against the live Stellar testnet (needs network access and Friendbot).
 testnet:
-    cargo test -p fermah-pay-stellar-chain --test testnet_onboarding --locked -- --ignored
+    cargo test -p fermah-pay-stellar-chain --test testnet_onboarding --test testnet_events --locked -- --ignored
 
 stellar_cli := "stellar"
 contract_out := "target/contract-wasm"

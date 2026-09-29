@@ -207,6 +207,19 @@ pub struct Prepared {
     pub inner_hash: [u8; 32],
     pub outer_hash: [u8; 32],
     envelope_xdr: String,
+    /// See [`Prepared::authorized_from`].
+    authorized_from_ledger: Option<u32>,
+}
+
+impl Prepared {
+    /// Records `ledger` as the latest ledger known when the authorizations
+    /// this envelope carries were created: none of them can be included in
+    /// an earlier ledger, which bounds where their effects are searched for.
+    #[must_use]
+    pub const fn authorized_from(mut self, ledger: u32) -> Self {
+        self.authorized_from_ledger = Some(ledger);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,6 +544,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             inner_hash,
             outer_hash,
             envelope_xdr,
+            authorized_from_ledger: None,
         })
     }
 
@@ -552,13 +566,18 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             inner_hash,
             outer_hash,
             ref envelope_xdr,
+            authorized_from_ledger,
         } = *prepared;
+        let authorized_from_ledger = authorized_from_ledger
+            .map(i32::try_from)
+            .transpose()
+            .map_err(|_| EngineError::Corrupt("ledger beyond the INTEGER column"))?;
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.submissions
                 (id, network, kind, state, source_address, fee_source_address, sequence,
-                 valid_until, inner_hash, outer_hash, envelope_xdr)
-            VALUES ($1, $2, $3, 'installed', $4, $5, $6, $7, $8, $9, $10)
+                 valid_until, inner_hash, outer_hash, envelope_xdr, authorized_from_ledger)
+            VALUES ($1, $2, $3, 'installed', $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
             id,
             self.network.caip2(),
@@ -570,6 +589,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             inner_hash.as_slice(),
             outer_hash.as_slice(),
             envelope_xdr,
+            authorized_from_ledger,
         )
         .execute(&mut *conn)
         .await;
@@ -716,6 +736,22 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let envelope = TransactionEnvelope::from_xdr_base64(&row.envelope_xdr, Limits::none())
             .map_err(|_| EngineError::Corrupt("installed envelope does not decode"))?;
         Ok(authorization_horizon(&envelope))
+    }
+
+    /// The first ledger in which the authorizations the submission carries
+    /// could have been included, if it was recorded.
+    pub async fn authorized_from(&self, id: Uuid) -> Result<Option<u32>, EngineError> {
+        sqlx::query_scalar!(
+            "SELECT authorized_from_ledger FROM pay_stellar.submissions WHERE id = $1",
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(store("read authorization ledger"))?
+        .ok_or(EngineError::UnknownSubmission(id))?
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| EngineError::Corrupt("authorization ledger out of range"))
     }
 
     async fn in_flight(&self, source: &AccountAddress) -> Result<Option<Uuid>, EngineError> {

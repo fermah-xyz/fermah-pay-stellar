@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO pay_stellar.chain_events\n                    (seller_deployment_id, network, event_id, ledger, ledger_closed_at,\n                     transaction_hash, kind, owner, amount, reference, payload)\n                VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9::text::numeric,\n                        $10, $11::text::jsonb)\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Bytea",
+        "Text",
+        "Text",
+        "Text",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "131736540815b8c7d504bf957879fc95b0e42ecf2eb0ad07be878700c496ae88"
+}

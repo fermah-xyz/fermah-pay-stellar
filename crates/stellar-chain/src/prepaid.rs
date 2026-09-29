@@ -243,6 +243,13 @@ impl PrepaidDeployment {
         invocation(self.charge_batch_call(charges), vec![])
     }
 
+    /// Ledger key of the contract's instance entry, which holds its
+    /// configuration and totals.
+    #[must_use]
+    pub fn instance_key(&self) -> LedgerKey {
+        self.persistent_key(ScVal::LedgerKeyContractInstance)
+    }
+
     /// Ledger key of the owner's account entry, whose value carries the
     /// balance.
     #[must_use]
@@ -356,40 +363,202 @@ pub struct SettledEntry {
 }
 
 /// The entries of a `charges` event emitted by `contract`; `None` if the
-/// event is another contract's, another kind, or malformed.
+/// event is another contract's, another kind, malformed, or names an owner
+/// that is not a classic account.
 #[must_use]
 pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec<SettledEntry>> {
     if event.contract_id != Some(ContractId(Hash(*contract))) {
         return None;
     }
     let ContractEventBody::V0(body) = &event.body;
-    let [ScVal::Symbol(topic)] = body.topics.as_slice() else { return None };
-    if topic.0.as_slice() != b"charges" {
+    let Some(LedgerEvent::Charges(entries)) = ledger_event(&body.topics, &body.data) else {
         return None;
-    }
-    let ScVal::Vec(Some(ScVec(entries))) = &body.data else { return None };
+    };
     entries
-        .iter()
+        .into_iter()
         .map(|entry| {
-            let ScVal::Vec(Some(ScVec(fields))) = entry else { return None };
-            let [
-                ScVal::Address(ScAddress::Account(owner)),
-                ScVal::Bytes(charge_id),
-                amount,
-                ScVal::U32(code),
-            ] = fields.as_slice()
-            else {
-                return None;
-            };
-            let ScVal::I128(Int128Parts { hi, lo }) = amount else { return None };
+            let ChainAddress::Account(owner) = entry.owner else { return None };
             Some(SettledEntry {
-                owner: crate::transaction::address_of(owner),
-                charge_id: charge_id.as_slice().try_into().ok()?,
-                amount: (i128::from(*hi) << 64) | i128::from(*lo),
-                outcome: Outcome::from_code(*code)?,
+                owner,
+                charge_id: entry.charge_id,
+                amount: entry.amount,
+                outcome: entry.outcome,
             })
         })
         .collect()
+}
+
+/// An address as the contract's events carry it: a classic account or a
+/// contract. The contract accepts either as an account owner or destination.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ChainAddress {
+    Account(AccountAddress),
+    Contract([u8; 32]),
+}
+
+impl ChainAddress {
+    fn from_val(value: &ScVal) -> Option<Self> {
+        match value {
+            ScVal::Address(ScAddress::Account(account)) => {
+                Some(Self::Account(crate::transaction::address_of(account)))
+            }
+            ScVal::Address(ScAddress::Contract(ContractId(Hash(id)))) => Some(Self::Contract(*id)),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ChainAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Account(account) => f.write_str(account.as_str()),
+            Self::Contract(id) => f.write_str(stellar_strkey::Contract(*id).to_string().as_str()),
+        }
+    }
+}
+
+/// A contract role, as the `role` event names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Admin,
+    Operator,
+    Seller,
+    Treasury,
+}
+
+impl Role {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Operator => "operator",
+            Self::Seller => "seller",
+            Self::Treasury => "treasury",
+        }
+    }
+}
+
+/// One entry of a `charges` event, whatever the owner's address kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChargeEntry {
+    pub owner: ChainAddress,
+    pub charge_id: [u8; 32],
+    pub amount: i128,
+    pub outcome: Outcome,
+}
+
+/// An event the prepaid ledger contract publishes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LedgerEvent {
+    Deposited {
+        owner: ChainAddress,
+        amount: i128,
+        deposit_id: [u8; 32],
+    },
+    /// Every entry one `charge` or `charge_batch` call settled or refused.
+    Charges(Vec<ChargeEntry>),
+    Withdrawn {
+        owner: ChainAddress,
+        destination: ChainAddress,
+        amount: i128,
+        withdrawal_id: [u8; 32],
+    },
+    RevenueWithdrawn {
+        destination: ChainAddress,
+        amount: i128,
+        withdrawal_id: [u8; 32],
+    },
+    RoleChanged {
+        role: Role,
+        previous: ChainAddress,
+        current: ChainAddress,
+    },
+}
+
+/// Decodes a contract event from its topics and data; `None` for any shape
+/// the contract does not publish. Only the layout is checked: which contract
+/// emitted the event is the caller's to check.
+#[must_use]
+pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
+    let (ScVal::Symbol(name), rest) = topics.split_first()? else { return None };
+    let fields = match data {
+        ScVal::Vec(Some(ScVec(fields))) => fields.as_slice(),
+        _ => return None,
+    };
+    Some(match (name.0.as_slice(), rest) {
+        (b"deposit", [owner]) => {
+            let [amount, deposit_id] = fields else { return None };
+            LedgerEvent::Deposited {
+                owner: ChainAddress::from_val(owner)?,
+                amount: i128_of(amount)?,
+                deposit_id: bytes32_of(deposit_id)?,
+            }
+        }
+        (b"charges", []) => LedgerEvent::Charges(
+            fields
+                .iter()
+                .map(|entry| {
+                    let ScVal::Vec(Some(ScVec(entry))) = entry else { return None };
+                    let [owner, charge_id, amount, ScVal::U32(code)] = entry.as_slice() else {
+                        return None;
+                    };
+                    Some(ChargeEntry {
+                        owner: ChainAddress::from_val(owner)?,
+                        charge_id: bytes32_of(charge_id)?,
+                        amount: i128_of(amount)?,
+                        outcome: Outcome::from_code(*code)?,
+                    })
+                })
+                .collect::<Option<_>>()?,
+        ),
+        (b"withdraw", [owner]) => {
+            let [destination, amount, withdrawal_id] = fields else { return None };
+            LedgerEvent::Withdrawn {
+                owner: ChainAddress::from_val(owner)?,
+                destination: ChainAddress::from_val(destination)?,
+                amount: i128_of(amount)?,
+                withdrawal_id: bytes32_of(withdrawal_id)?,
+            }
+        }
+        (b"revenue", []) => {
+            let [destination, amount, withdrawal_id] = fields else { return None };
+            LedgerEvent::RevenueWithdrawn {
+                destination: ChainAddress::from_val(destination)?,
+                amount: i128_of(amount)?,
+                withdrawal_id: bytes32_of(withdrawal_id)?,
+            }
+        }
+        (b"role", [ScVal::Symbol(role)]) => {
+            let [previous, current] = fields else { return None };
+            let role = match role.0.as_slice() {
+                b"admin" => Role::Admin,
+                b"operator" => Role::Operator,
+                b"seller" => Role::Seller,
+                b"treasury" => Role::Treasury,
+                _ => return None,
+            };
+            LedgerEvent::RoleChanged {
+                role,
+                previous: ChainAddress::from_val(previous)?,
+                current: ChainAddress::from_val(current)?,
+            }
+        }
+        _ => return None,
+    })
+}
+
+fn i128_of(value: &ScVal) -> Option<i128> {
+    match value {
+        ScVal::I128(Int128Parts { hi, lo }) => Some((i128::from(*hi) << 64) | i128::from(*lo)),
+        _ => None,
+    }
+}
+
+fn bytes32_of(value: &ScVal) -> Option<[u8; 32]> {
+    match value {
+        ScVal::Bytes(bytes) => bytes.as_slice().try_into().ok(),
+        _ => None,
+    }
 }
 
 /// Every `charges` entry `contract` emitted in an included transaction.
@@ -446,6 +615,65 @@ pub fn contract_config(value: &ScVal) -> Option<ContractConfig> {
         treasury: account(b"treasury")?,
         usdc,
         paused: *paused,
+    })
+}
+
+/// The contract's running totals, as `get_totals` returns them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Totals {
+    /// Sum of every buyer's balance.
+    pub liabilities: i128,
+    /// Charged amounts the seller has not withdrawn.
+    pub revenue: i128,
+}
+
+/// Decodes `get_totals`'s return value; `None` for any other shape.
+#[must_use]
+pub fn contract_totals(value: &ScVal) -> Option<Totals> {
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .and_then(|f| i128_of(&f.val))
+    };
+    Some(Totals { liabilities: field(b"liabilities")?, revenue: field(b"revenue")? })
+}
+
+/// The roles and totals held in the contract's instance entry, read in one
+/// ledger entry so both describe the same ledger.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceState {
+    pub config: ContractConfig,
+    pub totals: Totals,
+}
+
+/// Decodes the contract instance entry read at [`PrepaidDeployment::instance_key`];
+/// `None` if it is not this contract's layout. The layout is internal to the
+/// contract and pinned by the contract's tests.
+#[must_use]
+pub fn instance_state(entry: &LedgerEntryData) -> Option<InstanceState> {
+    let LedgerEntryData::ContractData(ContractDataEntry {
+        val: ScVal::ContractInstance(instance),
+        ..
+    }) = entry
+    else {
+        return None;
+    };
+    let storage = instance.storage.as_ref()?;
+    let slot = |name: &[u8]| {
+        storage.iter().find_map(|entry| match &entry.key {
+            ScVal::Vec(Some(ScVec(key)))
+                if matches!(key.as_slice(), [ScVal::Symbol(s)] if s.0.as_slice() == name) =>
+            {
+                Some(&entry.val)
+            }
+            _ => None,
+        })
+    };
+    Some(InstanceState {
+        config: contract_config(slot(b"Config")?)?,
+        totals: contract_totals(slot(b"Totals")?)?,
     })
 }
 
@@ -536,6 +764,81 @@ fn charge_val(charge: &ChargeRequest) -> ScVal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn live(topics: &[&str], value: &str) -> Option<LedgerEvent> {
+        use stellar_xdr::{Limits, ReadXdr};
+        let topics: Vec<ScVal> =
+            topics.iter().map(|t| ScVal::from_xdr_base64(t, Limits::none()).unwrap()).collect();
+        ledger_event(&topics, &ScVal::from_xdr_base64(value, Limits::none()).unwrap())
+    }
+
+    fn hex32(text: &str) -> [u8; 32] {
+        let bytes: Vec<u8> =
+            (0..64).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap()).collect();
+        bytes.try_into().unwrap()
+    }
+
+    // Events returned by testnet `getEvents` for prepaid ledger deployments
+    // (the withdrawal and the earlier-layout charges from an earlier contract
+    // version); the expected values are the node's own `xdrFormat: "json"`
+    // rendering of the same events.
+    #[test]
+    fn test_live_withdraw_event_decodes() {
+        let account: AccountAddress =
+            "GCBD53TBX6VDTD7M34MYDLFBFX4G7WZRSO6T24CMGVVXV3X52DQOZ4MV".parse().unwrap();
+        assert_eq!(
+            live(
+                &[
+                    "AAAADwAAAAh3aXRoZHJhdw==",
+                    "AAAAEgAAAAAAAAAAgj7uYb+qOY/s3xmBrKEt+G/bMZO9PXBMNWt67v3Q4Ow="
+                ],
+                "AAAAEAAAAAEAAAADAAAAEgAAAAAAAAAAgj7uYb+qOY/s3xmBrKEt+G/bMZO9PXBMNWt67v3Q4OwAAAAKAAAAAAAAAAAAAAAAAAJJ8AAAAA0AAAAgRYcq/aQ7rFEucYIUND1XdTpiPMoQoFPIyHqS+FfpWCo="
+            ),
+            Some(LedgerEvent::Withdrawn {
+                owner: ChainAddress::Account(account.clone()),
+                destination: ChainAddress::Account(account),
+                amount: 150_000,
+                withdrawal_id: hex32(
+                    "45872afda43bac512e718214343d57753a623cca10a053c8c87a92f857e9582a"
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn test_live_deposit_event_decodes() {
+        assert_eq!(
+            live(
+                &[
+                    "AAAADwAAAAdkZXBvc2l0AA==",
+                    "AAAAEgAAAAAAAAAApDDeli/J1RNw3at1WfsXX/9WgFg2KxTvYMoyskV5ZJc="
+                ],
+                "AAAAEAAAAAEAAAACAAAACgAAAAAAAAAAAAAAAAAEk+AAAAANAAAAILtpCxgjkLJuwgyIqP1zjkR1j5RpJIuZXkRPVPAfcmTf"
+            ),
+            Some(LedgerEvent::Deposited {
+                owner: ChainAddress::Account(
+                    "GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H".parse().unwrap()
+                ),
+                amount: 300_000,
+                deposit_id: hex32(
+                    "bb690b182390b26ec20c88a8fd738e44758f9469248b995e444f54f01f7264df"
+                ),
+            })
+        );
+    }
+
+    /// A `charges` event of an earlier contract version, which named each
+    /// charge by a `u64` sequence number, is not read as the current layout.
+    #[test]
+    fn test_live_charges_event_of_an_earlier_layout_is_not_decoded() {
+        assert_eq!(
+            live(
+                &["AAAADwAAAAdjaGFyZ2VzAA=="],
+                "AAAAEAAAAAEAAAABAAAAEAAAAAEAAAAEAAAAEgAAAAAAAAAApDDeli/J1RNw3at1WfsXX/9WgFg2KxTvYMoyskV5ZJcAAAAFAAAAAAAAAAIAAAAKAAAAAAAAAAAAAAAAAAGGoAAAAAMAAAAA"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn test_i128_encoding_splits_sign_into_high_half() {

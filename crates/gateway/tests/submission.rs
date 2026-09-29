@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::rpc::{
-    FeeDistribution, FeePercentile, FeeStats, IncludedTransaction, LatestLedgerInfo, LedgerEntries,
-    NodeView, RpcError, SendOutcome, Simulation, SimulationOutcome, TransactionStatus,
+    EventPage, EventsFrom, FeeDistribution, FeePercentile, FeeStats, Health, IncludedTransaction,
+    LatestLedgerInfo, LedgerEntries, NodeView, RpcError, SendOutcome, Simulation,
+    SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -21,6 +22,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     TransactionResultExt, TransactionResultResult, VecM,
 };
 use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_gateway::events::EventLog;
 use fermah_pay_stellar_gateway::submission::{
     Broadcast, Chain, Clock, Engine, EngineError, FeePolicy, Keys, Kind, Policy, SourceSequence,
     State,
@@ -159,6 +161,17 @@ fn server_error() -> RpcError {
 fn outer_hash(envelope: &TransactionEnvelope) -> [u8; 32] {
     let TransactionEnvelope::TxFeeBump(bump) = envelope else { panic!("not a fee bump") };
     fee_bump_hash(&bump.tx, Network::Testnet).unwrap()
+}
+
+/// The engine never reads events; only the worker does.
+impl EventLog for FakeChain {
+    async fn health(&self) -> Result<Health, RpcError> {
+        Err(server_error())
+    }
+
+    async fn events(&self, _: &[u8; 32], _: &EventsFrom, _: u32) -> Result<EventPage, RpcError> {
+        Err(server_error())
+    }
 }
 
 impl Chain for FakeChain {

@@ -8,7 +8,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use fermah_pay_stellar_chain::rpc::RpcError;
+use fermah_pay_stellar_chain::rpc::{
+    ContractEventRecord, EventCursor, EventPage, EventsFrom, RpcError,
+};
+use fermah_pay_stellar_chain::stellar_xdr::ScVal;
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::issuance;
 use fermah_pay_stellar_gateway::ledger::{LatestLedger, LedgerApi, LedgerPolicy};
@@ -166,4 +169,86 @@ pub fn wallet(seed: u8) -> String {
 
 pub fn assert_refused(status: &Status, code: Code, reason: &str) {
     assert_eq!((status.code(), status.message()), (code, reason), "{status:?}");
+}
+
+/// A contract event stream paged the way Stellar RPC pages `getEvents`: a
+/// start ledger or a cursor, never both; a start outside the retained range
+/// refused; a scan window of 10,000 ledgers ending at the latest ledger; the
+/// cursor of a full page is its last event, otherwise the end of the window.
+#[derive(Clone, Default)]
+pub struct EventStream {
+    events: Vec<ContractEventRecord>,
+}
+
+impl EventStream {
+    /// Appends an event in its own transaction at `ledger`.
+    pub fn emit(
+        &mut self,
+        contract: [u8; 32],
+        ledger: u32,
+        closed_at: String,
+        topics: Vec<ScVal>,
+        value: ScVal,
+    ) -> EventCursor {
+        let transaction =
+            u64::try_from(self.events.iter().filter(|e| e.ledger == ledger).count() + 1).unwrap();
+        let toid = (u64::from(ledger) << 32) | (transaction << 12);
+        let id = EventCursor::parse(&format!("{toid:019}-{:010}", 0)).unwrap();
+        let mut hash = [0_u8; 32];
+        hash[..8].copy_from_slice(&toid.to_be_bytes());
+        self.events.push(ContractEventRecord {
+            id,
+            ledger,
+            ledger_closed_at: closed_at,
+            contract,
+            transaction_hash: hash,
+            in_successful_contract_call: true,
+            topics,
+            value,
+        });
+        self.events.sort_by_key(|e| e.id);
+        id
+    }
+
+    pub fn page(
+        &self,
+        contract: &[u8; 32],
+        from: &EventsFrom,
+        limit: u32,
+        oldest: u32,
+        latest: u32,
+    ) -> Result<EventPage, RpcError> {
+        let start = match from {
+            EventsFrom::Ledger(ledger) => *ledger,
+            EventsFrom::Cursor(cursor) => cursor.ledger(),
+        };
+        if start < oldest || start > latest {
+            return Err(RpcError::Server {
+                method: "getEvents",
+                code: -32600,
+                message: format!(
+                    "startLedger must be within the ledger range: {oldest} - {latest}"
+                ),
+            });
+        }
+        let end = (start + 10_000).min(latest + 1);
+        let limit = usize::try_from(limit).unwrap();
+        let events: Vec<ContractEventRecord> = self
+            .events
+            .iter()
+            .filter(|e| e.contract == *contract && e.ledger < end)
+            .filter(|e| match from {
+                EventsFrom::Ledger(ledger) => e.ledger >= *ledger,
+                EventsFrom::Cursor(cursor) => e.id > *cursor,
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        let cursor = if events.len() == limit {
+            events.last().unwrap().id
+        } else {
+            EventCursor::end_of_ledger(end - 1)
+        };
+        Ok(EventPage { events, cursor, latest_ledger: latest, oldest_ledger: oldest })
+    }
 }

@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT seller_deployment_id, contract_address, usdc_address, treasury_address,\n                   operator_address\n            FROM pay_stellar.ledger_contracts\n            WHERE network = $1\n            ORDER BY seller_deployment_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "seller_deployment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "seller_deployment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "operator_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "operator_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d7e4be18a18957f6ed56d70170a66f35615b283c4f41b95386f7fbdb670544af"
+}

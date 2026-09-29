@@ -26,6 +26,12 @@ It provides:
   ([design](docs/architecture/transactions.md)). Deposits, a 98-buyer batch,
   withdrawals and treasury solvency are recorded on testnet with Circle USDC
   ([evidence](docs/evidence/README.md#prepaid-ledger-on-testnet)).
+- **Chain observer**: a key-less daemon that reads the ledger contract's
+  events through `getEvents`, matches every deposit, charge and role rotation
+  against the gateway's records, and reconciles the treasury's USDC, the
+  contract's totals and the database
+  ([design](docs/architecture/observer.md),
+  [operation](docs/self-hosting/observer.md)).
 - **Buyer onboarding without XLM**: one transaction creates a buyer account
   with a Circle USDC trustline and a zero XLM balance, while a sponsor pays
   the fee and every reserve ([testnet evidence](docs/evidence/README.md)).
@@ -36,8 +42,8 @@ It provides:
 contracts/prepaid     Soroban prepaid ledger contract
 crates/domain         validated values (network, account address, external reference)
 crates/stellar-chain  keys, transaction signing, USDC identity, Stellar RPC client, onboarding
-crates/gateway        gRPC API and settlement worker daemons, authentication, PostgreSQL store,
-                      durable submission, key issuance
+crates/gateway        gRPC API, settlement worker and chain observer daemons, authentication,
+                      PostgreSQL store, durable submission, key issuance
 crates/proto          generated gRPC types
 crates/cli            operator tools: fermah-pay-stellar-admin, fermah-pay-stellar-testnet
 proto/                gRPC API definitions
@@ -75,6 +81,7 @@ Continue with the [quickstart](docs/quickstart/local.md).
 - [Ledger API](docs/api/ledger.md)
 - [Local quickstart](docs/quickstart/local.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
+- [Self-hosting: chain observer](docs/self-hosting/observer.md)
 - [Evidence](docs/evidence/README.md)
 
 ## License

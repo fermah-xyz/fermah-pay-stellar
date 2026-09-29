@@ -141,7 +141,7 @@ fn payer_of(ext: &LedgerEntryExt) -> ReservePayer {
     }
 }
 
-fn trustline_asset(asset: &Asset) -> TrustLineAsset {
+pub(crate) fn trustline_asset(asset: &Asset) -> TrustLineAsset {
     match asset {
         Asset::Native => TrustLineAsset::Native,
         Asset::CreditAlphanum4(a) => TrustLineAsset::CreditAlphanum4(a.clone()),

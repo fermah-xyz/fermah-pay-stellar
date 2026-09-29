@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.authorized_from_ledger\n        FROM pay_stellar.charges c\n        JOIN pay_stellar.submissions s ON s.id = c.submission_id\n        WHERE c.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "authorized_from_ledger",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "authorized_from_ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "128bb6866a3e2a4b7e36afce70cca12af8d712ec4324363217f7d73d25161469"
+}

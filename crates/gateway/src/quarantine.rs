@@ -15,6 +15,7 @@ use fermah_pay_stellar_domain::AccountAddress;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::events::{ChargeSearch, EventLog, search_charge};
 use crate::submission::{Chain, stored_authorization_horizon};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +90,20 @@ pub enum QuarantineError {
         "the node is at ledger {ledger}, not past ledger {horizon} up to which the batch carrying charge {charge} could still land; retry against a node that is"
     )]
     ReadBeforeHorizon { charge: String, ledger: u32, horizon: u32 },
+    #[error(
+        "the ledger at which the batch carrying charge {charge} was authorized is not recorded, so its events cannot be searched"
+    )]
+    NoAuthorizationLedger { charge: String },
+    #[error(
+        "the node retains events only from ledger {oldest}, after ledger {from} from which charge {charge} could have been settled; use a node with longer history"
+    )]
+    EventsPruned { charge: String, from: u32, oldest: u32 },
+    #[error(
+        "the node is at ledger {latest}, before the last ledger {last_ledger} of charge {charge}, when it could still be settled; resolve it from its record"
+    )]
+    EventsBeforeLastLedger { charge: String, latest: u32, last_ledger: u32 },
+    #[error("charges event {event} does not decode, so it may hold charge {charge}")]
+    EventUnreadable { charge: String, event: String },
 }
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> QuarantineError {
@@ -265,6 +280,111 @@ pub async fn prove_from_record<C: Chain>(
         ),
     };
     Ok((resolution, evidence))
+}
+
+/// The ledger at which the batch that carried `charge` was authorized: none
+/// of its effects can be earlier. `None` if it was not recorded.
+pub async fn authorization_ledger(
+    pool: &PgPool,
+    charge: Uuid,
+) -> Result<Option<u32>, QuarantineError> {
+    let ledger = sqlx::query_scalar!(
+        r#"
+        SELECT s.authorized_from_ledger
+        FROM pay_stellar.charges c
+        JOIN pay_stellar.submissions s ON s.id = c.submission_id
+        WHERE c.id = $1
+        "#,
+        charge,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(store("read authorization ledger"))?
+    .flatten();
+    ledger
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| QuarantineError::Corrupt("authorization ledger out of range"))
+}
+
+/// The resolution the contract's `charges` events establish once the
+/// charge's record has lapsed: every event from the ledger at which its batch
+/// was authorized (`authorized_from`, see [`authorization_ledger`]) through
+/// its last ledger, after which the contract refuses it, is read. An entry
+/// there is the charge's settlement; no entry proves it was never applied.
+pub async fn prove_from_events<L: EventLog>(
+    log: &L,
+    charge: &QuarantinedCharge,
+    authorized_from: Option<u32>,
+) -> Result<(Resolution, String), QuarantineError> {
+    let shown_charge = hex_lower(&charge.charge_id);
+    let Some(from) = authorized_from else {
+        return Err(QuarantineError::NoAuthorizationLedger { charge: shown_charge });
+    };
+    let to = charge.last_ledger;
+    let search =
+        search_charge(log, &charge.deployment.contract, &charge.owner, &charge.charge_id, from, to)
+            .await
+            .map_err(QuarantineError::Chain)?;
+    let (entries, oldest) = match search {
+        ChargeSearch::Complete { entries, oldest } => (entries, oldest),
+        ChargeSearch::Pruned { oldest } => {
+            return Err(QuarantineError::EventsPruned { charge: shown_charge, from, oldest });
+        }
+        ChargeSearch::Behind { latest } => {
+            return Err(QuarantineError::EventsBeforeLastLedger {
+                charge: shown_charge,
+                latest,
+                last_ledger: to,
+            });
+        }
+        ChargeSearch::Unreadable { event } => {
+            return Err(QuarantineError::EventUnreadable {
+                charge: shown_charge,
+                event: event.to_string(),
+            });
+        }
+    };
+    let searched = format!(
+        "events of contract {} in ledgers {from} to {to}, read from a node retaining ledgers from {oldest}",
+        stellar_strkey::Contract(charge.deployment.contract).to_string()
+    );
+    let Some(found) = entries.iter().find(|found| found.entry.outcome != Outcome::Duplicate) else {
+        return match entries.first() {
+            None => Ok((
+                Resolution::Expired,
+                format!("{searched}: no entry for charge {shown_charge}; its last ledger is {to}"),
+            )),
+            Some(duplicate) => Err(QuarantineError::NotSettled {
+                hash: hex_lower(&duplicate.transaction_hash),
+                charge: shown_charge,
+                outcome: Outcome::Duplicate.token(),
+            }),
+        };
+    };
+    let hash = hex_lower(&found.transaction_hash);
+    if found.entry.amount != i128::from(charge.amount) {
+        return Err(QuarantineError::AmountMismatch {
+            hash,
+            charge: shown_charge,
+            found: found.entry.amount,
+            expected: charge.amount,
+        });
+    }
+    match found.entry.outcome {
+        Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => Ok((
+            Resolution::Settled(found.entry.outcome),
+            format!(
+                "{searched}: event {} of transaction {hash} (ledger {}) settled charge {shown_charge} as {}",
+                found.event,
+                found.ledger,
+                found.entry.outcome.token()
+            ),
+        )),
+        other => {
+            Err(QuarantineError::NotSettled { hash, charge: shown_charge, outcome: other.token() })
+        }
+    }
 }
 
 /// Records the resolution and applies it, through the database function

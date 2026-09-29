@@ -23,8 +23,9 @@ what their process needs:
 |---|---|---|
 | `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance when admitting a charge |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys; bind a deployment to its ledger contract |
-| `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md) |
+| `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md). Also read the chain observer's events and findings |
 | `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed |
+| `pay_stellar_observer` | the login role of the [chain observer](observer.md) | read ledger bindings, buyer wallets and available balances, and the amount, identifier and state of deposits and charges; append observed events, verdicts and findings, which no role can update or delete; move its read position forward. No write to any balance, deposit, charge or binding |
 
 No role can change a buyer's wallet, an amount, a charge's identifier or
 a ledger binding after the row is written, and no role can move a submission,
@@ -51,15 +52,17 @@ CREATE ROLE pay_stellar_gateway    LOGIN PASSWORD '<secret>' IN ROLE pay_stellar
 CREATE ROLE pay_stellar_admin      LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_issuer;
 CREATE ROLE pay_stellar_settlement LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_worker;
 CREATE ROLE pay_stellar_ops        LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_operator;
+CREATE ROLE pay_stellar_watch      LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_observer;
 GRANT CONNECT ON DATABASE pay_stellar
-    TO pay_stellar_gateway, pay_stellar_admin, pay_stellar_settlement, pay_stellar_ops;
+    TO pay_stellar_gateway, pay_stellar_admin, pay_stellar_settlement, pay_stellar_ops,
+       pay_stellar_watch;
 ```
 
 Run migrations with the owner of the database, not with any login role. The
 first migration creates the group roles, so the owner needs the `CREATEROLE`
 attribute, or a superuser must create `pay_stellar_api`, `pay_stellar_issuer`,
-`pay_stellar_worker` and `pay_stellar_operator` beforehand; the migrations
-skip roles that already exist.
+`pay_stellar_worker`, `pay_stellar_operator` and `pay_stellar_observer`
+beforehand; the migrations skip roles that already exist.
 Do not grant `pay_stellar_issuer` to the gateway's login role: the gateway
 must not be able to issue keys.
 
@@ -91,6 +94,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT` | headroom over the simulated resource fee, default 20; the unused part is refunded |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 98, default 98 |
+| Observer | `PAY_STELLAR_OBSERVER_DATABASE_URL` | URL of the observer login role; the other settings are in [chain observer](observer.md#running-it) |
 
 Key files must not be readable by other users; the worker refuses to start
 otherwise. Run one worker per source account.

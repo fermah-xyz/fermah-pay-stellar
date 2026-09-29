@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO pay_stellar.chain_event_checks (chain_event_id, entry_index, verdict)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (chain_event_id, entry_index) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "44f2f7ded334a3f5b69e0be01e8cee80153a0e2a1ef4393185441b0bc01cf47d"
+}

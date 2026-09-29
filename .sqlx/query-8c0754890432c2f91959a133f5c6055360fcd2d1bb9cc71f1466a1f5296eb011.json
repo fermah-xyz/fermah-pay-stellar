@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT authorized_from_ledger FROM pay_stellar.submissions WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "authorized_from_ledger",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "authorized_from_ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "8c0754890432c2f91959a133f5c6055360fcd2d1bb9cc71f1466a1f5296eb011"
+}
