@@ -64,17 +64,19 @@ transaction. The command fails if any buyer ends up holding XLM.
 
 ```bash
 testnet deposit --first 1 --last 100 --amount 300000
-testnet charge-batch --first 1 --last 100 --seq 1 --amount 100000
-testnet charge --buyer 1 --seq 2 --amount 100000
-testnet charge --buyer 1 --seq 2 --amount 100000     # refused: duplicate
+testnet charge-batch --first 1 --last 98 --tag first --amount 100000
+testnet charge --buyer 1 --tag single --amount 100000
+testnet charge --buyer 1 --tag single --amount 100000     # refused: duplicate
 testnet withdraw --buyer 2 --amount 150000
-testnet charge-batch --first 1 --last 100 --seq 2 --amount 150000
+testnet charge-batch --first 1 --last 98 --tag second --amount 150000
 testnet solvency
 ```
 
 `charge-batch` settles one charge for every buyer in a single transaction.
-Charge sequences are per buyer account and must be consecutive; a repeated
-sequence is refused as a duplicate and never debits again.
+A charge's identifier is derived from its tag and the buyer's number, so
+repeating a tag repeats the same charges, which the contract refuses as
+duplicates without debiting again. Each charge may be settled for about an
+hour.
 
 ## 6. End to end through the API
 
@@ -96,7 +98,7 @@ acts as a seller would, only through the gRPC API:
 3. creates three charges and waits until they settle on-chain;
 4. repeats the first charge with the same idempotency key, which returns the
    original charge, and reuses the key with another amount, which is refused;
-   then sends the first charge's sequence straight to the contract, which
+   then sends the first charge straight to the contract again, which
    refuses it as a duplicate before anything is submitted;
 5. checks that the gateway's balance equals the contract's and that the buyer
    still holds 0 XLM.

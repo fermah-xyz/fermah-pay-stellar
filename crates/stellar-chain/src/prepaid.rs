@@ -15,6 +15,14 @@ use stellar_xdr::{
 
 use crate::transaction::account_id;
 
+/// The contract's limits the gateway must respect, mirrored from the
+/// contract and pinned against it by the contract's tests.
+pub const MAX_BATCH: usize = 98;
+/// Furthest ahead of the current ledger a charge's last ledger may be.
+pub const MAX_CHARGE_WINDOW: u32 = 17_280;
+/// Ledgers a charge record outlives the charge's last ledger.
+pub const CHARGE_RECORD_GRACE: u32 = 720;
+
 /// A deployed prepaid ledger and the counterparties it is pinned to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrepaidDeployment {
@@ -60,13 +68,14 @@ fn symbol_val(name: &str) -> ScVal {
     ))
 }
 
-/// One charge: the buyer (account owner), the account's next sequence
-/// number, the amount.
+/// One charge: the buyer (account owner), the seller's identifier for the
+/// charge, the amount, and the last ledger in which it may be settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChargeRequest {
     pub owner: AccountAddress,
-    pub seq: u64,
+    pub charge_id: [u8; 32],
     pub amount: i128,
+    pub last_ledger: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,7 +244,7 @@ impl PrepaidDeployment {
     }
 
     /// Ledger key of the owner's account entry, whose value carries the
-    /// balance and the last consumed charge sequence.
+    /// balance.
     #[must_use]
     pub fn account_key(&self, owner: &AccountAddress) -> LedgerKey {
         self.persistent_key(vec_val(vec![symbol_val("Account"), account_val(owner)]))
@@ -251,6 +260,18 @@ impl PrepaidDeployment {
             account_val(owner),
             bytes_val(deposit_id),
         ]))
+    }
+
+    /// Ledger key of the temporary record the contract writes when it
+    /// settles `charge_id` for `owner`, holding the outcome. It lives until
+    /// shortly after the charge's last ledger.
+    #[must_use]
+    pub fn charge_record_key(&self, owner: &AccountAddress, charge_id: &[u8; 32]) -> LedgerKey {
+        LedgerKey::ContractData(LedgerKeyContractData {
+            contract: ScAddress::Contract(ContractId(Hash(self.contract))),
+            key: vec_val(vec![symbol_val("Charge"), account_val(owner), bytes_val(charge_id)]),
+            durability: ContractDataDurability::Temporary,
+        })
     }
 
     fn persistent_key(&self, key: ScVal) -> LedgerKey {
@@ -278,7 +299,7 @@ pub enum Outcome {
     InsufficientBalance,
     AboveLimit,
     Duplicate,
-    OutOfOrder,
+    Expired,
     UnknownAccount,
 }
 
@@ -291,7 +312,7 @@ impl Outcome {
             1 => Self::InsufficientBalance,
             2 => Self::AboveLimit,
             3 => Self::Duplicate,
-            4 => Self::OutOfOrder,
+            4 => Self::Expired,
             5 => Self::UnknownAccount,
             _ => return None,
         })
@@ -304,7 +325,7 @@ impl Outcome {
             Self::InsufficientBalance => "insufficient_balance",
             Self::AboveLimit => "above_limit",
             Self::Duplicate => "duplicate",
-            Self::OutOfOrder => "out_of_order",
+            Self::Expired => "expired",
             Self::UnknownAccount => "unknown_account",
         }
     }
@@ -325,11 +346,11 @@ pub fn batch_outcomes(value: &ScVal) -> Option<Vec<Outcome>> {
 }
 
 /// One entry of the contract's `charges` event: which account, which
-/// sequence, which amount, and what the contract decided.
+/// charge, which amount, and what the contract decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettledEntry {
     pub owner: AccountAddress,
-    pub seq: u64,
+    pub charge_id: [u8; 32],
     pub amount: i128,
     pub outcome: Outcome,
 }
@@ -353,7 +374,7 @@ pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec
             let ScVal::Vec(Some(ScVec(fields))) = entry else { return None };
             let [
                 ScVal::Address(ScAddress::Account(owner)),
-                ScVal::U64(seq),
+                ScVal::Bytes(charge_id),
                 amount,
                 ScVal::U32(code),
             ] = fields.as_slice()
@@ -363,7 +384,7 @@ pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec
             let ScVal::I128(Int128Parts { hi, lo }) = amount else { return None };
             Some(SettledEntry {
                 owner: crate::transaction::address_of(owner),
-                seq: *seq,
+                charge_id: charge_id.as_slice().try_into().ok()?,
                 amount: (i128::from(*hi) << 64) | i128::from(*lo),
                 outcome: Outcome::from_code(*code)?,
             })
@@ -428,11 +449,22 @@ pub fn contract_config(value: &ScVal) -> Option<ContractConfig> {
     })
 }
 
-/// The balance and last consumed charge sequence in an account entry read
-/// from the ledger; `None` if the entry is not an account entry of this
-/// contract.
+/// The outcome held by a charge record read from the ledger; `None` if the
+/// entry is not a charge record.
 #[must_use]
-pub fn account_state(entry: &LedgerEntryData) -> Option<(i128, u64)> {
+pub fn charge_record(entry: &LedgerEntryData) -> Option<Outcome> {
+    match entry {
+        LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::U32(code), .. }) => {
+            Outcome::from_code(*code)
+        }
+        _ => None,
+    }
+}
+
+/// The balance in an account entry read from the ledger; `None` if the entry
+/// is not an account entry of this contract.
+#[must_use]
+pub fn account_balance(entry: &LedgerEntryData) -> Option<i128> {
     let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
         entry
     else {
@@ -441,12 +473,10 @@ pub fn account_state(entry: &LedgerEntryData) -> Option<(i128, u64)> {
     let field = |name: &[u8]| {
         fields.iter().find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
     };
-    let balance = match &field(b"balance")?.val {
-        ScVal::I128(Int128Parts { hi, lo }) => (i128::from(*hi) << 64) | i128::from(*lo),
-        _ => return None,
-    };
-    let ScVal::U64(seq) = field(b"charge_seq")?.val else { return None };
-    Some((balance, seq))
+    match &field(b"balance")?.val {
+        ScVal::I128(Int128Parts { hi, lo }) => Some((i128::from(*hi) << 64) | i128::from(*lo)),
+        _ => None,
+    }
 }
 
 fn call(contract: [u8; 32], function: &str, args: Vec<ScVal>) -> InvokeContractArgs {
@@ -495,7 +525,12 @@ fn vec_val(items: Vec<ScVal>) -> ScVal {
 
 /// The contract's `Charge` tuple struct, which encodes as a vector of fields.
 fn charge_val(charge: &ChargeRequest) -> ScVal {
-    vec_val(vec![account_val(&charge.owner), ScVal::U64(charge.seq), i128_val(charge.amount)])
+    vec_val(vec![
+        account_val(&charge.owner),
+        bytes_val(&charge.charge_id),
+        i128_val(charge.amount),
+        ScVal::U32(charge.last_ledger),
+    ])
 }
 
 #[cfg(test)]

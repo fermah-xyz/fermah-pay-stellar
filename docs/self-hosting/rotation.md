@@ -25,9 +25,11 @@ the previous and new accounts in `pay_stellar.ledger_binding_changes`, which
 no role can update or delete. The accounts are never typed in.
 
 For an operator rotation, restart the worker with the new key in
-`PAY_STELLAR_OPERATOR_KEY_FILE`. Batches the previous operator authorized and
-that are still in flight settle normally; a batch sent after the rotation with
-the previous key is refused in simulation and retried.
+`PAY_STELLAR_OPERATOR_KEY_FILE`. The contract checks the operator when a
+batch is applied: a batch the previous operator authorized that lands before
+the rotation settles normally; one that lands after it fails, and once its
+authorization has lapsed its charges go into a new batch under the new key,
+or are refunded if their last ledger has passed.
 
 For a treasury rotation, the contract moves no USDC: before rotating, give the
 new treasury a USDC trustline, and after rotating, transfer the previous

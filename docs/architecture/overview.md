@@ -63,12 +63,13 @@ buyer:
   contract has processed it, the amount is added to the buyer's `available`
   balance;
 - a **charge** is admitted by the gateway only if `available` covers it: it is
-  debited at once and given the buyer's next contract sequence number, then
-  settled on-chain in a batch of up to 100.
+  debited at once, named on the contract by an identifier derived from the
+  seller's idempotency key, and settled on-chain in a batch of up to 98 before
+  its last ledger, or refunded.
 
 The database balance is an admission limit, not the authority. The contract
-refuses any charge above the on-chain balance and accepts each account's
-sequence numbers once and in order, so neither a gateway bug nor a
+refuses any charge above the on-chain balance, records every charge
+identifier it settles and refuses it again, so neither a gateway bug nor a
 compromised API process can settle the same charge twice or overdraw a buyer
 on-chain.
 See the [ledger API](../api/ledger.md).

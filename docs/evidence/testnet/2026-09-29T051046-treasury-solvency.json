@@ -1,15 +1,15 @@
 {
-  "contract": "CAWRQEYPSOMB6OJNJ3M7SYBHDLEMG3NSOPHKKCF44RHOA5Z2V3NCHQK5",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
   "criterion": "treasury-solvency",
   "expected": "treasury USDC balance equals buyer liabilities plus unwithdrawn revenue when no USDC left the treasury outside the contract",
   "network": "stellar:testnet",
   "observed": {
-    "liabilities": "5050000",
+    "liabilities": "5550000",
     "owed": "29850000",
-    "revenue": "24800000",
+    "revenue": "24300000",
     "surplus": "0",
     "treasury_usdc": "29850000"
   },
-  "recorded_at": "2026-09-29T02:21:35.752003811Z",
-  "treasury": "GCP6PVKKSSG7QJG7DQVS6SMHZDC5LYG52DHKSISC6JSZKU5YL7RQCXSJ"
+  "recorded_at": "2026-09-29T05:10:46.279638198Z",
+  "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN"
 }

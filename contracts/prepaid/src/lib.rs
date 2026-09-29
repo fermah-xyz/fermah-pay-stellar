@@ -18,13 +18,15 @@
 //! deposit and withdrawal identifiers are scoped to their owner for the same
 //! reason.
 //!
-//! Charge idempotency: every charge names its account and a per-account
-//! sequence number, and the account entry stores the last sequence consumed.
-//! A charge must carry exactly the next sequence; an already-consumed sequence
-//! is a duplicate and never debits again. Keeping the replay state inside the
-//! account entry makes a charge cost one ledger write, which is what lets one
-//! transaction settle `MAX_BATCH` charges within the network's per-transaction
-//! write limit.
+//! Charge idempotency: every charge carries an identifier chosen by the
+//! seller and a last ledger in which it may be settled. The contract records
+//! each identifier it settles, with the outcome, in temporary storage that
+//! lives until shortly after that ledger. A charge whose identifier is
+//! recorded is a duplicate and never debits again; a charge past its last
+//! ledger is refused. Once the record expires the charge is past its last
+//! ledger too, so a replay is refused either way. The record also answers,
+//! for as long as it lives, what happened to a charge whose transaction's
+//! fate is unknown.
 
 #![no_std]
 
@@ -33,8 +35,20 @@ use soroban_sdk::{
     contractimpl, contracttype, panic_with_error, symbol_short, token,
 };
 
-/// Largest number of charges one `charge_batch` call accepts.
-pub const MAX_BATCH: u32 = 100;
+/// Largest number of charges one `charge_batch` call accepts. Each charge of
+/// a distinct buyer writes its account and its record: 98 charges make 196
+/// entries plus the instance and the operator's authorization nonce, 198
+/// against the network's 200 write entries per transaction. The footprint,
+/// about 200 entries, is well within its limit of 400.
+pub const MAX_BATCH: u32 = 98;
+
+/// Furthest ahead, in ledgers (~1 day), a charge's last ledger may be. A
+/// charge record's rent grows with how long it lives, so this bounds it.
+pub const MAX_CHARGE_WINDOW: u32 = 17_280;
+
+/// Ledgers (~1 hour) a charge record outlives the charge's last ledger, so a
+/// submitter can still read the outcome of a charge that just expired.
+pub const CHARGE_RECORD_GRACE: u32 = 720;
 
 /// A classic trustline balance is a signed 64-bit integer, so a larger `i128`
 /// amount can never be transferred to or from a `G...` account.
@@ -62,7 +76,7 @@ pub enum Error {
     InsufficientBalance = 108,
     ChargeAboveLimit = 109,
     DuplicateCharge = 110,
-    OutOfOrderCharge = 111,
+    ChargeExpired = 111,
     EmptyBatch = 112,
     BatchTooLarge = 113,
     WithdrawalAlreadyProcessed = 114,
@@ -71,6 +85,8 @@ pub enum Error {
     /// Two roles would share one address, or a rotation names the current
     /// holder of the role.
     DuplicateRole = 117,
+    /// A charge's last ledger is further ahead than `MAX_CHARGE_WINDOW`.
+    ChargeWindowTooLong = 118,
 }
 
 #[contracttype]
@@ -107,19 +123,17 @@ pub struct Totals {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Account {
     pub balance: i128,
-    /// Last consumed charge sequence; the next charge must carry this plus one.
-    pub charge_seq: u64,
 }
 
-/// One charge: the account owner, the account's next sequence number, and
-/// the amount.
+/// One charge: the account owner, the seller's identifier for the charge,
+/// the amount, and the last ledger in which it may be settled.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Charge(pub Address, pub u64, pub i128);
+pub struct Charge(pub Address, pub BytesN<32>, pub i128, pub u32);
 
-/// Outcome of one charge in a batch. `Charged`, `InsufficientBalance` and
-/// `AboveLimit` consume the sequence number, so retrying the same charge can
-/// never debit; `Duplicate`, `OutOfOrder` and `UnknownAccount` consume nothing.
+/// Outcome of one charge in a batch. Every outcome but `Duplicate` and
+/// `Expired` records the charge's identifier with that outcome, so the same
+/// charge can never debit twice; `Duplicate` and `Expired` record nothing.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -128,14 +142,15 @@ pub enum Outcome {
     InsufficientBalance = 1,
     AboveLimit = 2,
     Duplicate = 3,
-    OutOfOrder = 4,
+    Expired = 4,
     UnknownAccount = 5,
 }
 
-/// Per-charge result in an event: account owner, sequence, amount, outcome.
+/// Per-charge result in an event: account owner, charge identifier, amount,
+/// outcome.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Settled(pub Address, pub u64, pub i128, pub Outcome);
+pub struct Settled(pub Address, pub BytesN<32>, pub i128, pub Outcome);
 
 #[contracttype]
 #[derive(Clone)]
@@ -146,6 +161,8 @@ enum Key {
     Deposit(Address, BytesN<32>),
     Withdrawal(Address, BytesN<32>),
     RevenueWithdrawal(BytesN<32>),
+    /// Temporary: a settled charge's outcome, by owner and charge identifier.
+    Charge(Address, BytesN<32>),
 }
 
 #[contractevent(topics = ["deposit"], data_format = "vec")]
@@ -242,7 +259,7 @@ impl PrepaidLedger {
             .storage()
             .persistent()
             .get::<Key, Account>(&account_key)
-            .unwrap_or(Account { balance: 0, charge_seq: 0 });
+            .unwrap_or(Account { balance: 0 });
         account.balance = checked_add(&env, account.balance, amount);
         let mut totals = totals(&env);
         totals.liabilities = checked_add(&env, totals.liabilities, amount);
@@ -267,7 +284,7 @@ impl PrepaidLedger {
             Outcome::InsufficientBalance => panic_with_error!(&env, Error::InsufficientBalance),
             Outcome::AboveLimit => panic_with_error!(&env, Error::ChargeAboveLimit),
             Outcome::Duplicate => panic_with_error!(&env, Error::DuplicateCharge),
-            Outcome::OutOfOrder => panic_with_error!(&env, Error::OutOfOrderCharge),
+            Outcome::Expired => panic_with_error!(&env, Error::ChargeExpired),
             Outcome::UnknownAccount => panic_with_error!(&env, Error::UnknownAccount),
         }
         env.storage().instance().set(&Key::Totals, &totals);
@@ -452,34 +469,40 @@ impl PrepaidLedger {
 }
 
 fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Settled {
-    let Charge(owner, seq, amount) = charge;
+    let Charge(owner, charge_id, amount, last_ledger) = charge;
+    // A malformed charge is not a refusal a retry could change: reject the
+    // whole call.
+    if amount <= 0 {
+        panic_with_error!(env, Error::InvalidAmount);
+    }
+    let now = env.ledger().sequence();
+    if last_ledger > now.saturating_add(MAX_CHARGE_WINDOW) {
+        panic_with_error!(env, Error::ChargeWindowTooLong);
+    }
+    let record = Key::Charge(owner.clone(), charge_id.clone());
+    if env.storage().temporary().has(&record) {
+        return Settled(owner, charge_id, amount, Outcome::Duplicate);
+    }
+    if last_ledger < now {
+        return Settled(owner, charge_id, amount, Outcome::Expired);
+    }
     let key = Key::Account(owner.clone());
     let outcome = match env.storage().persistent().get::<Key, Account>(&key) {
         None => Outcome::UnknownAccount,
-        Some(account) if seq <= account.charge_seq => Outcome::Duplicate,
-        Some(account) if seq != account.charge_seq + 1 => Outcome::OutOfOrder,
+        Some(_) if amount > config.limits.max_charge => Outcome::AboveLimit,
+        Some(account) if amount > account.balance => Outcome::InsufficientBalance,
         Some(mut account) => {
-            // A non-positive amount is a malformed request, not a policy
-            // refusal a retry could change: reject the whole call.
-            if amount <= 0 {
-                panic_with_error!(env, Error::InvalidAmount);
-            }
-            let outcome = if amount > config.limits.max_charge {
-                Outcome::AboveLimit
-            } else if amount > account.balance {
-                Outcome::InsufficientBalance
-            } else {
-                account.balance -= amount;
-                totals.liabilities -= amount;
-                totals.revenue = checked_add(env, totals.revenue, amount);
-                Outcome::Charged
-            };
-            account.charge_seq = seq;
+            account.balance -= amount;
+            totals.liabilities -= amount;
+            totals.revenue = checked_add(env, totals.revenue, amount);
             put_persistent(env, &key, &account);
-            outcome
+            Outcome::Charged
         }
     };
-    Settled(owner, seq, amount, outcome)
+    env.storage().temporary().set(&record, &outcome);
+    let live_for = last_ledger - now + CHARGE_RECORD_GRACE;
+    env.storage().temporary().extend_ttl(&record, live_for, live_for);
+    Settled(owner, charge_id, amount, outcome)
 }
 
 /// Moves one role to `current`, authorized by the admin and by `current`.

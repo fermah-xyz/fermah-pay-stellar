@@ -13,17 +13,17 @@ It provides:
   wallets ([reference](docs/api/buyer.md)).
 - **Ledger API and settlement**: deposits the buyer authorizes with one
   wallet signature and never pays a fee for, charges admitted against the
-  buyer's balance and settled in batches of up to 100, and idempotent retries
+  buyer's balance and settled in batches of up to 98, and idempotent retries
   ([reference](docs/api/ledger.md),
   [settlement](docs/architecture/transactions.md#settlement)).
 - **Prepaid ledger contract** (Soroban): buyer credit and seller revenue over
-  USDC held in a separate treasury, with per-account replay protection and
-  batches of up to 100 charges in one call
+  USDC held in a separate treasury, with per-charge replay protection and
+  batches of up to 98 charges in one call
   ([design](docs/architecture/prepaid-contract.md)).
 - **Sponsored submission**: buyers sign only an authorization entry for the
   exact call; a submitter signs the transaction and a separate account pays
   through a fee bump
-  ([design](docs/architecture/transactions.md)). Deposits, a 100-buyer batch,
+  ([design](docs/architecture/transactions.md)). Deposits, a 98-buyer batch,
   withdrawals and treasury solvency are recorded on testnet with Circle USDC
   ([evidence](docs/evidence/README.md#prepaid-ledger-on-testnet)).
 - **Buyer onboarding without XLM**: one transaction creates a buyer account

@@ -1,14 +1,14 @@
 {
   "amount": "150000",
   "buyer": "GCBD53TBX6VDTD7M34MYDLFBFX4G7WZRSO6T24CMGVVXV3X52DQOZ4MV",
-  "contract": "CAWRQEYPSOMB6OJNJ3M7SYBHDLEMG3NSOPHKKCF44RHOA5Z2V3NCHQK5",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
   "criterion": "treasury-withdrawal",
   "expected": "the buyer's unused credit is debited and the same USDC moves from the treasury to the buyer in one invocation, authorized by both",
-  "fee_charged_stroops": 349840,
+  "fee_charged_stroops": 355896,
   "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
   "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
-  "inner_transaction_hash": "81d0bfa29a8047874034af56fe9899feb58ec83c1ceab6661489992e84d33486",
-  "ledger": 4924979,
+  "inner_transaction_hash": "3251eee9af32db1a7d261c415bb73ce24a084e68a82bb07c4d34c578af66fd39",
+  "ledger": 4927007,
   "network": "stellar:testnet",
   "observed": {
     "buyer_usdc_after": 550000,
@@ -19,15 +19,15 @@
     "treasury_usdc_after": 29850000,
     "treasury_usdc_before": 30000000
   },
-  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/af7f88abda07db768ebcbd0f8e33f7e2a19a687d0e576422d5e343a4b14679e3",
-  "recorded_at": "2026-09-29T02:21:24.703932603Z",
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/f38a4559a5115141d65d30e42d7725cd59cfa56224821b5400513e3b29649746",
+  "recorded_at": "2026-09-29T05:10:27.5162159Z",
   "resources": {
     "disk_read_bytes": 696,
     "footprint_read_only": 4,
     "footprint_read_write": 7,
-    "instructions": 2243398,
-    "write_bytes": 1544
+    "instructions": 2233200,
+    "write_bytes": 1512
   },
-  "transaction_hash": "af7f88abda07db768ebcbd0f8e33f7e2a19a687d0e576422d5e343a4b14679e3",
-  "treasury": "GCP6PVKKSSG7QJG7DQVS6SMHZDC5LYG52DHKSISC6JSZKU5YL7RQCXSJ"
+  "transaction_hash": "f38a4559a5115141d65d30e42d7725cd59cfa56224821b5400513e3b29649746",
+  "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN"
 }

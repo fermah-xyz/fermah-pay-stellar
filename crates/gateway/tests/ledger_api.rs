@@ -6,7 +6,10 @@
 
 mod common;
 
-use common::{AUTHORIZATION_VALIDITY_LEDGERS, Harness, Tenant, assert_refused, authed, start};
+use common::{
+    AUTHORIZATION_VALIDITY_LEDGERS, CHARGE_VALIDITY_LEDGERS, Harness, Tenant, assert_refused,
+    authed, start,
+};
 use fermah_pay_stellar_chain::authorization::{sign_entry, signature_payload};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
@@ -24,6 +27,7 @@ use fermah_pay_stellar_proto::v1::{
     ChargeState, CreateBuyerRequest, CreateChargeRequest, Deposit, DepositState, GetBalanceRequest,
     GetChargeRequest, GetDepositRequest, PrepareDepositRequest, SubmitDepositRequest,
 };
+use sha2::Digest as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tonic::Code;
 use tonic::transport::Channel;
@@ -515,30 +519,60 @@ async fn test_undecodable_entry_is_refused(opts: PgPoolOptions, connect: PgConne
 // ---- charge admission -----------------------------------------------------
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_admitted_charges_debit_at_once_and_take_consecutive_sequences(
+async fn test_admitted_charge_debits_at_once_and_names_its_contract_charge(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
     let h = start(opts, connect, Network::Testnet).await;
     let (t, b) = setup(&h).await;
     fund(&h, &b.id, 100).await;
-    let mut sequences = Vec::new();
     for key in ["c-1", "c-2"] {
         let reply =
             ledger(&h).await.create_charge(authed(charge(&b.id, 30, key), &t.token)).await.unwrap();
         let charge = reply.into_inner().charge.unwrap();
         assert_eq!(charge.state(), ChargeState::Admitted);
-        sequences.push(charge.sequence);
+        // The contract identifier is the key's digest, so any retry of the
+        // request names the same charge on-chain.
+        let digest: [u8; 32] = sha2::Sha256::digest(key.as_bytes()).into();
+        assert_eq!(charge.contract_charge_id, hex_lower(&digest));
+        assert_eq!(charge.last_ledger, h.ledger.get() + CHARGE_VALIDITY_LEDGERS);
     }
-    assert_eq!(sequences, [1, 2]);
     assert_eq!(balance(&h, &t, &b.id).await, (40, 60));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_charge_above_available_is_refused_and_consumes_no_sequence(
+async fn test_new_charge_needs_the_network_but_a_retry_does_not(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    fund(&h, &b.id, 100).await;
+    let first = ledger(&h)
+        .await
+        .create_charge(authed(charge(&b.id, 30, "c-1"), &t.token))
+        .await
+        .unwrap()
+        .into_inner();
+    h.ledger.set(0);
+    let status = ledger(&h)
+        .await
+        .create_charge(authed(charge(&b.id, 30, "c-2"), &t.token))
+        .await
+        .unwrap_err();
+    assert_refused(&status, Code::Unavailable, "network_unavailable");
+    let retry = ledger(&h)
+        .await
+        .create_charge(authed(charge(&b.id, 30, "c-1"), &t.token))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((retry.created, retry.charge), (false, first.charge));
+    assert_eq!(balance(&h, &t, &b.id).await, (70, 30));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_charge_above_available_is_refused(opts: PgPoolOptions, connect: PgConnectOptions) {
     let h = start(opts, connect, Network::Testnet).await;
     let (t, b) = setup(&h).await;
     fund(&h, &b.id, 50).await;
@@ -550,7 +584,7 @@ async fn test_charge_above_available_is_refused_and_consumes_no_sequence(
     assert_refused(&status, Code::FailedPrecondition, "insufficient_balance");
     assert_eq!(balance(&h, &t, &b.id).await, (50, 0));
 
-    // Boundary: exactly the available amount is admitted, as sequence 1.
+    // Boundary: exactly the available amount is admitted.
     let admitted = ledger(&h)
         .await
         .create_charge(authed(charge(&b.id, 50, "c-2"), &t.token))
@@ -559,7 +593,7 @@ async fn test_charge_above_available_is_refused_and_consumes_no_sequence(
         .into_inner()
         .charge
         .unwrap();
-    assert_eq!(admitted.sequence, 1);
+    assert_eq!(admitted.state(), ChargeState::Admitted);
     assert_eq!(balance(&h, &t, &b.id).await, (0, 50));
 }
 
@@ -599,10 +633,7 @@ async fn test_charge_retry_debits_once_and_other_reuse_conflicts(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_concurrent_charges_never_overdraw_and_leave_no_sequence_gap(
-    opts: PgPoolOptions,
-    connect: PgConnectOptions,
-) {
+async fn test_concurrent_charges_never_overdraw(opts: PgPoolOptions, connect: PgConnectOptions) {
     let h = start(opts, connect, Network::Testnet).await;
     let (t, b) = setup(&h).await;
     fund(&h, &b.id, 70).await;
@@ -620,18 +651,19 @@ async fn test_concurrent_charges_never_overdraw_and_leave_no_sequence_gap(
     });
     let results = futures_join_all(attempts).await;
 
-    let mut sequences: Vec<u64> = Vec::new();
+    let mut admitted = std::collections::BTreeSet::new();
     for result in results {
         match result {
-            Ok(reply) => sequences.push(reply.into_inner().charge.unwrap().sequence),
+            Ok(reply) => {
+                admitted.insert(reply.into_inner().charge.unwrap().contract_charge_id);
+            }
             // Every refusal is the balance refusal, never an internal error.
             Err(status) => {
                 assert_refused(&status, Code::FailedPrecondition, "insufficient_balance")
             }
         }
     }
-    sequences.sort_unstable();
-    assert_eq!(sequences, (1..=7).collect::<Vec<u64>>());
+    assert_eq!(admitted.len(), 7);
     assert_eq!(balance(&h, &t, &b.id).await, (0, 70));
 }
 
@@ -879,8 +911,9 @@ async fn test_api_role_cannot_create_rows_past_their_initial_state(
     let buyer_id = Uuid::parse_str(&b.id).unwrap();
     let error = sqlx::query(
         "INSERT INTO pay_stellar.charges
-             (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, sequence, state)
-         VALUES ($1, $2, $3, 'stellar:testnet', 'k', 1, 1, 'admitted')",
+             (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, charge_id,
+              last_ledger, state)
+         VALUES ($1, $2, $3, 'stellar:testnet', 'k', 1, sha256('k'), 5, 'admitted')",
     )
     .bind(Uuid::now_v7())
     .bind(buyer_id)

@@ -65,21 +65,26 @@ through a transaction of their own is confirmed the same way.
 ## Charges
 
 `CreateCharge(buyer_id, amount, idempotency_key)` admits a charge: in one
-database transaction it checks the buyer's available balance, debits it, and
-assigns the charge the buyer's next contract sequence number. The worker then
-settles admitted charges on-chain, up to 100 in one transaction.
+database transaction it checks the buyer's available balance and debits it.
+The charge's identifier on the contract, `contract_charge_id`, is derived from
+the idempotency key, so every retry of the request names the same charge; its
+`last_ledger` is the last ledger in which the contract will accept it, about
+an hour after admission by default. The worker settles admitted charges
+on-chain, up to 98 in one transaction.
 
-The contract accepts each account's sequence numbers once and in order, and
-refuses a charge above the on-chain balance, so the on-chain result cannot
-double-charge or overdraw whatever the database holds.
+The contract records every charge identifier it settles and refuses it
+again, and refuses a charge above the on-chain balance or past its last
+ledger, so the on-chain result cannot double-charge or overdraw whatever the
+database holds. A charge not settled by its last ledger is refused as
+`expired` and its amount returned.
 
 | State | Final | Meaning |
 |---|---|---|
 | `ADMITTED` | no | debited from the available balance; waiting for a batch |
 | `SUBMITTED` | no | in a batch sent to the network |
 | `CHARGED` | yes | the contract debited the on-chain balance |
-| `REFUSED` | yes | the contract refused it (`insufficient_balance` or `above_limit`); the amount is back in the available balance |
-| `QUARANTINED` | no | the contract's answer contradicts the gateway's records (`duplicate`, `out_of_order`, `unknown_account`), or the outcome could not be established; the amount stays debited until an operator resolves it from on-chain evidence to `CHARGED`, `REFUSED` or back to `ADMITTED` |
+| `REFUSED` | yes | nothing was debited: the contract refused it (`insufficient_balance`, `above_limit`) or it expired (`expired`); the amount is back in the available balance |
+| `QUARANTINED` | no | the contract's answer contradicts the gateway's records (`unknown_account`), or the outcome could not be established from the contract's records; the amount stays debited until an operator resolves it from on-chain evidence to `CHARGED`, `REFUSED` or back to `ADMITTED` |
 
 `GetBalance(buyer_id)` returns `available`, what new charges may still
 debit, and `pending_charges`, the sum of admitted and submitted charges.

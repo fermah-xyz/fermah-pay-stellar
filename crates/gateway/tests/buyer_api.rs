@@ -607,7 +607,7 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
                 "wallet_address",
             ],
         ),
-        columns("pay_stellar_api", "UPDATE", "buyers", &["available", "next_charge_seq"]),
+        columns("pay_stellar_api", "UPDATE", "buyers", &["available"]),
         columns(
             "pay_stellar_api",
             "INSERT",
@@ -641,7 +641,8 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
                 "network",
                 "idempotency_key",
                 "amount",
-                "sequence",
+                "charge_id",
+                "last_ledger",
             ],
         ),
         columns("pay_stellar_worker", "UPDATE", "buyers", &["available"]),

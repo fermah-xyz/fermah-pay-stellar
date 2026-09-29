@@ -48,6 +48,13 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_REQUEST_TIMEOUT_SECS", default_value = "30")]
     pub request_timeout_secs: u64,
 
+    /// Ledgers after admission during which a charge may be settled (about
+    /// five seconds each; 720 is about an hour). An unsettled charge is
+    /// refunded after that. At most 17280, the contract's limit.
+    #[arg(long, env = "PAY_STELLAR_CHARGE_VALIDITY_LEDGERS", default_value = "720",
+          value_parser = clap::value_parser!(u32).range(1..=17_280))]
+    pub charge_validity_ledgers: u32,
+
     /// Maximum database connections.
     #[arg(long, env = "PAY_STELLAR_DATABASE_MAX_CONNECTIONS", default_value = "16")]
     pub database_max_connections: NonZeroU32,

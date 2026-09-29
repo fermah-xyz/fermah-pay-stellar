@@ -129,16 +129,22 @@ message Charge {
   string charge_id = 1;
   string buyer_id = 2;
   int64 amount = 3;
-  // The buyer account's charge sequence number on the contract.
-  uint64 sequence = 4;
+  reserved 4;
+  reserved "sequence";
   ChargeState state = 5;
-  // The contract's outcome token once settled: `charged`,
-  // `insufficient_balance`, `above_limit`, `duplicate`, `out_of_order` or
-  // `unknown_account`.
+  // The outcome token once settled: `charged`, `insufficient_balance`,
+  // `above_limit` or `expired`; for a quarantined charge, `duplicate` or
+  // `unknown_account` when the contract answered so.
   string outcome = 6;
   string transaction_hash = 7;
   uint32 ledger = 8;
   string created_at = 9;
+  // Hex identifier of the charge on the contract, derived from the
+  // idempotency key: every retry names the same charge.
+  string contract_charge_id = 10;
+  // Last ledger in which the contract accepts the charge. A charge not
+  // settled by then is refused as `expired` and its amount returned.
+  uint32 last_ledger = 11;
 }
 
 message CreateChargeRequest {

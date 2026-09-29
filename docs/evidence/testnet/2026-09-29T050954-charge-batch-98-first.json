@@ -1,19 +1,19 @@
 {
-  "amount": "150000",
-  "contract": "CAWRQEYPSOMB6OJNJ3M7SYBHDLEMG3NSOPHKKCF44RHOA5Z2V3NCHQK5",
+  "amount": "100000",
+  "charge_tag": "first",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
   "criterion": "charge-batch",
-  "entries": 100,
+  "entries": 98,
   "expected": "one transaction settles every charge; each entry's outcome is returned and emitted",
-  "fee_charged_stroops": 476892,
+  "fee_charged_stroops": 1154114,
   "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
   "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
-  "inner_transaction_hash": "dd1fec19c1072a37564c2710a923d1716a48e3525dedc6173bbe8a92f5ee5992",
-  "ledger": 4924981,
+  "inner_transaction_hash": "6cb77b74e8a5546585fcd7fe6657c20abc41219fb2735ed03305d3a6d1260a77",
+  "last_ledger": 4927717,
+  "ledger": 4927001,
   "network": "stellar:testnet",
   "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
   "outcomes": [
-    "Duplicate",
-    "InsufficientBalance",
     "Charged",
     "Charged",
     "Charged",
@@ -113,15 +113,14 @@
     "Charged",
     "Charged"
   ],
-  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/9a1658986fe384e33d248a2eadf8e8b8dc5f1fdce3dc18adcd4d7f9abfed5f3e",
-  "recorded_at": "2026-09-29T02:21:34.669228077Z",
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/97edb494d860c8f9f0bfe3477c9dd78e4a51b5484b0122eddc9403c42d3eb10a",
+  "recorded_at": "2026-09-29T05:09:54.81966477Z",
   "resources": {
     "disk_read_bytes": 188,
-    "footprint_read_only": 3,
-    "footprint_read_write": 101,
-    "instructions": 26531282,
-    "write_bytes": 21356
+    "footprint_read_only": 2,
+    "footprint_read_write": 198,
+    "instructions": 61829296,
+    "write_bytes": 35260
   },
-  "sequence": 2,
-  "transaction_hash": "9a1658986fe384e33d248a2eadf8e8b8dc5f1fdce3dc18adcd4d7f9abfed5f3e"
+  "transaction_hash": "97edb494d860c8f9f0bfe3477c9dd78e4a51b5484b0122eddc9403c42d3eb10a"
 }

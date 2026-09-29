@@ -1,20 +1,21 @@
 //! Resolving quarantined charges, run by an operator under the
 //! `pay_stellar_operator` role.
 //!
-//! The database accepts any of the four resolutions from that role; what
-//! keeps a resolution honest is that it is derived here from the network, not
-//! from the operator's judgement. A settled outcome is read from the
-//! contract's own `charges` event in the transaction that consumed the
-//! charge's sequence; a readmission requires the account's consumed sequence,
-//! read now, to be below the charge's.
+//! The database accepts any resolution from that role; what keeps a
+//! resolution honest is that it is derived here from the network, not from
+//! the operator's judgement: from the charge's record on the contract while it
+//! lives, or from the contract's `charges` event in the transaction that
+//! settled the charge.
 
-use fermah_pay_stellar_chain::prepaid::{Outcome, PrepaidDeployment, account_state, settled_in};
+use fermah_pay_stellar_chain::prepaid::{
+    CHARGE_RECORD_GRACE, Outcome, PrepaidDeployment, charge_record, settled_in,
+};
 use fermah_pay_stellar_chain::rpc::{RpcError, TransactionStatus, hex_lower};
 use fermah_pay_stellar_domain::AccountAddress;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::submission::Chain;
+use crate::submission::{Chain, stored_authorization_horizon};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuarantinedCharge {
@@ -22,7 +23,11 @@ pub struct QuarantinedCharge {
     pub buyer_id: Uuid,
     pub seller_deployment_id: Uuid,
     pub owner: AccountAddress,
-    pub sequence: u64,
+    pub charge_id: [u8; 32],
+    pub last_ledger: u32,
+    /// The last ledger in which the authorization of the batch that carried
+    /// the charge could still be included.
+    pub authorization_horizon: u32,
     pub amount: i64,
     pub outcome: Option<String>,
     pub reason: Option<String>,
@@ -32,9 +37,13 @@ pub struct QuarantinedCharge {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolution {
-    /// The contract settled the sequence with this consuming outcome.
+    /// The contract settled the charge with this outcome.
     Settled(Outcome),
-    /// The sequence is still free; the charge goes back to the next batch.
+    /// The contract has no record of the charge and it is past its last
+    /// ledger: nothing was debited and nothing can be.
+    Expired,
+    /// The contract has no record of the charge and it is still within its
+    /// last ledger; it goes back to the next batch.
     Readmitted,
 }
 
@@ -42,6 +51,7 @@ impl Resolution {
     const fn token(self) -> &'static str {
         match self {
             Self::Settled(outcome) => outcome.token(),
+            Self::Expired => "expired",
             Self::Readmitted => "readmitted",
         }
     }
@@ -63,18 +73,22 @@ pub enum QuarantineError {
     Corrupt(&'static str),
     #[error("transaction {0} is not a successful transaction known to the node")]
     TransactionNotSucceeded(String),
-    #[error("transaction {hash} settles no charge of {owner} with sequence {sequence}")]
-    NotInTransaction { hash: String, owner: AccountAddress, sequence: u64 },
-    #[error("transaction {hash} settled sequence {sequence} for {found}, not {expected}")]
-    AmountMismatch { hash: String, sequence: u64, found: i128, expected: i64 },
+    #[error("transaction {hash} settles no charge {charge} of {owner}")]
+    NotInTransaction { hash: String, owner: AccountAddress, charge: String },
+    #[error("transaction {hash} settled charge {charge} for {found}, not {expected}")]
+    AmountMismatch { hash: String, charge: String, found: i128, expected: i64 },
+    #[error("transaction {hash} answered {outcome} for charge {charge}, which settles nothing")]
+    NotSettled { hash: String, charge: String, outcome: &'static str },
+    #[error("the record of charge {charge} holds {outcome}, which resolves nothing")]
+    RecordUnresolvable { charge: String, outcome: &'static str },
     #[error(
-        "transaction {hash} answered {outcome} for sequence {sequence}, which consumes nothing"
+        "no record of charge {charge} at ledger {ledger}, past the ledger a record would live to; resolve it from the transaction that settled it"
     )]
-    NotConsumed { hash: String, sequence: u64, outcome: &'static str },
+    RecordGone { charge: String, ledger: u32 },
     #[error(
-        "the account has consumed sequence {consumed} at ledger {ledger}; sequence {sequence} cannot be sent again"
+        "the node is at ledger {ledger}, not past ledger {horizon} up to which the batch carrying charge {charge} could still land; retry against a node that is"
     )]
-    SequenceConsumed { consumed: u64, sequence: u64, ledger: u32 },
+    ReadBeforeHorizon { charge: String, ledger: u32, horizon: u32 },
 }
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> QuarantineError {
@@ -93,9 +107,10 @@ pub async fn quarantined_charges(
 ) -> Result<Vec<QuarantinedCharge>, QuarantineError> {
     let rows = sqlx::query!(
         r#"
-        SELECT c.id, c.buyer_id, c.seller_deployment_id, c.sequence, c.amount, c.outcome,
+        SELECT c.id, c.buyer_id, c.seller_deployment_id, c.charge_id, c.last_ledger, c.amount,
+               c.outcome,
                c.last_error, b.wallet_address, l.contract_address, l.usdc_address,
-               l.treasury_address, s.outer_hash AS "outer_hash?"
+               l.treasury_address, s.outer_hash AS "outer_hash?", s.envelope_xdr AS "envelope_xdr?"
         FROM pay_stellar.charges c
         JOIN pay_stellar.buyers b ON b.id = c.buyer_id
         JOIN pay_stellar.ledger_contracts l
@@ -118,8 +133,19 @@ pub async fn quarantined_charges(
                 owner: row.wallet_address.parse().map_err(|_| {
                     QuarantineError::Corrupt("address outside the CHECK constraint")
                 })?,
-                sequence: u64::try_from(row.sequence)
-                    .map_err(|_| QuarantineError::Corrupt("negative charge sequence"))?,
+                charge_id: <[u8; 32]>::try_from(row.charge_id)
+                    .map_err(|_| QuarantineError::Corrupt("charge identifier is not 32 bytes"))?,
+                last_ledger: u32::try_from(row.last_ledger)
+                    .map_err(|_| QuarantineError::Corrupt("charge last ledger out of range"))?,
+                // Every quarantined charge names the submission that carried
+                // it (`charges_linked`).
+                authorization_horizon: row
+                    .envelope_xdr
+                    .as_deref()
+                    .and_then(stored_authorization_horizon)
+                    .ok_or(QuarantineError::Corrupt(
+                        "quarantined charge without a readable envelope",
+                    ))?,
                 amount: row.amount,
                 outcome: row.outcome,
                 reason: row.last_error,
@@ -151,18 +177,19 @@ pub async fn prove_from_transaction<C: Chain>(
     };
     let meta =
         tx.meta.as_ref().ok_or_else(|| QuarantineError::TransactionNotSucceeded(shown.clone()))?;
+    let shown_charge = hex_lower(&charge.charge_id);
     let entry = settled_in(meta, &charge.deployment.contract)
         .into_iter()
-        .find(|entry| entry.owner == charge.owner && entry.seq == charge.sequence)
+        .find(|entry| entry.owner == charge.owner && entry.charge_id == charge.charge_id)
         .ok_or_else(|| QuarantineError::NotInTransaction {
             hash: shown.clone(),
             owner: charge.owner.clone(),
-            sequence: charge.sequence,
+            charge: shown_charge.clone(),
         })?;
     if entry.amount != i128::from(charge.amount) {
         return Err(QuarantineError::AmountMismatch {
             hash: shown,
-            sequence: charge.sequence,
+            charge: shown_charge,
             found: entry.amount,
             expected: charge.amount,
         });
@@ -171,45 +198,73 @@ pub async fn prove_from_transaction<C: Chain>(
         Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => Ok((
             Resolution::Settled(entry.outcome),
             format!(
-                "transaction {shown} (ledger {}) settled sequence {} as {}",
+                "transaction {shown} (ledger {}) settled charge {shown_charge} as {}",
                 tx.ledger,
-                charge.sequence,
                 entry.outcome.token()
             ),
         )),
-        other => Err(QuarantineError::NotConsumed {
+        other => Err(QuarantineError::NotSettled {
             hash: shown,
-            sequence: charge.sequence,
+            charge: shown_charge,
             outcome: other.token(),
         }),
     }
 }
 
-/// A readmission, if the account's consumed sequence read now is below the
-/// charge's, and the evidence text to record.
-pub async fn prove_readmission<C: Chain>(
+/// The resolution the charge's record on the contract establishes, read
+/// now: its outcome if the record exists; if not, a readmission while the
+/// charge is within its last ledger, or expiry while a record, had there
+/// been one, would still live.
+pub async fn prove_from_record<C: Chain>(
     chain: &C,
     charge: &QuarantinedCharge,
 ) -> Result<(Resolution, String), QuarantineError> {
-    let key = charge.deployment.account_key(&charge.owner);
+    let shown_charge = hex_lower(&charge.charge_id);
+    let key = charge.deployment.charge_record_key(&charge.owner, &charge.charge_id);
     let read = chain.ledger_entries(&[key]).await.map_err(QuarantineError::Chain)?;
-    let consumed = match read.entries.first() {
-        None => 0,
-        Some(record) => account_state(&record.data)
-            .map(|(_, seq)| seq)
-            .ok_or(QuarantineError::Corrupt("account entry does not decode"))?,
-    };
-    if consumed >= charge.sequence {
-        return Err(QuarantineError::SequenceConsumed {
-            consumed,
-            sequence: charge.sequence,
-            ledger: read.latest_ledger,
+    let ledger = read.latest_ledger;
+    // A node behind the batch's inclusion, or the authorization window
+    // itself, cannot show that the record is absent: the batch may still
+    // land, or may have landed after the node's view.
+    if ledger <= charge.authorization_horizon {
+        return Err(QuarantineError::ReadBeforeHorizon {
+            charge: shown_charge,
+            ledger,
+            horizon: charge.authorization_horizon,
         });
     }
-    Ok((
-        Resolution::Readmitted,
-        format!("account consumed sequence {consumed} at ledger {}", read.latest_ledger),
-    ))
+    let resolution = match read.entries.first() {
+        Some(record) => {
+            let outcome = charge_record(&record.data)
+                .ok_or(QuarantineError::Corrupt("charge record does not decode"))?;
+            match outcome {
+                Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => {
+                    Resolution::Settled(outcome)
+                }
+                other => {
+                    return Err(QuarantineError::RecordUnresolvable {
+                        charge: shown_charge,
+                        outcome: other.token(),
+                    });
+                }
+            }
+        }
+        None if ledger <= charge.last_ledger => Resolution::Readmitted,
+        None if ledger <= charge.last_ledger.saturating_add(CHARGE_RECORD_GRACE) => {
+            Resolution::Expired
+        }
+        None => return Err(QuarantineError::RecordGone { charge: shown_charge, ledger }),
+    };
+    let evidence = match resolution {
+        Resolution::Settled(outcome) => {
+            format!("record of charge {shown_charge} holds {} at ledger {ledger}", outcome.token())
+        }
+        _ => format!(
+            "no record of charge {shown_charge} at ledger {ledger}; its last ledger is {}",
+            charge.last_ledger
+        ),
+    };
+    Ok((resolution, evidence))
 }
 
 /// Records the resolution and applies it, through the database function

@@ -52,22 +52,27 @@ impl LatestLedger for RpcClient {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DepositPolicy {
+pub struct LedgerPolicy {
     /// Ledgers a buyer's deposit authorization stays valid after it is
     /// prepared. It covers the time a person takes to approve in a wallet;
     /// the worker can resubmit the same signed entry until it lapses.
     pub authorization_validity_ledgers: u32,
+    /// Ledgers after admission during which a charge may still be settled.
+    /// Past them the contract refuses it and its amount is returned; the
+    /// contract accepts at most about a day, and the record of each charge
+    /// costs rent for as long as this.
+    pub charge_validity_ledgers: u32,
 }
 
 pub struct LedgerApi<L> {
     store: Store,
     ledger: Arc<L>,
     network: Network,
-    policy: DepositPolicy,
+    policy: LedgerPolicy,
 }
 
 impl<L> LedgerApi<L> {
-    pub fn new(store: Store, ledger: L, network: Network, policy: DepositPolicy) -> Self {
+    pub fn new(store: Store, ledger: L, network: Network, policy: LedgerPolicy) -> Self {
         Self { store, ledger: Arc::new(ledger), network, policy }
     }
 }
@@ -219,7 +224,9 @@ fn charge_to_wire(record: ChargeRecord) -> Result<Charge, Status> {
         charge_id: record.id.to_string(),
         buyer_id: record.buyer_id.to_string(),
         amount: record.amount,
-        sequence: u64::try_from(record.sequence).map_err(|_| corrupt("charge sequence"))?,
+        contract_charge_id: hex_lower(&record.charge_id),
+        last_ledger: u32::try_from(record.last_ledger)
+            .map_err(|_| corrupt("charge last ledger"))?,
         state: charge_state(record.state).into(),
         outcome: record.outcome.unwrap_or_default(),
         transaction_hash: record.transaction_hash.as_deref().map(hex_lower).unwrap_or_default(),
@@ -421,12 +428,28 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         let buyer_id = parse_id(&body.buyer_id, Refusal::InvalidBuyerId)?;
         let amount = parse_amount(body.amount)?;
         let key = parse_key(&body.idempotency_key)?;
-        let (record, created) = match self
+        // A retry is answered from the stored row, whatever the network's
+        // state: only a new charge needs the current ledger.
+        let replayed = self
             .store
-            .admit_charge(&scope, buyer_id, amount, &key)
+            .replayed_charge(&scope, buyer_id, amount, &key)
             .await
-            .map_err(|e| internal(&e))?
-        {
+            .map_err(|e| internal(&e))?;
+        let admission = match replayed {
+            Some(admission) => admission,
+            None => {
+                let latest =
+                    self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+                let last_ledger = latest
+                    .checked_add(self.policy.charge_validity_ledgers)
+                    .ok_or(Refusal::Internal)?;
+                self.store
+                    .admit_charge(&scope, buyer_id, amount, &key, last_ledger)
+                    .await
+                    .map_err(|e| internal(&e))?
+            }
+        };
+        let (record, created) = match admission {
             Admission::Admitted(record) => (record, true),
             Admission::Replayed(record) => (record, false),
             Admission::Conflict => return Err(Refusal::IdempotencyConflict.into()),

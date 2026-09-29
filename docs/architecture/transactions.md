@@ -103,10 +103,10 @@ outcomes:
 - **Outcomes applied once.** A deposit is credited, and a refused charge's
   amount returned, in the same statement that moves the row into its final
   state; final states cannot be left, so each balance change happens once.
-- **Charges in contract order.** A batch takes each buyer's admitted charges
-  in sequence order, starting at the buyer's next unconsumed sequence. A buyer
-  with a charge in flight or in quarantine gets no new batch until it is
-  resolved.
+- **Charges within their last ledger.** A batch takes the oldest admitted
+  charges, in any order and from any buyers, that can still land before their
+  last ledger. An admitted charge past its last ledger was never applied and
+  never can be; it is refused as `expired` and its amount returned.
 - **A lapsed authorization decides, not a missing transaction.** When a
   submission fails, expires or is quarantined, the authorizations in its
   broadcast envelope could still be included by someone else's transaction
@@ -114,29 +114,33 @@ outcomes:
   then reads the contract's own state, and uses the read only if the node
   served it at a ledger past that expiration: for a deposit, the marker the
   contract writes when it processes that deposit ID; for a charge, the
-  account's last consumed sequence. A deposit whose marker exists is
-  credited, otherwise it ends `failed` or `expired`; a charge whose sequence
-  is still free is admitted again for the next batch; a charge whose sequence
-  was consumed outside the gateway's batch is quarantined. A deposit whose
+  record the contract keeps of it, which holds its outcome. A deposit whose
+  marker exists is credited, otherwise it ends `failed` or `expired`. A charge
+  whose record exists takes the recorded outcome, however it was applied; one
+  with no record is admitted again while within its last ledger, and refused
+  as `expired` after it, while a record would still live. A deposit whose
   transaction expired while the buyer's signature is still valid is sent
   again with the same signed entry, which its nonce lets land at most once.
-- **Archived state is restored, not skipped.** A buyer account idle long
-  enough for its entry to be archived makes simulation of any call touching
-  it ask for a restore. The worker records and sends the restore transaction
-  the simulation describes, through the same engine, and retries the refused
-  deposit or batch after a pause.
+- **Archived state is restored, not skipped.** Since protocol 23 the network
+  restores an archived entry inside the invocation that touches it:
+  simulation lists the entry in the transaction's resource extension, which
+  the worker sends unchanged, and the deposit or batch pays the restoration.
+  Should a node still ask for a separate restore, the worker records and
+  sends the restore transaction the simulation describes, through the same
+  engine, and retries the deposit or batch after a pause.
 
 | Contract outcome | Charge becomes | Available balance |
 |---|---|---|
 | `charged` | `charged` | stays debited |
-| `insufficient_balance`, `above_limit` | `refused` | amount returned |
-| `duplicate`, `out_of_order`, `unknown_account` | `quarantined` | stays debited |
+| `insufficient_balance`, `above_limit`, `expired` | `refused` | amount returned |
+| `duplicate` | the outcome its record holds | as that outcome |
+| `unknown_account` | `quarantined` | stays debited |
 
-The last row contradicts the gateway's own records: it sends an account's
-sequence only after every earlier one settled, and charges only accounts a
-confirmed deposit created. The charge is held for an operator rather than
-guessed at. A charge is also quarantined when its batch's outcome cannot be
-established. An operator resolves it from the contract's own record; see
+`unknown_account` contradicts the gateway's own records, which charge only
+accounts a confirmed deposit created. A charge is also quarantined when the
+network reports its batch applied yet the contract holds no record of it, or
+when its record would already have lapsed. Each is held for an operator
+rather than guessed at; see
 [resolving quarantined charges](../self-hosting/quarantine.md).
 
 ## Credentials
@@ -152,13 +156,14 @@ From the [evidence records](../evidence/README.md):
 
 | Operation | Fee charged |
 |---|---:|
-| A deposit into a new account | about 0.069 XLM |
-| A single charge | about 0.002 XLM |
-| One batch charging 100 buyers | about 0.048 XLM |
-| A withdrawal | about 0.035 XLM |
-| The first write after deployment | about 12.8 XLM |
+| A deposit into a new account | about 0.065 XLM |
+| A single charge | about 0.0027 XLM |
+| One batch charging 98 buyers | about 0.115 XLM (0.0012 XLM per charge) |
+| A withdrawal | about 0.036 XLM |
 
-The first state-changing call after deployment extends the contract
-instance and its code (about 15 KB) to about 30 days of life, and pays that
-storage rent once; the extension is repeated only when fewer than about 7
-days remain.
+Most of a charge's fee is rent for the two entries it writes: the buyer's
+account, and the charge's record, which lives until about an hour after the
+charge's last ledger. A state-changing call also extends the contract
+instance, and with it the code, to about 30 days of life once fewer than
+about 7 days remain; the call that does so pays that rent, which depends on
+how much life the code had left.

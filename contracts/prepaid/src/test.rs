@@ -16,7 +16,8 @@ use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
     ChargeRequest, ContractConfig, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent,
-    SettledEntry, WithdrawIntent, account_state, batch_outcomes, contract_config, settled_entries,
+    SettledEntry, WithdrawIntent, account_balance, batch_outcomes, charge_record, contract_config,
+    settled_entries,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::Deployer as _;
@@ -115,14 +116,17 @@ fn world() -> World {
     world_with(None)
 }
 
+/// An environment that writes no per-test JSON ledger snapshot, which is not
+/// wanted in the repository.
+fn bare_env() -> Env {
+    Env::new_with_config(soroban_sdk::testutils::EnvTestConfig { capture_snapshot_at_drop: false })
+}
+
 /// A world whose ledger contract runs as `wasm` in the Soroban VM, which is
 /// what resource measurements need: a natively registered contract skips VM
 /// instantiation, execution and code-size costs.
 fn world_with(wasm: Option<&[u8]>) -> World {
-    // Per-test JSON ledger snapshots are not wanted in the repository.
-    let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
-        capture_snapshot_at_drop: false,
-    });
+    let env = bare_env();
     env.ledger().set_sequence_number(10_000);
     let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
     let asset = sac.asset();
@@ -177,6 +181,13 @@ fn deploy(
     usdc: &Address,
 ) -> Address {
     env.register(PrepaidLedger, constructor_args(admin, operator, seller, treasury, usdc))
+}
+
+/// A distinct charge identifier per label.
+fn charge_id(label: u64) -> [u8; 32] {
+    let mut id = [0xc0; 32];
+    id[..8].copy_from_slice(&label.to_le_bytes());
+    id
 }
 
 fn id32(n: u8) -> [u8; 32] {
@@ -304,8 +315,23 @@ impl World {
         AccountAddress::from_public_key(key)
     }
 
-    fn charge(&self, n: u8, seq: u64, amount: i128) -> ChargeRequest {
-        ChargeRequest { owner: self.owner_of(n), seq, amount }
+    /// A charge labelled `id` for the account labelled `n`, settleable for
+    /// the next 1000 ledgers.
+    fn charge(&self, n: u8, id: u64, amount: i128) -> ChargeRequest {
+        self.charge_until(n, id, amount, self.env.ledger().sequence() + 1_000)
+    }
+
+    fn charge_until(&self, n: u8, id: u64, amount: i128, last_ledger: u32) -> ChargeRequest {
+        ChargeRequest { owner: self.owner_of(n), charge_id: charge_id(id), amount, last_ledger }
+    }
+
+    fn contract_charge(&self, request: &ChargeRequest) -> Charge {
+        Charge(
+            Address::from_str(&self.env, request.owner.as_str()),
+            BytesN::from_array(&self.env, &request.charge_id),
+            request.amount,
+            request.last_ledger,
+        )
     }
 
     fn deposit_intent(&self, buyer: &Party, n: u8, amount: i128, deposit: u8) -> DepositIntent {
@@ -347,11 +373,7 @@ impl World {
         let auth = self.signed(signer, self.deployment().charge_batch_authorization(charges));
         let mut entries = soroban_sdk::Vec::new(&self.env);
         for c in charges {
-            entries.push_back(Charge(
-                Address::from_str(&self.env, c.owner.as_str()),
-                c.seq,
-                c.amount,
-            ));
+            entries.push_back(self.contract_charge(c));
         }
         self.invoke("charge_batch", (entries,).into_val(&self.env), &[auth])
     }
@@ -620,8 +642,7 @@ fn test_single_charge_duplicate_is_rejected() {
                 sub_invocations: xdr::VecM::default(),
             },
         );
-        let args: soroban_sdk::Vec<Val> =
-            (Charge(Address::from_str(&w.env, request.owner.as_str()), 1, USDC),).into_val(&w.env);
+        let args: soroban_sdk::Vec<Val> = (w.contract_charge(&request),).into_val(&w.env);
         w.invoke::<()>("charge", args, &[auth])
     };
     assert_eq!(call(&w), Ok(()));
@@ -634,7 +655,8 @@ fn test_refused_single_charge_consumes_nothing() {
     let w = world();
     let buyer = w.party(10 * USDC);
     w.deposit(&buyer, 1, USDC, 1).unwrap();
-    let args: soroban_sdk::Vec<Val> = (Charge(w.owner_address(1), 1, 2 * USDC),).into_val(&w.env);
+    let args: soroban_sdk::Vec<Val> =
+        (w.contract_charge(&w.charge(1, 1, 2 * USDC)),).into_val(&w.env);
     let scargs: std::vec::Vec<xdr::ScVal> =
         args.iter().map(|v| v.try_into_val(&w.env).unwrap()).collect();
     let auth = w.signed(
@@ -651,7 +673,8 @@ fn test_refused_single_charge_consumes_nothing() {
         },
     );
     let refused: Result<(), _> = w.invoke("charge", args, &[auth]);
-    // The same sequence is still available afterwards.
+    // A single refused charge reverts, record included: the same charge
+    // identifier is still available afterwards.
     let later = w.charge_batch(&[w.charge(1, 1, USDC / 2)]).unwrap();
     assert_eq!(
         (refused, later),
@@ -663,9 +686,13 @@ fn test_refused_single_charge_consumes_nothing() {
 }
 
 fn charge_scval(env: &Env, request: &ChargeRequest) -> xdr::ScVal {
-    let val: Val =
-        Charge(Address::from_str(env, request.owner.as_str()), request.seq, request.amount)
-            .into_val(env);
+    let val: Val = Charge(
+        Address::from_str(env, request.owner.as_str()),
+        BytesN::from_array(env, &request.charge_id),
+        request.amount,
+        request.last_ledger,
+    )
+    .into_val(env);
     val.try_into_val(env).unwrap()
 }
 
@@ -713,12 +740,14 @@ fn test_error_codes_never_coincide_with_usdc_contract_codes() {
         Error::InsufficientBalance,
         Error::ChargeAboveLimit,
         Error::DuplicateCharge,
-        Error::OutOfOrderCharge,
+        Error::ChargeExpired,
         Error::EmptyBatch,
         Error::BatchTooLarge,
         Error::WithdrawalAlreadyProcessed,
         Error::InsufficientRevenue,
         Error::Overflow,
+        Error::DuplicateRole,
+        Error::ChargeWindowTooLong,
     ]
     .iter()
     .map(|e| *e as u32)
@@ -738,7 +767,7 @@ fn test_charge_signed_by_non_operator_is_refused() {
         creds.address = xdr::ScAddress::Account(account_xdr_id(&w.operator.key));
     }
     let mut entries = soroban_sdk::Vec::new(&w.env);
-    entries.push_back(Charge(w.owner_address(1), 1, USDC));
+    entries.push_back(w.contract_charge(&charges[0]));
     let result: Result<soroban_sdk::Vec<Outcome>, _> =
         w.invoke("charge_batch", (entries,).into_val(&w.env), &[auth]);
     assert_eq!(result, Err(auth_failure()));
@@ -764,7 +793,7 @@ fn test_refused_charge_is_not_charged_after_top_up() {
     w.deposit(&buyer, 1, USDC, 1).unwrap();
     let refused = w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     // After the buyer adds funds, retrying the refused charge must still not
-    // debit: the refusal consumed its sequence.
+    // debit: the refusal recorded its identifier.
     w.deposit(&buyer, 1, 5 * USDC, 2).unwrap();
     let retried = w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
     assert_eq!(
@@ -778,13 +807,47 @@ fn test_refused_charge_is_not_charged_after_top_up() {
 }
 
 #[test]
-fn test_out_of_order_charge_consumes_nothing() {
+fn test_charge_past_its_last_ledger_is_refused_and_records_nothing() {
     let w = world();
     funded(&w, 1, 10 * USDC);
-    let outcomes = w.charge_batch(&[w.charge(1, 2, USDC), w.charge(1, 1, USDC)]).unwrap();
+    let now = w.env.ledger().sequence();
+    let late = w.charge_until(1, 1, USDC, now - 1);
+    let on_time = w.charge_until(1, 2, USDC, now);
     assert_eq!(
-        (outcomes, w.balance(1)),
-        (soroban_sdk::vec![&w.env, Outcome::OutOfOrder, Outcome::Charged], 9 * USDC)
+        w.charge_batch(&[late.clone(), on_time]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Expired, Outcome::Charged]
+    );
+    // Nothing was recorded for the expired charge: its identifier is free for
+    // a charge that is still on time.
+    let renewed = w.charge_until(1, 1, USDC, now + 10);
+    assert_eq!(w.charge_batch(&[renewed]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Charged]);
+    assert_eq!(w.balance(1), 8 * USDC);
+}
+
+#[test]
+fn test_replay_after_the_record_expires_is_refused_as_expired() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    let charge = w.charge(1, 1, USDC);
+    w.charge_batch(core::slice::from_ref(&charge)).unwrap();
+    // Past the charge's last ledger and the record's grace period, the
+    // record is gone; the charge itself is past its last ledger.
+    w.env.ledger().set_sequence_number(charge.last_ledger + CHARGE_RECORD_GRACE + 1);
+    assert_eq!(w.charge_batch(&[charge]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Expired]);
+    assert_eq!(w.balance(1), 9 * USDC);
+}
+
+#[test]
+fn test_charge_window_is_bounded() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    let now = w.env.ledger().sequence();
+    let furthest = w.charge_until(1, 1, USDC, now + MAX_CHARGE_WINDOW);
+    assert_eq!(w.charge_batch(&[furthest]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Charged]);
+    let beyond = w.charge_until(1, 2, USDC, now + MAX_CHARGE_WINDOW + 1);
+    assert_eq!(
+        w.charge_batch(&[beyond]).map(|_| ()),
+        Err(contract_error(Error::ChargeWindowTooLong))
     );
 }
 
@@ -869,8 +932,18 @@ fn test_batch_event_reports_every_outcome() {
     let expected = Charges {
         settled: soroban_sdk::vec![
             &w.env,
-            Settled(w.owner_address(1), 1, USDC, Outcome::Charged),
-            Settled(w.owner_address(1), 1, USDC, Outcome::Duplicate),
+            Settled(
+                w.owner_address(1),
+                BytesN::from_array(&w.env, &charge_id(1)),
+                USDC,
+                Outcome::Charged
+            ),
+            Settled(
+                w.owner_address(1),
+                BytesN::from_array(&w.env, &charge_id(1)),
+                USDC,
+                Outcome::Duplicate
+            ),
         ],
     };
     assert_eq!(
@@ -1053,7 +1126,7 @@ fn no_args(w: &World) -> soroban_sdk::Vec<Val> {
 #[test]
 #[should_panic(expected = "Error(Contract, #117)")]
 fn test_construction_with_one_address_in_two_roles_is_refused() {
-    let env = Env::default();
+    let env = bare_env();
     let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
     let asset = sac.asset();
     let admin = add_party(&env, &asset, 0);
@@ -1339,7 +1412,7 @@ struct Measured {
 
 /// Settles `MAX_BATCH` charges for as many distinct buyers in one
 /// invocation. In the mixed batch every fourth charge exceeds its balance and
-/// every fifth repeats an already-consumed sequence.
+/// every fifth repeats an already-recorded charge.
 fn measure_full_batch(mixed: bool) -> Measured {
     let code = wasm_under_test();
     let w = world_with(Some(&code));
@@ -1407,7 +1480,12 @@ fn test_full_mixed_failure_batch_fits_one_transaction() {
     let m = measure_full_batch(true);
     let refused = m.outcomes.iter().filter(|o| **o == Outcome::InsufficientBalance).count();
     let duplicates = m.outcomes.iter().filter(|o| **o == Outcome::Duplicate).count();
-    assert_eq!((m.outcomes.len(), refused, duplicates), (MAX_BATCH as usize, 20, 20));
+    // Every fifth buyer's charge was already settled, and every fourth of
+    // the rest asks for more than the buyer holds.
+    let n = MAX_BATCH as usize;
+    let expected_duplicates = n / 5;
+    let expected_refused = n / 4 - n / 20;
+    assert_eq!((m.outcomes.len(), refused, duplicates), (n, expected_refused, expected_duplicates));
     assert_within_limits(&m);
 }
 
@@ -1461,8 +1539,8 @@ fn test_treasury_approval_of_a_bare_transfer_cannot_fund_a_withdrawal() {
 
 // ---- storage layout the gateway reads -----------------------------------
 
-/// The gateway decides whether a deposit was credited, and whether a charge
-/// sequence was consumed, by reading these entries directly. Their keys and
+/// The gateway decides whether a deposit was credited, and how a charge was
+/// settled, by reading these entries directly. Their keys and
 /// value shapes are contract-internal, so they are pinned here against the
 /// real host rather than restated in the gateway.
 #[test]
@@ -1479,10 +1557,19 @@ fn test_gateway_storage_keys_match_the_contract_layout() {
     };
     let deployment = w.deployment();
     let owner = w.owner_of(1);
-    // Both charges consumed their sequence, the refused one included; only
-    // the first debited.
+    // Only the first charge debited; both recorded their outcome.
     let account = entry(&deployment.account_key(&owner)).expect("account entry at the derived key");
-    assert_eq!(account_state(&account), Some((USDC - 100, 2)));
+    assert_eq!(account_balance(&account), Some(USDC - 100));
+    let recorded = |id| {
+        entry(&deployment.charge_record_key(&owner, &charge_id(id)))
+            .as_ref()
+            .and_then(charge_record)
+    };
+    use fermah_pay_stellar_chain::prepaid::Outcome as Decoded;
+    assert_eq!(
+        (recorded(1), recorded(2), recorded(3)),
+        (Some(Decoded::Charged), Some(Decoded::AboveLimit), None)
+    );
     assert!(entry(&deployment.deposit_key(&owner, &id32(1))).is_some());
     // Controls: a deposit id never used, and an owner that never deposited.
     assert!(entry(&deployment.deposit_key(&owner, &id32(2))).is_none());
@@ -1492,14 +1579,14 @@ fn test_gateway_storage_keys_match_the_contract_layout() {
 #[test]
 fn test_gateway_outcome_decoding_matches_every_contract_outcome() {
     use fermah_pay_stellar_chain::prepaid::Outcome as Decoded;
-    let env = Env::default();
+    let env = bare_env();
     let all = soroban_sdk::vec![
         &env,
         Outcome::Charged,
         Outcome::InsufficientBalance,
         Outcome::AboveLimit,
         Outcome::Duplicate,
-        Outcome::OutOfOrder,
+        Outcome::Expired,
         Outcome::UnknownAccount,
     ];
     let val: Val = all.into_val(&env);
@@ -1512,14 +1599,14 @@ fn test_gateway_outcome_decoding_matches_every_contract_outcome() {
             Decoded::InsufficientBalance,
             Decoded::AboveLimit,
             Decoded::Duplicate,
-            Decoded::OutOfOrder,
+            Decoded::Expired,
             Decoded::UnknownAccount,
         ])
     );
 }
 
 /// An operator resolving a quarantined charge proves its outcome from this
-/// event in the transaction that consumed the sequence, so its layout is
+/// event in the transaction that settled the charge, so its layout is
 /// pinned against the real host.
 #[test]
 fn test_gateway_reads_each_settled_charge_from_the_batch_event() {
@@ -1538,8 +1625,18 @@ fn test_gateway_reads_each_settled_charge_from_the_batch_event() {
     assert_eq!(
         decoded,
         [
-            SettledEntry { owner: owner.clone(), seq: 1, amount: USDC, outcome: Decoded::Charged },
-            SettledEntry { owner, seq: 2, amount: MAX_CHARGE + 1, outcome: Decoded::AboveLimit },
+            SettledEntry {
+                owner: owner.clone(),
+                charge_id: charge_id(1),
+                amount: USDC,
+                outcome: Decoded::Charged,
+            },
+            SettledEntry {
+                owner,
+                charge_id: charge_id(2),
+                amount: MAX_CHARGE + 1,
+                outcome: Decoded::AboveLimit,
+            },
         ]
     );
     // Control: the same events, attributed to another contract, yield nothing.
@@ -1564,5 +1661,14 @@ fn test_gateway_reads_the_roles_from_get_config() {
             usdc: contract_bytes(&w.usdc),
             paused: false,
         })
+    );
+}
+
+#[test]
+fn test_gateway_mirrors_the_contract_limits() {
+    use fermah_pay_stellar_chain::prepaid as gateway;
+    assert_eq!(
+        (gateway::MAX_BATCH as u32, gateway::MAX_CHARGE_WINDOW, gateway::CHARGE_RECORD_GRACE),
+        (MAX_BATCH, MAX_CHARGE_WINDOW, CHARGE_RECORD_GRACE)
     );
 }

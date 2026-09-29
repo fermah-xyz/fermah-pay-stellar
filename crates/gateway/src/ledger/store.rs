@@ -4,6 +4,7 @@
 
 use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
 use fermah_pay_stellar_domain::{AccountAddress, IdempotencyKey};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -79,7 +80,8 @@ pub struct ChargeRecord {
     pub id: Uuid,
     pub buyer_id: Uuid,
     pub amount: i64,
-    pub sequence: i64,
+    pub charge_id: Vec<u8>,
+    pub last_ledger: i64,
     pub state: ChargeState,
     pub outcome: Option<String>,
     pub transaction_hash: Option<Vec<u8>>,
@@ -111,6 +113,14 @@ pub enum Admission {
 pub struct Balance {
     pub available: i64,
     pub pending_charges: i64,
+}
+
+/// The on-chain identifier of the charge a seller names with `key`: the
+/// same key always names the same charge, and keys are unique within a
+/// deployment, whose contract scopes identifiers by buyer.
+#[must_use]
+pub fn charge_id(key: &IdempotencyKey) -> [u8; 32] {
+    Sha256::digest(key.as_str().as_bytes()).into()
 }
 
 fn query(operation: &'static str) -> impl FnOnce(sqlx::Error) -> StoreError {
@@ -286,18 +296,20 @@ impl Store {
     }
 
     /// Admits a charge in one database transaction: the buyer row is locked,
-    /// so the balance check, the debit and the sequence allocation cannot
-    /// interleave with another charge for the same buyer, and the idempotency
-    /// key is checked after the lock, so a concurrent retry of the same
-    /// request sees the first one's row instead of debiting twice.
+    /// so the balance check and the debit cannot interleave with another
+    /// charge for the same buyer, and the idempotency key is checked after
+    /// the lock, so a concurrent retry of the same request sees the first
+    /// one's row instead of debiting twice. The charge's on-chain identifier
+    /// is derived from the key, so every retry names the same charge.
     pub async fn admit_charge(
         &self,
         scope: &Scope,
         buyer_id: Uuid,
         amount: i64,
         key: &IdempotencyKey,
+        last_ledger: u32,
     ) -> Result<Admission, StoreError> {
-        match self.try_admit_charge(scope, buyer_id, amount, key).await {
+        match self.try_admit_charge(scope, buyer_id, amount, key, last_ledger).await {
             // Same key, another buyer: the two requests locked different rows
             // and raced to the key. Reading after the winner committed decides.
             Err(StoreError::Query { source, .. }) if is_violation_of(&source, CHARGE_KEY) => {
@@ -316,6 +328,7 @@ impl Store {
         buyer_id: Uuid,
         amount: i64,
         key: &IdempotencyKey,
+        last_ledger: u32,
     ) -> Result<Admission, StoreError> {
         let mut tx = self.pool.begin().await.map_err(query("begin charge admission"))?;
         let buyer = sqlx::query!(
@@ -340,24 +353,21 @@ impl Store {
         if buyer.available < amount {
             return Ok(Admission::InsufficientBalance);
         }
-        let sequence = sqlx::query_scalar!(
-            r#"
-            UPDATE pay_stellar.buyers
-            SET available = available - $2, next_charge_seq = next_charge_seq + 1
-            WHERE id = $1
-            RETURNING next_charge_seq - 1 AS "sequence!"
-            "#,
+        sqlx::query!(
+            "UPDATE pay_stellar.buyers SET available = available - $2 WHERE id = $1",
             buyer_id,
             amount,
         )
-        .fetch_one(&mut *tx)
+        .execute(&mut *tx)
         .await
         .map_err(query("debit buyer"))?;
+        let charge_id = charge_id(key);
         let row = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.charges
-                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, sequence)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, charge_id,
+                 last_ledger)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING id, created_at
             "#,
             Uuid::now_v7(),
@@ -366,7 +376,8 @@ impl Store {
             scope.network().caip2(),
             key.as_str(),
             amount,
-            sequence,
+            charge_id.as_slice(),
+            i64::from(last_ledger),
         )
         .fetch_one(&mut *tx)
         .await
@@ -376,13 +387,26 @@ impl Store {
             id: row.id,
             buyer_id,
             amount,
-            sequence,
+            charge_id: charge_id.to_vec(),
+            last_ledger: i64::from(last_ledger),
             state: ChargeState::Admitted,
             outcome: None,
             transaction_hash: None,
             ledger: None,
             created_at: row.created_at,
         }))
+    }
+
+    /// The earlier charge under `key`, if any, judged against this request:
+    /// answered from the stored row alone, so a retry needs no network.
+    pub async fn replayed_charge(
+        &self,
+        scope: &Scope,
+        buyer_id: Uuid,
+        amount: i64,
+        key: &IdempotencyKey,
+    ) -> Result<Option<Admission>, StoreError> {
+        self.replay_charge(scope, buyer_id, amount, key).await
     }
 
     async fn replay_charge(
@@ -432,7 +456,8 @@ impl Store {
     ) -> Result<Option<ChargeRecord>, StoreError> {
         let row = sqlx::query!(
             r#"
-            SELECT c.id, c.buyer_id, c.amount, c.sequence, c.state, c.outcome, c.created_at,
+            SELECT c.id, c.buyer_id, c.amount, c.charge_id, c.last_ledger, c.state, c.outcome,
+                   c.created_at,
                    s.outer_hash AS "outer_hash?", s.ledger AS "ledger?"
             FROM pay_stellar.charges c
             LEFT JOIN pay_stellar.submissions s ON s.id = c.submission_id
@@ -452,7 +477,8 @@ impl Store {
                 id: row.id,
                 buyer_id: row.buyer_id,
                 amount: row.amount,
-                sequence: row.sequence,
+                charge_id: row.charge_id,
+                last_ledger: row.last_ledger,
                 state: ChargeState::parse(&row.state)?,
                 outcome: row.outcome,
                 transaction_hash: row.outer_hash,

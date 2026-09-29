@@ -6,6 +6,14 @@ The gateway is tested with PostgreSQL 17. The schema lives in
 `_sqlx_migrations`. Migrations are append-only: an applied migration is never
 edited.
 
+Migration `0007` moves charges from per-buyer sequence numbers to charge
+identifiers, which needs the contract with the matching interface. An
+installation with charges upgrades in this order: stop the gateway API so no
+charge is admitted, let the worker settle every submitted charge, resolve any
+quarantined charge, stop the worker, run `migrate`, upgrade the contract's
+code with its admin, and start the new gateway and worker. The migration
+refuses to run while any charge is admitted, submitted or quarantined.
+
 ## Roles
 
 The migrations create group roles that cannot log in and grant them only
@@ -13,19 +21,19 @@ what their process needs:
 
 | Group role | Granted to | Privileges |
 |---|---|---|
-| `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance and allocate charge sequence numbers when admitting a charge |
+| `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance when admitting a charge |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys; bind a deployment to its ledger contract |
 | `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md) |
 | `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed |
 
-No role can change a buyer's wallet, an amount, a charge's sequence number or
+No role can change a buyer's wallet, an amount, a charge's identifier or
 a ledger binding after the row is written, and no role can move a submission,
 deposit or charge out of a final state: a confirmed deposit or refused charge
 changes the available balance exactly once, on entering that state.
 
 The database balance is an admission limit, not the authority: the ledger
-contract refuses any charge above the on-chain balance and any reused charge
-sequence or deposit ID, whatever the database says.
+contract refuses any charge above the on-chain balance and any charge
+identifier or deposit ID it has already processed, whatever the database says.
 
 Group roles are cluster-wide. If several databases on one server host this
 schema, for example staging and production, they share the role names and
@@ -67,6 +75,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |
 | Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup. Must be `https` unless it points at this host |
 | Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
+| Gateway | `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` | ledgers a charge may wait for settlement before it is refunded, default 720 (about an hour), at most 17280 |
 | Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit signature stays valid, default 720 (about an hour) |
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
 | Worker | `PAY_STELLAR_WORKER_DATABASE_URL` | URL of the worker login role |
@@ -76,7 +85,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | seed file of the contracts' operator; the worker serves the deployments bound with this operator |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
-| Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 100, default 100 |
+| Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 98, default 98 |
 
 Key files must not be readable by other users; the worker refuses to start
 otherwise. Run one worker per source account.

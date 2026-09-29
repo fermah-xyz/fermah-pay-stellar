@@ -128,9 +128,9 @@ jobs:
               "| Buyer created with 0 XLM | \(link(.onboarding_transaction)) |",
               "| Buyer funded with Circle USDC | \(link(.funding_transaction)) |",
               "| Deposit, signed by the buyer | \(link(.deposit.transaction_hash)) |",
-              (.charges[] | "| Charge \(.sequence) (\(.amount) units) | \(link(.transaction_hash)) |"),
+              (.charges[] | "| Charge \(.contract_charge_id[0:12])… (\(.amount) units) | \(link(.transaction_hash)) |"),
               "| Retried charge | returned the original charge (created: \(.retried_charge.created)) |",
-              "| Replayed sequence sent to the contract | \(.contract_replay.result) |",
+              "| Replayed charge sent to the contract | \(.contract_replay.result) |",
               "| Final balance | gateway \(.observed.gateway_available), contract \(.observed.contract_balance) |"
             ' "$record"
           } >> "$GITHUB_STEP_SUMMARY"

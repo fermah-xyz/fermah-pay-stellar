@@ -81,8 +81,10 @@ enum Command {
         first: u32,
         #[arg(long)]
         last: u32,
+        /// Names the charges: each buyer's identifier is derived from the tag
+        /// and its number, so the same tag repeats the same charges.
         #[arg(long)]
-        seq: u64,
+        tag: String,
         #[arg(long)]
         amount: i128,
     },
@@ -91,7 +93,7 @@ enum Command {
         #[arg(long)]
         buyer: u32,
         #[arg(long)]
-        seq: u64,
+        tag: String,
         #[arg(long)]
         amount: i128,
     },
@@ -168,10 +170,10 @@ async fn main() -> anyhow::Result<()> {
             context()?.onboard_buyers(count, usdc_each).await?
         }
         Command::Deposit { first, last, amount } => context()?.deposit(first, last, amount).await?,
-        Command::ChargeBatch { first, last, seq, amount } => {
-            context()?.charge_batch(first, last, seq, amount).await?;
+        Command::ChargeBatch { first, last, tag, amount } => {
+            context()?.charge_batch(first, last, &tag, amount).await?;
         }
-        Command::Charge { buyer, seq, amount } => context()?.charge(buyer, seq, amount).await?,
+        Command::Charge { buyer, tag, amount } => context()?.charge(buyer, &tag, amount).await?,
         Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
         Command::Solvency => context()?.solvency().await?,
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,

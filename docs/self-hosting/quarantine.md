@@ -1,11 +1,10 @@
 # Self-hosting: resolving quarantined charges
 
 A charge is quarantined when the contract's answer contradicts the gateway's
-records (`duplicate`, `out_of_order`, `unknown_account`), when a batch's
-answer cannot be read, or when the account's charge sequence was consumed by
-a transaction the gateway did not send. A quarantined charge stays debited
-from the buyer's available balance, and the buyer gets no further batches
-until it is resolved.
+records (`unknown_account`), when the network reports a batch applied but the
+contract holds no record of its charges, or when a charge's fate was not
+established before its record would have lapsed. A quarantined charge stays
+debited from the buyer's available balance until it is resolved.
 
 Resolution is done by an operator under a login role that is a member of
 `pay_stellar_operator`:
@@ -29,36 +28,39 @@ admin() { cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin 
 admin quarantined-charges
 ```
 
-lists each quarantined charge with its account, sequence, amount, the
-contract's answer, the reason, and the hash of the batch that carried it.
+lists each quarantined charge with its account, contract charge identifier,
+last ledger, amount, the contract's answer, the reason, and the hash of the
+batch that carried it. `<CHARGE>` below is the charge's `id` from that list.
 
 The resolution is never typed in by the operator; the tool derives it from
 the network and refuses when the evidence does not establish it:
 
-- The contract settled the charge's sequence in some transaction (for
-  example the batch whose answer could not be read, or a transaction that
-  included a copy of the operator's authorization):
+- While the charge's record can still exist (until about an hour after its
+  last ledger), the record decides:
 
   ```bash
-  admin resolve-charge --charge-id <ID> --transaction <HASH> \
+  admin resolve-charge --charge-id <CHARGE> --record \
+    --network stellar:testnet --rpc-url https://soroban-testnet.stellar.org
+  ```
+
+  The tool refuses while the node is not past the last ledger in which the
+  batch that carried the charge could still land, since until then an absent
+  record proves nothing. A record holding `charged` leaves the amount debited; `insufficient_balance`
+  or `above_limit` return it to the available balance. With no record, a
+  charge still within its last ledger goes back to the next batch, and one
+  past it is refused as `expired` and its amount returned.
+
+- After that, the transaction in which the contract settled the charge
+  decides:
+
+  ```bash
+  admin resolve-charge --charge-id <CHARGE> --transaction <HASH> \
     --network stellar:testnet --rpc-url https://soroban-testnet.stellar.org
   ```
 
   The tool reads the contract's `charges` event in that transaction and
-  requires an entry for the same account, sequence and amount with an outcome
-  that consumed the sequence. `charged` leaves the amount debited;
-  `insufficient_balance` or `above_limit` return it to the available balance.
-
-- The charge's sequence is still unconsumed on the contract:
-
-  ```bash
-  admin resolve-charge --charge-id <ID> --readmit \
-    --network stellar:testnet --rpc-url https://soroban-testnet.stellar.org
-  ```
-
-  The tool reads the account's last consumed sequence and requires it to be
-  below the charge's. The charge goes back to the next batch with the same
-  sequence.
+  requires an entry for the same account, charge identifier and amount with
+  an outcome that settled it.
 
 Every resolution is kept in `pay_stellar.charge_resolutions`, which no role
 can update or delete.

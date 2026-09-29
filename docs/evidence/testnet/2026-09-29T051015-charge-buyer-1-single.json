@@ -1,0 +1,18 @@
+{
+  "amount": "100000",
+  "buyer": "GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H",
+  "charge_id": "059c3614aa1ff10dba16080afd5212d4b5bf559aab26a19c45dc0ba8efd68264",
+  "charge_tag": "single",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "single-charge",
+  "network": "stellar:testnet",
+  "observed": {
+    "ledger_balance_after": "100000",
+    "ledger_balance_before": "100000"
+  },
+  "outcome": {
+    "error": "simulation failed: HostError: Error(Contract, #110)\n\nEvent log (newest first):\n   0: [Diagnostic Event] contract:CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV, topics:[error, Error(Contract, #110)], data:\"escalating error to VM trap from failed host function call: fail_with_error\"\n   1: [Diagnostic Event] contract:CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV, topics:[error, Error(Contract, #110)], data:[\"failing with contract error\", 110]\n   2: [Diagnostic Event] topics:[fn_call, CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV, charge], data:[GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H, Bytes(059c3614aa1ff10dba16080afd5212d4b5bf559aab26a19c45dc0ba8efd68264), 100000, 4927724]\n",
+    "result": "refused"
+  },
+  "recorded_at": "2026-09-29T05:10:15.229024996Z"
+}

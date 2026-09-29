@@ -83,47 +83,57 @@ range a classic trustline can hold (at most `i64::MAX`).
 
 ## Charges and replay protection
 
-A charge is `(owner, sequence, amount)`. Each account stores the last
-sequence it consumed, and a charge must carry exactly the next one:
+A charge is `(owner, charge_id, amount, last_ledger)`: the seller's
+32-byte identifier for the charge and the last ledger in which it may be
+settled. The contract records every charge it settles, by owner and
+identifier, together with the outcome, in temporary storage that lives until
+shortly after the charge's last ledger:
 
-| Outcome | Meaning | Sequence consumed |
+| Outcome | Meaning | Recorded |
 |---|---|---|
 | `Charged` | balance debited, revenue credited | yes |
 | `InsufficientBalance` | refused | yes |
 | `AboveLimit` | above the per-charge limit | yes |
-| `Duplicate` | sequence already consumed | no |
-| `OutOfOrder` | a later sequence than the next one | no |
-| `UnknownAccount` | no such account | no |
+| `UnknownAccount` | no such account | yes |
+| `Duplicate` | the identifier is already recorded | no |
+| `Expired` | past its last ledger | no |
 
-Because refusals consume their sequence, retrying a charge, even after the
-buyer adds funds, never debits it: it reports `Duplicate`.
+A charge whose identifier is recorded is a duplicate and never debits again,
+even if the buyer has since added funds. A record lives until
+`CHARGE_RECORD_GRACE` (720 ledgers, about an hour) after the charge's last
+ledger, and a charge may name a last ledger at most `MAX_CHARGE_WINDOW`
+(17,280 ledgers, about a day) ahead; by the time a record expires, the charge
+it records is past its last ledger and is refused as `Expired`. A replay is
+therefore refused at any time. Until then the record also answers, from the
+contract itself, what happened to a charge whose transaction's fate is
+unknown.
 
-`charge_batch` settles up to 100 charges in one call and returns one outcome
+`charge_batch` settles up to 98 charges in one call and returns one outcome
 per entry; refused entries do not affect the others. Only a malformed batch
-(empty, more than 100 entries, or a non-positive amount) reverts the whole
-call. `charge` settles a single charge and reverts on any refusal, consuming
-nothing. Every call emits one `charges` event listing each entry with its
-outcome.
+(empty, more than 98 entries, a non-positive amount, or a last ledger beyond
+the window) reverts the whole call. `charge` settles a single charge and
+reverts on any refusal, recording nothing. Every call emits one `charges`
+event listing each entry (owner, identifier, amount, outcome).
 
-### Why a sequence per account
+### Batch size
 
-The replay state lives inside the account entry, so a charge writes exactly
-one ledger entry. Stellar limits a transaction to 200 ledger-entry writes and
-16 KiB of events. A separate record per charge identifier would need about 201
-writes for 100 charges; measured in the Soroban VM, that variant exceeds the
-limits for a batch of 100.
+Stellar limits a transaction to 200 ledger-entry writes and 400 footprint
+entries. A charge to a distinct buyer writes two entries, the account and the
+record, so 98 such charges write 196 entries, plus the contract instance and
+the operator's authorization nonce: 198 writes. At 100 charges the host
+refuses the transaction (202 writes). The footprint, about 200 entries, stays
+well within its limit of 400: the write limit is the one that binds.
 
 Measured in the Soroban VM with the built Wasm, one `charge_batch` call for
-100 distinct buyers uses:
+98 distinct buyers uses:
 
-| Resource | All charged | Mixed (20 refused, 20 duplicates) | Per-transaction limit |
+| Resource | All charged | Mixed (20 refused, 19 duplicates) | Per-transaction limit |
 |---|---:|---:|---:|
-| CPU instructions | 23.0 M | 20.1 M | 400 M |
-| Memory | 6.1 MB | 5.3 MB | 40 MB |
-| Ledger-entry writes | 102 | 82 | 200 |
-| Bytes written | 21.6 KB | 17.4 KB | 132 KB |
-| Footprint entries | 104 | 104 | 400 |
-| Event bytes | 9,680 | 9,680 | 16,384 |
+| CPU instructions | 62.6 M | 48.8 M | 400 M |
+| Memory | 18.4 MB | 14.5 MB | 40 MB |
+| Ledger-entry writes | 198 | 140 | 200 |
+| Bytes written | 35.3 KB | 25.1 KB | 132 KB |
+| Event bytes | 12,232 | 12,232 | 16,384 |
 
 These are local VM measurements, reproduced by `just contract-resources` and
 by the `Contract` CI job; they are not network evidence.
@@ -145,13 +155,14 @@ this contract.
 | 108 | `InsufficientBalance` |
 | 109 | `ChargeAboveLimit` |
 | 110 | `DuplicateCharge` |
-| 111 | `OutOfOrderCharge` |
+| 111 | `ChargeExpired` |
 | 112 | `EmptyBatch` |
 | 113 | `BatchTooLarge` |
 | 114 | `WithdrawalAlreadyProcessed` |
 | 115 | `InsufficientRevenue` |
 | 116 | `Overflow` |
 | 117 | `DuplicateRole` |
+| 118 | `ChargeWindowTooLong` |
 
 ## Storage lifetime
 
@@ -160,8 +171,8 @@ that changes state, administrative calls included, has its time-to-live
 extended to about 30 days once fewer than about
 7 days remain, so an account that keeps being charged or funded is not
 archived between uses. An account that is only read is not extended. An
-account idle long enough to be archived is restored by the settlement worker
-before its next deposit or charge; see
+account idle long enough to be archived is restored by the network inside
+its next deposit or charge, which pays the restoration; see
 [settlement](transactions.md#settlement).
 
 ## Building

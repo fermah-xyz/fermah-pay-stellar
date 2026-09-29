@@ -1,21 +1,21 @@
 {
-  "amount": "100000",
-  "contract": "CAWRQEYPSOMB6OJNJ3M7SYBHDLEMG3NSOPHKKCF44RHOA5Z2V3NCHQK5",
+  "amount": "150000",
+  "charge_tag": "second",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
   "criterion": "charge-batch",
-  "entries": 100,
+  "entries": 98,
   "expected": "one transaction settles every charge; each entry's outcome is returned and emitted",
-  "fee_charged_stroops": 479601,
+  "fee_charged_stroops": 1148750,
   "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
   "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
-  "inner_transaction_hash": "48800cbe3f1ae872bdc92fe6170d513e979739cbd9ccb6f95bdeca15f0d15317",
-  "ledger": 4924976,
+  "inner_transaction_hash": "6cc9bfc8f38a88cd0ca0726a3eb035f8e61cf569ac687c395c18423b68113e93",
+  "last_ledger": 4927728,
+  "ledger": 4927011,
   "network": "stellar:testnet",
   "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
   "outcomes": [
-    "Charged",
-    "Charged",
-    "Charged",
-    "Charged",
+    "InsufficientBalance",
+    "InsufficientBalance",
     "Charged",
     "Charged",
     "Charged",
@@ -113,15 +113,14 @@
     "Charged",
     "Charged"
   ],
-  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/607ebfd9f021552ec8a4593fa5777ad22e862dfb377a556098ebacbbd7ce75a9",
-  "recorded_at": "2026-09-29T02:21:08.562131275Z",
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/121aa134055a9368bb9b47cb82f821badbf9204f13bbf7bcf5317dfc7c46013e",
+  "recorded_at": "2026-09-29T05:10:43.223459614Z",
   "resources": {
     "disk_read_bytes": 188,
-    "footprint_read_only": 2,
-    "footprint_read_write": 102,
-    "instructions": 26575020,
-    "write_bytes": 21564
+    "footprint_read_only": 4,
+    "footprint_read_write": 196,
+    "instructions": 61739305,
+    "write_bytes": 34908
   },
-  "sequence": 1,
-  "transaction_hash": "607ebfd9f021552ec8a4593fa5777ad22e862dfb377a556098ebacbbd7ce75a9"
+  "transaction_hash": "121aa134055a9368bb9b47cb82f821badbf9204f13bbf7bcf5317dfc7c46013e"
 }
