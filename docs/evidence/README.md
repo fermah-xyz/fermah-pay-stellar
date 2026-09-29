@@ -95,3 +95,18 @@ Observed afterwards: the retried charge returned the original charge
 `idempotency_conflict`, the gateway's available balance and the contract's
 account balance are both 0.04 USDC with charge sequence 3, and the buyer
 held 0 XLM before and after.
+
+The same flow runs in the `testnet` CI workflow, which adds one check: the
+first charge's sequence is sent straight to the contract and refused as
+`DuplicateCharge` (contract error 110) before submission, with the account
+unchanged. Record
+[`api-end-to-end` from CI](testnet/2026-09-29T013349-api-end-to-end.json)
+([workflow run](https://github.com/fermah-xyz/fermah-pay-stellar/actions/runs/36508242951)):
+
+| Step | Transaction |
+|---|---|
+| New buyer created with 0 XLM, reserves sponsored | [`8e5dc41f…`](https://stellar.expert/explorer/testnet/tx/8e5dc41f01d64b401cae23b225ded59817e923c3185190a408cb1c13189f9056) |
+| Buyer sent 0.1 Circle USDC from the reserve | [`c67778ce…`](https://stellar.expert/explorer/testnet/tx/c67778ce73032a461da75cd5560433f96955b8e4527e02ff2300ffd6ccf4a0a6) |
+| Deposit of 0.1 USDC, authorized by one buyer signature | [`d403b269…`](https://stellar.expert/explorer/testnet/tx/d403b26904e54e4ef94f7a00dfd587cc7e4446a0dad4867774827df10ffb8aa4) |
+| Three charges settled in one batch | [`22719a20…`](https://stellar.expert/explorer/testnet/tx/22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be) |
+| Replayed charge sequence sent to the contract | refused before submission; no transaction |

@@ -94,8 +94,15 @@ acts as a seller would, only through the gRPC API:
 3. creates three charges and waits until they settle on-chain;
 4. repeats the first charge with the same idempotency key, which returns the
    original charge, and reuses the key with another amount, which is refused;
+   then sends the first charge's sequence straight to the contract, which
+   refuses it as a duplicate before anything is submitted;
 5. checks that the gateway's balance equals the contract's and that the buyer
    still holds 0 XLM.
 
 The command exits non-zero if any step does not hold, and writes an
 `api-end-to-end` evidence record with every transaction hash.
+
+The `testnet` workflow runs the same command in CI: on changes to main, on
+demand, and on pull requests labelled `testnet`. Its job summary lists every
+transaction with an explorer link, and the evidence record is attached to the
+run.

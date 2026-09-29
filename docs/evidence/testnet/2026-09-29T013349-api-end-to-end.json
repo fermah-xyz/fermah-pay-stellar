@@ -1,0 +1,64 @@
+{
+  "buyer": "GCJ66ZELVPEK54DATNVUHFONXTMKOFTYRASXRJNNEKOJVKFYVX4X2FBE",
+  "charge_transactions": [
+    {
+      "hash": "22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be"
+    }
+  ],
+  "charges": [
+    {
+      "amount": 100000,
+      "ledger": 4924408,
+      "sequence": 1,
+      "state": "charged",
+      "transaction_hash": "22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be"
+    },
+    {
+      "amount": 200000,
+      "ledger": 4924408,
+      "sequence": 2,
+      "state": "charged",
+      "transaction_hash": "22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be"
+    },
+    {
+      "amount": 300000,
+      "ledger": 4924408,
+      "sequence": 3,
+      "state": "charged",
+      "transaction_hash": "22719a20c32281e4b77a446cee244db5a84c51d2a7091fd0b3077d3ca973d8be"
+    }
+  ],
+  "conflicting_reuse": "idempotency_conflict",
+  "contract": "CD5PNN5OSF6QZTBEHRTJPWHRHKMLDGVYJD6OPTTEVUCYUIXPCFERCHRW",
+  "contract_replay": {
+    "account_unchanged": true,
+    "result": "refused before submission as DuplicateCharge (contract error 110)",
+    "sequence": 1
+  },
+  "criterion": "api-end-to-end",
+  "deposit": {
+    "amount": 1000000,
+    "ledger": 4924407,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/d403b26904e54e4ef94f7a00dfd587cc7e4446a0dad4867774827df10ffb8aa4",
+    "transaction_hash": "d403b26904e54e4ef94f7a00dfd587cc7e4446a0dad4867774827df10ffb8aa4"
+  },
+  "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge sequence, and the gateway balance equals the contract balance",
+  "funding_transaction": "c67778ce73032a461da75cd5560433f96955b8e4527e02ff2300ffd6ccf4a0a6",
+  "network": "stellar:testnet",
+  "observed": {
+    "buyer_usdc_after": 0,
+    "buyer_xlm_stroops_after": 0,
+    "buyer_xlm_stroops_before": 0,
+    "contract_balance": "400000",
+    "contract_charge_seq": 3,
+    "gateway_available": 400000,
+    "gateway_pending": 0
+  },
+  "onboarding_transaction": "8e5dc41f01d64b401cae23b225ded59817e923c3185190a408cb1c13189f9056",
+  "recorded_at": "2026-09-29T01:33:49.395085071Z",
+  "retried_charge": {
+    "created": false,
+    "same_charge": true
+  }
+}
