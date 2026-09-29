@@ -68,10 +68,31 @@ pub enum SendOutcome {
 
 #[derive(Debug, Clone)]
 pub enum TransactionStatus {
-    /// Unknown to this node's retention window: neither success nor failure.
-    NotFound,
+    /// Unknown to this node: neither success nor failure. `node` says how far
+    /// the node has ingested, which is what makes "not found" evidence.
+    NotFound {
+        node: NodeView,
+    },
     Success(Box<IncludedTransaction>),
     Failed(Box<IncludedTransaction>),
+}
+
+/// The span of ledgers a node had ingested when it answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeView {
+    pub latest_ledger: u32,
+    /// Unix close time of `latest_ledger`.
+    pub latest_close_time: i64,
+    /// Unix close time of the oldest ledger the node still retains.
+    pub oldest_close_time: i64,
+}
+
+/// Ledger entries that exist among the requested keys, and the ledger they
+/// were read at.
+#[derive(Debug, Clone)]
+pub struct LedgerEntries {
+    pub entries: Vec<LedgerEntryRecord>,
+    pub latest_ledger: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +197,21 @@ impl RpcClient {
         &self,
         keys: &[LedgerKey],
     ) -> Result<Vec<LedgerEntryRecord>, RpcError> {
+        Ok(self.get_ledger_entries_at(keys).await?.entries)
+    }
+
+    /// As [`Self::get_ledger_entries`], with the ledger the node read them
+    /// at: an absent entry proves absence only as of that ledger.
+    pub async fn get_ledger_entries_at(
+        &self,
+        keys: &[LedgerKey],
+    ) -> Result<LedgerEntries, RpcError> {
         const METHOD: &str = "getLedgerEntries";
         #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Raw {
             entries: Option<Vec<RawEntry>>,
+            latest_ledger: u32,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -195,7 +227,8 @@ impl RpcClient {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| RpcError::Decode { method: METHOD, detail: e.to_string() })?;
         let raw: Raw = self.call(METHOD, serde_json::json!({ "keys": encoded })).await?;
-        raw.entries
+        let entries = raw
+            .entries
             .unwrap_or_default()
             .into_iter()
             .map(|entry| {
@@ -213,7 +246,8 @@ impl RpcClient {
                     last_modified_ledger: entry.last_modified_ledger_seq,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, RpcError>>()?;
+        Ok(LedgerEntries { entries, latest_ledger: raw.latest_ledger })
     }
 
     pub async fn send_transaction(
@@ -260,6 +294,9 @@ impl RpcClient {
             envelope_xdr: Option<String>,
             result_xdr: Option<String>,
             result_meta_xdr: Option<String>,
+            latest_ledger: u32,
+            latest_ledger_close_time: String,
+            oldest_ledger_close_time: String,
         }
         let raw: Raw = self.call(METHOD, serde_json::json!({ "hash": hex_lower(hash) })).await?;
         let included = |raw: Raw| -> Result<Box<IncludedTransaction>, RpcError> {
@@ -281,7 +318,21 @@ impl RpcClient {
             }))
         };
         match raw.status.as_str() {
-            "NOT_FOUND" => Ok(TransactionStatus::NotFound),
+            "NOT_FOUND" => {
+                let time = |text: &str| {
+                    text.parse::<i64>().map_err(|_| RpcError::Decode {
+                        method: METHOD,
+                        detail: format!("close time {text}"),
+                    })
+                };
+                Ok(TransactionStatus::NotFound {
+                    node: NodeView {
+                        latest_ledger: raw.latest_ledger,
+                        latest_close_time: time(&raw.latest_ledger_close_time)?,
+                        oldest_close_time: time(&raw.oldest_ledger_close_time)?,
+                    },
+                })
+            }
             "SUCCESS" => Ok(TransactionStatus::Success(included(raw)?)),
             "FAILED" => Ok(TransactionStatus::Failed(included(raw)?)),
             other => {

@@ -47,9 +47,6 @@ struct Config {
     /// Seconds a transaction may be included after it is built.
     #[arg(long, env = "PAY_STELLAR_TRANSACTION_VALIDITY_SECS", default_value = "60")]
     transaction_validity_secs: u64,
-    /// Seconds after a transaction's window before it counts as not included.
-    #[arg(long, env = "PAY_STELLAR_INGESTION_MARGIN_SECS", default_value = "30")]
-    ingestion_margin_secs: u64,
     /// Ledgers the operator's authorization of a batch stays valid.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS", default_value = "24")]
     operator_authorization_ledgers: u32,
@@ -127,7 +124,6 @@ async fn main() -> anyhow::Result<()> {
             inclusion_fee: config.inclusion_fee,
             resource_fee_margin_percent: config.resource_fee_margin_percent,
             validity: Duration::from_secs(config.transaction_validity_secs),
-            ingestion_margin: Duration::from_secs(config.ingestion_margin_secs),
         },
     );
     let worker = Worker::new(

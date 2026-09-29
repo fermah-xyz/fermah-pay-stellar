@@ -15,8 +15,8 @@ use std::rc::Rc;
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, WithdrawIntent,
-    account_state, batch_outcomes,
+    ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, SettledEntry,
+    WithdrawIntent, account_state, batch_outcomes, settled_entries,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -1330,4 +1330,32 @@ fn test_gateway_outcome_decoding_matches_every_contract_outcome() {
             Decoded::UnknownAccount,
         ])
     );
+}
+
+/// An operator resolving a quarantined charge proves its outcome from this
+/// event in the transaction that consumed the sequence, so its layout is
+/// pinned against the real host.
+#[test]
+fn test_gateway_reads_each_settled_charge_from_the_batch_event() {
+    use fermah_pay_stellar_chain::prepaid::Outcome as Decoded;
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    w.charge_batch(&[w.charge(1, 1, USDC), w.charge(1, 2, MAX_CHARGE + 1)]).unwrap();
+    let events = w.env.events().all();
+    let decoded: std::vec::Vec<SettledEntry> = events
+        .events()
+        .iter()
+        .filter_map(|event| settled_entries(event, &contract_bytes(&w.contract)))
+        .flatten()
+        .collect();
+    let owner = w.owner_of(1);
+    assert_eq!(
+        decoded,
+        [
+            SettledEntry { owner: owner.clone(), seq: 1, amount: USDC, outcome: Decoded::Charged },
+            SettledEntry { owner, seq: 2, amount: MAX_CHARGE + 1, outcome: Decoded::AboveLimit },
+        ]
+    );
+    // Control: the same events, attributed to another contract, yield nothing.
+    assert!(events.events().iter().all(|event| settled_entries(event, &[0; 32]).is_none()));
 }

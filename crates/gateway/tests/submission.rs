@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::rpc::{
-    IncludedTransaction, LedgerEntryRecord, RpcError, SendOutcome, Simulation, SimulationOutcome,
-    TransactionStatus,
+    IncludedTransaction, LedgerEntries, NodeView, RpcError, SendOutcome, Simulation,
+    SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -22,7 +22,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 };
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::submission::{
-    Broadcast, Chain, Clock, Engine, EngineError, Keys, Kind, Policy, State,
+    Broadcast, Chain, Clock, Engine, EngineError, Keys, Kind, Policy, SourceSequence, State,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
@@ -50,7 +50,16 @@ struct Network_ {
     /// Holds each simulation until this many are in progress, to line up
     /// concurrent installs.
     simulation_barrier: Option<Arc<tokio::sync::Barrier>>,
+    /// The node's view: its latest close time trails the clock by this many
+    /// seconds; its sequence reads trail its transaction lookups by
+    /// `entries_behind` ledgers; its history starts at `oldest_close_time`.
+    clock: Option<ManualClock>,
+    close_lag_secs: i64,
+    entries_behind: u32,
+    oldest_close_time: i64,
 }
+
+const NODE_LEDGER: u32 = 1_000;
 
 #[derive(Clone)]
 struct FakeChain(Arc<Mutex<Network_>>);
@@ -65,6 +74,10 @@ impl FakeChain {
             included: HashMap::new(),
             sent: Vec::new(),
             simulation_barrier: None,
+            clock: None,
+            close_lag_secs: 0,
+            entries_behind: 0,
+            oldest_close_time: 0,
         })))
     }
 
@@ -113,8 +126,11 @@ fn outer_hash(envelope: &TransactionEnvelope) -> [u8; 32] {
 }
 
 impl Chain for FakeChain {
-    async fn account_sequence(&self, _: &AccountAddress) -> Result<Option<i64>, RpcError> {
-        Ok(self.with(|n| n.sequence))
+    async fn account_sequence(&self, _: &AccountAddress) -> Result<SourceSequence, RpcError> {
+        Ok(self.with(|n| SourceSequence {
+            sequence: n.sequence,
+            latest_ledger: NODE_LEDGER - n.entries_behind,
+        }))
     }
 
     async fn simulate(&self, _: &TransactionEnvelope) -> Result<SimulationOutcome, RpcError> {
@@ -169,15 +185,26 @@ impl Chain for FakeChain {
     }
 
     async fn transaction(&self, hash: &[u8; 32]) -> Result<TransactionStatus, RpcError> {
-        Ok(self.with(|n| n.included.get(hash).cloned()).unwrap_or(TransactionStatus::NotFound))
+        Ok(self.with(|n| {
+            n.included.get(hash).cloned().unwrap_or_else(|| {
+                let now = n.clock.as_ref().expect("harness sets the clock").now();
+                TransactionStatus::NotFound {
+                    node: NodeView {
+                        latest_ledger: NODE_LEDGER,
+                        latest_close_time: now.unix_timestamp() - n.close_lag_secs,
+                        oldest_close_time: n.oldest_close_time,
+                    },
+                }
+            })
+        }))
     }
 
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         Ok(1)
     }
 
-    async fn ledger_entries(&self, _: &[LedgerKey]) -> Result<Vec<LedgerEntryRecord>, RpcError> {
-        Ok(Vec::new())
+    async fn ledger_entries(&self, _: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {
+        Ok(LedgerEntries { entries: Vec::new(), latest_ledger: NODE_LEDGER })
     }
 }
 
@@ -209,7 +236,6 @@ impl Clock for ManualClock {
 // ---- harness ------------------------------------------------------------
 
 const VALIDITY: Duration = Duration::from_secs(60);
-const MARGIN: Duration = Duration::from_secs(30);
 
 struct Harness {
     owner: PgPool,
@@ -235,11 +261,14 @@ async fn harness(opts: PgPoolOptions, connect: PgConnectOptions) -> Harness {
         .connect_with(connect)
         .await
         .unwrap();
+    let clock = ManualClock::new();
+    let chain = FakeChain::new(100);
+    chain.with(|n| n.clock = Some(clock.clone()));
     Harness {
         owner,
         worker,
-        chain: FakeChain::new(100),
-        clock: ManualClock::new(),
+        chain,
+        clock,
         source_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
         fee_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
     }
@@ -257,12 +286,7 @@ impl Harness {
                 source: SecretKey::from_strkey(&self.source_seed).unwrap(),
                 fee_source: SecretKey::from_strkey(&self.fee_seed).unwrap(),
             },
-            Policy {
-                inclusion_fee: 100,
-                resource_fee_margin_percent: 15,
-                validity: VALIDITY,
-                ingestion_margin: MARGIN,
-            },
+            Policy { inclusion_fee: 100, resource_fee_margin_percent: 15, validity: VALIDITY },
         )
     }
 
@@ -294,7 +318,7 @@ fn call() -> HostFunction {
 }
 
 fn closed_window() -> Duration {
-    VALIDITY + MARGIN + Duration::from_secs(1)
+    VALIDITY + Duration::from_secs(1)
 }
 
 // ---- installation -------------------------------------------------------
@@ -474,8 +498,63 @@ async fn test_unseen_envelope_within_its_window_stays_in_flight(
     let h = harness(opts, connect).await;
     let engine = h.engine();
     let installed = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
-    h.clock.advance(VALIDITY + MARGIN);
+    // Boundary: a ledger closing exactly at the upper time bound may still
+    // include the envelope.
+    h.clock.advance(VALIDITY);
     assert_eq!(engine.resolve(installed.id).await.unwrap().state, State::Installed);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_node_lagging_behind_the_window_cannot_expire_an_envelope(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let engine = h.engine();
+    let installed = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    // Locally the window closed long ago, but the node has not ingested a
+    // ledger past it: its "not found" and its sequence are both stale.
+    h.clock.advance(closed_window() + Duration::from_secs(600));
+    h.chain.with(|n| n.close_lag_secs = 700);
+    assert_eq!(engine.resolve(installed.id).await.unwrap().state, State::Installed);
+    h.chain.with(|n| n.close_lag_secs = 0);
+    assert_eq!(engine.resolve(installed.id).await.unwrap().state, State::Expired);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_sequence_read_behind_the_node_that_missed_the_envelope_proves_nothing(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let engine = h.engine();
+    let installed = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    h.clock.advance(closed_window());
+    h.chain.with(|n| n.entries_behind = 1);
+    assert_eq!(engine.resolve(installed.id).await.unwrap().state, State::Installed);
+    let (_, note) = h.state(installed.id).await;
+    assert!(note.unwrap().contains("is behind ledger"));
+    h.chain.with(|n| n.entries_behind = 0);
+    assert_eq!(engine.resolve(installed.id).await.unwrap().state, State::Expired);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_node_without_history_back_to_the_recording_cannot_prove_expiry(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let engine = h.engine();
+    let installed = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    h.clock.advance(closed_window());
+    // The node retains nothing older than a point after the envelope was
+    // recorded, so an inclusion before that would be invisible to it.
+    let after_recording = h.clock.now().unix_timestamp();
+    h.chain.with(|n| n.oldest_close_time = after_recording);
+    let resolution = engine.resolve(installed.id).await.unwrap();
+    let (_, error) = h.state(installed.id).await;
+    assert_eq!(resolution.state, State::Quarantined);
+    assert!(error.unwrap().contains("history starts after"));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

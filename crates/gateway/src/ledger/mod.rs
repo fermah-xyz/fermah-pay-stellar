@@ -178,7 +178,6 @@ const fn deposit_state(state: DepositState) -> WireDepositState {
         DepositState::Confirmed => WireDepositState::Confirmed,
         DepositState::Failed => WireDepositState::Failed,
         DepositState::Expired => WireDepositState::Expired,
-        DepositState::Quarantined => WireDepositState::Quarantined,
     }
 }
 

@@ -1,12 +1,19 @@
-//! Operator tool for schema migration and tenant provisioning.
+//! Operator tool for schema migration, tenant provisioning and resolving
+//! quarantined charges.
 //!
-//! `migrate` needs the database owner; the other commands need a login role
-//! that is a member of `pay_stellar_issuer`.
+//! `migrate` needs the database owner; `quarantined-charges` and
+//! `resolve-charge` need a login role that is a member of
+//! `pay_stellar_operator`; the other commands need a member of
+//! `pay_stellar_issuer`.
 
-use anyhow::Context;
+use std::time::Duration;
+
+use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
+use fermah_pay_stellar_gateway::quarantine::{self, QuarantinedCharge};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -67,6 +74,27 @@ enum Command {
         #[arg(long)]
         key_id: Uuid,
     },
+    /// List quarantined charges (operator role).
+    QuarantinedCharges,
+    /// Resolve a quarantined charge (operator role). The resolution is read
+    /// from the network, never taken from the operator: either from the
+    /// contract's settlement of the charge's sequence in `--transaction`, or,
+    /// with `--readmit`, from the account's consumed sequence being below the
+    /// charge's, which sends the charge again.
+    ResolveCharge {
+        #[arg(long)]
+        charge_id: Uuid,
+        /// Hex hash of the transaction in which the contract settled the
+        /// charge's sequence.
+        #[arg(long, conflicts_with = "readmit", required_unless_present = "readmit")]
+        transaction: Option<String>,
+        #[arg(long)]
+        readmit: bool,
+        #[arg(long)]
+        network: Network,
+        #[arg(long, env = "PAY_STELLAR_RPC_URL")]
+        rpc_url: String,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -98,6 +126,32 @@ async fn main() -> anyhow::Result<()> {
                 "contract": binding.contract,
             })
         }
+        Command::QuarantinedCharges => {
+            let charges = quarantine::quarantined_charges(&pool, None).await?;
+            serde_json::Value::Array(charges.iter().map(describe).collect())
+        }
+        Command::ResolveCharge { charge_id, transaction, readmit, network, rpc_url } => {
+            let rpc = RpcClient::new(&rpc_url, Duration::from_secs(30))?;
+            rpc.verify_network(network).await.context("checking the RPC network")?;
+            let charge = quarantine::quarantined_charges(&pool, Some(charge_id))
+                .await?
+                .pop()
+                .with_context(|| format!("no quarantined charge {charge_id}"))?;
+            let (resolution, evidence) = match (transaction, readmit) {
+                (_, true) => quarantine::prove_readmission(&rpc, &charge).await?,
+                (Some(hash), false) => {
+                    let hash = parse_hash(&hash)?;
+                    quarantine::prove_from_transaction(&rpc, &charge, &hash).await?
+                }
+                (None, false) => bail!("give --transaction or --readmit"),
+            };
+            quarantine::resolve(&pool, charge_id, resolution, &evidence).await?;
+            serde_json::json!({
+                "charge_id": charge_id.to_string(),
+                "resolution": format!("{resolution:?}"),
+                "evidence": evidence,
+            })
+        }
         Command::RevokeApiKey { key_id } => {
             let revoked = issuance::revoke_api_key(&pool, key_id).await?;
             serde_json::json!({ "key_id": key_id.to_string(), "revoked": revoked })
@@ -105,4 +159,27 @@ async fn main() -> anyhow::Result<()> {
     };
     println!("{output}");
     Ok(())
+}
+
+fn describe(charge: &QuarantinedCharge) -> serde_json::Value {
+    serde_json::json!({
+        "charge_id": charge.id.to_string(),
+        "buyer_id": charge.buyer_id.to_string(),
+        "seller_deployment_id": charge.seller_deployment_id.to_string(),
+        "owner": charge.owner.to_string(),
+        "sequence": charge.sequence,
+        "amount": charge.amount,
+        "contract_outcome": charge.outcome,
+        "reason": charge.reason,
+        "transaction_hash": charge.transaction_hash,
+    })
+}
+
+fn parse_hash(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| hex.get(i..i + 2).and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .context("transaction hash is not hex")?;
+    <[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("transaction hash is not 32 bytes"))
 }

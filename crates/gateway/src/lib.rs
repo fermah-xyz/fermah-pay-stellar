@@ -7,6 +7,7 @@ pub mod buyers;
 pub mod config;
 pub mod issuance;
 pub mod ledger;
+pub mod quarantine;
 pub mod refusal;
 pub mod scope;
 pub mod server;

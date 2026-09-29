@@ -6,8 +6,7 @@
 use std::future::Future;
 
 use fermah_pay_stellar_chain::rpc::{
-    AuthMode, LedgerEntryRecord, RpcClient, RpcError, SendOutcome, SimulationOutcome,
-    TransactionStatus,
+    AuthMode, LedgerEntries, RpcClient, RpcError, SendOutcome, SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{
     LedgerEntryData, LedgerKey, LedgerKeyAccount, TransactionEnvelope,
@@ -15,12 +14,19 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 use fermah_pay_stellar_chain::transaction::account_id;
 use fermah_pay_stellar_domain::AccountAddress;
 
+/// An account's sequence number as a node read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSequence {
+    /// `None` if the account does not exist.
+    pub sequence: Option<i64>,
+    pub latest_ledger: u32,
+}
+
 pub trait Chain: Send + Sync {
-    /// The account's current sequence number, or `None` if it does not exist.
     fn account_sequence(
         &self,
         account: &AccountAddress,
-    ) -> impl Future<Output = Result<Option<i64>, RpcError>> + Send;
+    ) -> impl Future<Output = Result<SourceSequence, RpcError>> + Send;
 
     /// Enforcing simulation: authorization is verified as the network will.
     fn simulate(
@@ -40,21 +46,24 @@ pub trait Chain: Send + Sync {
 
     fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
 
-    /// The entries that exist among `keys`; absent keys are omitted.
+    /// The entries that exist among `keys`, and the ledger they were read at.
     fn ledger_entries(
         &self,
         keys: &[LedgerKey],
-    ) -> impl Future<Output = Result<Vec<LedgerEntryRecord>, RpcError>> + Send;
+    ) -> impl Future<Output = Result<LedgerEntries, RpcError>> + Send;
 }
 
 impl Chain for RpcClient {
-    async fn account_sequence(&self, account: &AccountAddress) -> Result<Option<i64>, RpcError> {
+    async fn account_sequence(&self, account: &AccountAddress) -> Result<SourceSequence, RpcError> {
         let key = LedgerKey::Account(LedgerKeyAccount { account_id: account_id(account) });
-        let records = self.get_ledger_entries(&[key]).await?;
-        Ok(records.iter().find_map(|record| match &record.data {
-            LedgerEntryData::Account(entry) => Some(entry.seq_num.0),
-            _ => None,
-        }))
+        let read = self.get_ledger_entries_at(&[key]).await?;
+        Ok(SourceSequence {
+            sequence: read.entries.iter().find_map(|record| match &record.data {
+                LedgerEntryData::Account(entry) => Some(entry.seq_num.0),
+                _ => None,
+            }),
+            latest_ledger: read.latest_ledger,
+        })
     }
 
     async fn simulate(
@@ -76,7 +85,7 @@ impl Chain for RpcClient {
         self.get_latest_ledger().await
     }
 
-    async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<Vec<LedgerEntryRecord>, RpcError> {
-        self.get_ledger_entries(keys).await
+    async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {
+        self.get_ledger_entries_at(keys).await
     }
 }

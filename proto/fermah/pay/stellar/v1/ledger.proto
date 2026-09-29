@@ -47,14 +47,14 @@ enum DepositState {
   DEPOSIT_STATE_SIGNED = 2;
   // In a transaction sent to the network.
   DEPOSIT_STATE_SUBMITTED = 3;
-  // Included on-chain and credited to the available balance.
+  // Processed by the contract and credited to the available balance.
   DEPOSIT_STATE_CONFIRMED = 4;
-  // Refused or included as failed; nothing was credited.
+  // Included as failed, and the contract never processed it.
   DEPOSIT_STATE_FAILED = 5;
-  // The authorization lapsed before the deposit was included.
+  // The authorization lapsed and the contract never processed it.
   DEPOSIT_STATE_EXPIRED = 6;
-  // The gateway could not establish the outcome; an operator is reviewing.
-  DEPOSIT_STATE_QUARANTINED = 7;
+  reserved 7;
+  reserved "DEPOSIT_STATE_QUARANTINED";
 }
 
 message Deposit {

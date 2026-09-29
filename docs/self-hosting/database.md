@@ -15,6 +15,7 @@ what their process needs:
 |---|---|---|
 | `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance and allocate charge sequence numbers when admitting a charge |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys; bind a deployment to its ledger contract |
+| `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md) |
 | `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed |
 
 No role can change a buyer's wallet, an amount, a charge's sequence number or
@@ -59,7 +60,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | seed file of the account that sequences every transaction; no other process may submit from it |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | seed file of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | seed file of the contracts' operator; the worker serves the deployments bound with this operator |
-| Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS`, `PAY_STELLAR_INGESTION_MARGIN_SECS` | a transaction's inclusion window and the wait after it, defaults 60 and 30 |
+| Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 100, default 100 |
 

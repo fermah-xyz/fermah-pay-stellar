@@ -35,9 +35,9 @@ pub struct Included {
 }
 
 /// Sends `envelope` (whose network hash is `hash`) and waits for its outcome.
-/// `valid_until_unix` is the envelope's upper time bound: once it has passed,
-/// with a margin for ledger close and RPC ingestion, an unseen envelope can no
-/// longer be included.
+/// `valid_until_unix` is the envelope's upper time bound: an unseen envelope
+/// counts as not included once the RPC node has ingested a ledger that closed
+/// after it, whatever the local clock says.
 pub async fn submit_and_wait(
     rpc: &RpcClient,
     envelope: &TransactionEnvelope,
@@ -45,7 +45,6 @@ pub async fn submit_and_wait(
     valid_until_unix: u64,
     poll_interval: Duration,
 ) -> Result<Included, SubmissionError> {
-    const INGESTION_MARGIN_SECS: u64 = 30;
     let mut accepted = false;
     loop {
         if !accepted {
@@ -68,12 +67,16 @@ pub async fn submit_and_wait(
                         included: Box::new(Included { envelope_hash: hash, transaction: *tx }),
                     });
                 }
-                Ok(TransactionStatus::NotFound)
-                    if unix_now() > valid_until_unix + INGESTION_MARGIN_SECS =>
+                // The node has ingested a ledger that closed after the
+                // envelope's `max_time`: no ledger it has not seen can include
+                // it, and it would have seen any that did.
+                Ok(TransactionStatus::NotFound { node })
+                    if node.latest_close_time
+                        > i64::try_from(valid_until_unix).unwrap_or(i64::MAX) =>
                 {
                     return Err(SubmissionError::NotIncluded { hash });
                 }
-                Ok(TransactionStatus::NotFound) => {}
+                Ok(TransactionStatus::NotFound { .. }) => {}
                 Err(source) => return Err(SubmissionError::InFlight { hash, source }),
             }
         } else if unix_now() > valid_until_unix {

@@ -17,27 +17,31 @@ use common::{Harness, Ledger, Tenant, authed, pool_as, start_with};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
+use fermah_pay_stellar_chain::prepaid::{Outcome, PrepaidDeployment};
 use fermah_pay_stellar_chain::rpc::{
-    IncludedTransaction, LedgerEntryRecord, RpcError, SendOutcome, Simulation, SimulationOutcome,
-    TransactionStatus,
+    IncludedTransaction, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
+    Simulation, SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    ContractDataDurability, ContractDataEntry, ContractId, ExtensionPoint,
-    FeeBumpTransactionInnerTx, Hash, HostFunction, Int128Parts, InvokeContractArgs,
-    LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerFootprint, LedgerKey,
-    LedgerKeyContractData, Limits, OperationBody, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol,
-    ScVal, ScVec, SorobanAuthorizationEntry, SorobanCredentials, SorobanResources,
-    SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
-    SorobanTransactionMetaV2, TransactionEnvelope, TransactionMeta, TransactionMetaV4,
-    TransactionResult, TransactionResultExt, TransactionResultResult, VecM, WriteXdr,
+    ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType,
+    ContractEventV0, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction,
+    Int128Parts, InvokeContractArgs, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt,
+    LedgerFootprint, LedgerKey, LedgerKeyContractData, Limits, OperationBody, OperationMetaV2,
+    ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizationEntry,
+    SorobanCredentials, SorobanResources, SorobanTransactionData, SorobanTransactionDataExt,
+    SorobanTransactionMetaExt, SorobanTransactionMetaV2, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
+    TransactionResultResult, VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::address_of;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::LatestLedger;
-use fermah_pay_stellar_gateway::submission::{Chain, Clock, Engine, Keys, Policy};
+use fermah_pay_stellar_gateway::quarantine::{
+    self, QuarantineError, QuarantinedCharge, Resolution,
+};
+use fermah_pay_stellar_gateway::submission::{Chain, Clock, Engine, Keys, Policy, SourceSequence};
 use fermah_pay_stellar_gateway::worker::{Settings, Step, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
@@ -56,7 +60,6 @@ const MAX_CHARGE: i128 = 50;
 const START_LEDGER: u32 = 1_000;
 const OPERATOR_LEDGERS: u32 = 12;
 const VALIDITY: Duration = Duration::from_secs(60);
-const MARGIN: Duration = Duration::from_secs(10);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 // ---- the network --------------------------------------------------------
@@ -84,6 +87,12 @@ struct Net {
     /// `charge_batch` returns one outcome fewer than it settled.
     truncate_outcomes: bool,
     simulation_barrier: Option<Arc<Barrier>>,
+    /// Buyer accounts whose contract entry is archived: any call touching one
+    /// needs a restore first.
+    archived: HashSet<AccountAddress>,
+    /// Ledger-entry reads trail the latest ledger by this many ledgers.
+    entries_behind: u32,
+    clock: ManualClock,
 }
 
 #[derive(Clone)]
@@ -107,18 +116,26 @@ fn symbol(name: &str) -> ScVal {
     ScVal::Symbol(ScSymbol(name.try_into().unwrap()))
 }
 
-/// The contract call and authorization entries of an envelope.
-fn invocation(
-    envelope: &TransactionEnvelope,
-) -> (InvokeContractArgs, Vec<SorobanAuthorizationEntry>, i64) {
-    let tx = match envelope {
+fn inner(envelope: &TransactionEnvelope) -> Transaction {
+    match envelope {
         TransactionEnvelope::TxFeeBump(bump) => {
             let FeeBumpTransactionInnerTx::Tx(inner) = &bump.tx.inner_tx;
             inner.tx.clone()
         }
         TransactionEnvelope::Tx(v1) => v1.tx.clone(),
         TransactionEnvelope::TxV0(_) => panic!("v0 envelope"),
-    };
+    }
+}
+
+fn is_restore(envelope: &TransactionEnvelope) -> bool {
+    matches!(inner(envelope).operations[0].body, OperationBody::RestoreFootprint(_))
+}
+
+/// The contract call and authorization entries of an envelope.
+fn invocation(
+    envelope: &TransactionEnvelope,
+) -> (InvokeContractArgs, Vec<SorobanAuthorizationEntry>, i64) {
+    let tx = inner(envelope);
     let OperationBody::InvokeHostFunction(op) = &tx.operations[0].body else {
         panic!("not an invocation")
     };
@@ -129,6 +146,29 @@ fn invocation(
 }
 
 impl Net {
+    /// Archived buyer accounts the call would read or write.
+    fn touched_archived(&self, call: &InvokeContractArgs) -> Vec<AccountAddress> {
+        let args = call.args.as_slice();
+        let owners: Vec<AccountAddress> = match call.function_name.0.as_slice() {
+            b"deposit" => vec![owner_of(&args[0])],
+            b"charge_batch" => {
+                let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
+                charges
+                    .iter()
+                    .map(|charge| {
+                        let ScVal::Vec(Some(ScVec(fields))) = charge else { panic!("charge") };
+                        owner_of(&fields[0])
+                    })
+                    .collect()
+            }
+            _ => vec![],
+        };
+        let mut touched: Vec<AccountAddress> =
+            owners.into_iter().filter(|owner| self.archived.contains(owner)).collect();
+        touched.dedup();
+        touched
+    }
+
     /// Applies the call to a copy of the state and returns the new state and
     /// the call's return value, or the reason the network refuses it.
     fn execute(
@@ -136,7 +176,7 @@ impl Net {
         call: &InvokeContractArgs,
         auth: &[SorobanAuthorizationEntry],
         operator: &AccountAddress,
-    ) -> Result<(ContractState, ScVal), String> {
+    ) -> Result<(ContractState, ScVal, Option<ScVal>), String> {
         let mut state = self.state.clone();
         let mut authorized = HashSet::new();
         for entry in auth {
@@ -174,7 +214,7 @@ impl Net {
                 }
                 *held -= amount;
                 state.accounts.entry(owner).or_insert((0, 0)).0 += amount;
-                Ok((state, ScVal::Void))
+                Ok((state, ScVal::Void, None))
             }
             b"charge_batch" => {
                 if !authorized.contains(operator) {
@@ -182,6 +222,7 @@ impl Net {
                 }
                 let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
                 let mut outcomes = Vec::new();
+                let mut settled = Vec::new();
                 for charge in charges.iter() {
                     let ScVal::Vec(Some(ScVec(fields))) = charge else { panic!("charge") };
                     let owner = owner_of(&fields[0]);
@@ -204,11 +245,24 @@ impl Net {
                         }
                     };
                     outcomes.push(ScVal::U32(code));
+                    settled.push(ScVal::Vec(Some(ScVec(
+                        vec![
+                            fields[0].clone(),
+                            fields[1].clone(),
+                            fields[2].clone(),
+                            ScVal::U32(code),
+                        ]
+                        .try_into()
+                        .unwrap(),
+                    ))));
                 }
                 if self.truncate_outcomes {
                     outcomes.pop();
                 }
-                Ok((state, ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap())))))
+                // The contract's event carries every entry, whatever the
+                // return value holds.
+                let event = ScVal::Vec(Some(ScVec(settled.try_into().unwrap())));
+                Ok((state, ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap()))), Some(event)))
             }
             other => panic!("unexpected call {}", String::from_utf8_lossy(other)),
         }
@@ -220,9 +274,29 @@ fn outer_hash(envelope: &TransactionEnvelope) -> [u8; 32] {
     fee_bump_hash(&bump.tx, Network::Testnet).unwrap()
 }
 
+/// The operation meta holding the contract's `charges` event.
+fn charges_event(data: ScVal) -> OperationMetaV2 {
+    OperationMetaV2 {
+        ext: ExtensionPoint::V0,
+        changes: LedgerEntryChanges(VecM::default()),
+        events: vec![ContractEvent {
+            ext: ExtensionPoint::V0,
+            contract_id: Some(ContractId(Hash(CONTRACT))),
+            type_: ContractEventType::Contract,
+            body: ContractEventBody::V0(ContractEventV0 {
+                topics: vec![symbol("charges")].try_into().unwrap(),
+                data,
+            }),
+        }]
+        .try_into()
+        .unwrap(),
+    }
+}
+
 fn included(
     envelope: &TransactionEnvelope,
     ledger: u32,
+    succeeded: bool,
     value: Option<ScVal>,
 ) -> Box<IncludedTransaction> {
     Box::new(IncludedTransaction {
@@ -230,7 +304,7 @@ fn included(
         envelope: envelope.clone(),
         result: TransactionResult {
             fee_charged: 100,
-            result: if value.is_some() {
+            result: if succeeded {
                 TransactionResultResult::TxSuccess(VecM::default())
             } else {
                 TransactionResultResult::TxFailed(VecM::default())
@@ -282,15 +356,18 @@ impl Stellar {
         let (call, auth, _) = invocation(envelope);
         let operator = self.operator.clone();
         self.with(|n| {
-            let (state, _) = n.execute(&call, &auth, &operator).unwrap();
+            let (state, _, _) = n.execute(&call, &auth, &operator).unwrap();
             n.state = state;
         });
     }
 }
 
 impl Chain for Stellar {
-    async fn account_sequence(&self, _: &AccountAddress) -> Result<Option<i64>, RpcError> {
-        Ok(Some(self.with(|n| n.source_sequence)))
+    async fn account_sequence(&self, _: &AccountAddress) -> Result<SourceSequence, RpcError> {
+        Ok(self.with(|n| SourceSequence {
+            sequence: Some(n.source_sequence),
+            latest_ledger: n.latest - n.entries_behind,
+        }))
     }
 
     async fn simulate(
@@ -301,6 +378,27 @@ impl Chain for Stellar {
             barrier.wait().await;
         }
         let (call, auth, _) = invocation(envelope);
+        let archived = self.with(|n| n.touched_archived(&call));
+        if !archived.is_empty() {
+            let keys: Vec<LedgerKey> =
+                archived.iter().map(|owner| self.deployment.account_key(owner)).collect();
+            return Ok(SimulationOutcome::RestoreRequired {
+                transaction_data: Box::new(SorobanTransactionData {
+                    ext: SorobanTransactionDataExt::V0,
+                    resources: SorobanResources {
+                        footprint: LedgerFootprint {
+                            read_only: VecM::default(),
+                            read_write: keys.try_into().unwrap(),
+                        },
+                        instructions: 0,
+                        disk_read_bytes: 0,
+                        write_bytes: 0,
+                    },
+                    resource_fee: 0,
+                }),
+                min_resource_fee: 500,
+            });
+        }
         let operator = self.operator.clone();
         Ok(match self.with(|n| n.execute(&call, &auth, &operator).map(|_| n.latest)) {
             Err(error) => SimulationOutcome::Failed { error, latest_ledger: self.latest() },
@@ -328,8 +426,9 @@ impl Chain for Stellar {
 
     async fn send(&self, envelope: &TransactionEnvelope) -> Result<SendOutcome, RpcError> {
         let hash = outer_hash(envelope);
-        let (call, auth, sequence) = invocation(envelope);
+        let sequence = inner(envelope).seq_num.0;
         let operator = self.operator.clone();
+        let deployment = self.deployment.clone();
         self.with(|n| {
             n.sent.push(envelope.clone());
             if n.included.contains_key(&hash) {
@@ -352,14 +451,33 @@ impl Chain for Stellar {
             n.source_sequence = sequence;
             let status = if n.fail_inclusions > 0 {
                 n.fail_inclusions -= 1;
-                TransactionStatus::Failed(included(envelope, n.latest, None))
+                TransactionStatus::Failed(included(envelope, n.latest, false, None))
+            } else if is_restore(envelope) {
+                let tx = inner(envelope);
+                let TransactionExt::V1(data) = &tx.ext else { panic!("restore without resources") };
+                let restored: Vec<LedgerKey> = data.resources.footprint.read_write.to_vec();
+                n.archived.retain(|owner| !restored.contains(&deployment.account_key(owner)));
+                TransactionStatus::Success(included(envelope, n.latest, true, None))
             } else {
-                match n.execute(&call, &auth, &operator) {
-                    Ok((state, value)) => {
-                        n.state = state;
-                        TransactionStatus::Success(included(envelope, n.latest, Some(value)))
+                let (call, auth, _) = invocation(envelope);
+                if !n.touched_archived(&call).is_empty() {
+                    TransactionStatus::Failed(included(envelope, n.latest, false, None))
+                } else {
+                    match n.execute(&call, &auth, &operator) {
+                        Ok((state, value, event)) => {
+                            n.state = state;
+                            let mut tx = included(envelope, n.latest, true, Some(value));
+                            if let (Some(data), Some(TransactionMeta::V4(meta))) =
+                                (event, tx.meta.as_mut())
+                            {
+                                meta.operations = vec![charges_event(data)].try_into().unwrap();
+                            }
+                            TransactionStatus::Success(tx)
+                        }
+                        Err(_) => {
+                            TransactionStatus::Failed(included(envelope, n.latest, false, None))
+                        }
                     }
-                    Err(_) => TransactionStatus::Failed(included(envelope, n.latest, None)),
                 }
             };
             n.included.insert(hash, status);
@@ -368,14 +486,22 @@ impl Chain for Stellar {
     }
 
     async fn transaction(&self, hash: &[u8; 32]) -> Result<TransactionStatus, RpcError> {
-        Ok(self.with(|n| n.included.get(hash).cloned()).unwrap_or(TransactionStatus::NotFound))
+        Ok(self.with(|n| {
+            n.included.get(hash).cloned().unwrap_or(TransactionStatus::NotFound {
+                node: NodeView {
+                    latest_ledger: n.latest,
+                    latest_close_time: n.clock.now().unix_timestamp(),
+                    oldest_close_time: 0,
+                },
+            })
+        }))
     }
 
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         Ok(self.latest())
     }
 
-    async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<Vec<LedgerEntryRecord>, RpcError> {
+    async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {
         let contract_data = |key: &LedgerKey, val: ScVal| {
             let LedgerKey::ContractData(LedgerKeyContractData { contract, key: data_key, .. }) =
                 key
@@ -417,10 +543,13 @@ impl Chain for Stellar {
         for (owner, id) in &state.deposits {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
         }
-        Ok(keys
-            .iter()
-            .filter_map(|key| existing.get(key).map(|val| contract_data(key, val.clone())))
-            .collect())
+        Ok(LedgerEntries {
+            entries: keys
+                .iter()
+                .filter_map(|key| existing.get(key).map(|val| contract_data(key, val.clone())))
+                .collect(),
+            latest_ledger: self.with(|n| n.latest - n.entries_behind),
+        })
     }
 }
 
@@ -453,6 +582,7 @@ struct World {
     stellar: Stellar,
     clock: ManualClock,
     worker_pool: PgPool,
+    operator_pool: PgPool,
     operator_seed: String,
     source_seed: String,
     fee_seed: String,
@@ -469,6 +599,8 @@ fn treasury() -> AccountAddress {
 
 async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
     let operator = SecretKey::generate().unwrap();
+    let clock =
+        ManualClock(Arc::new(Mutex::new(OffsetDateTime::now_utc().replace_nanosecond(0).unwrap())));
     let usdc = fermah_pay_stellar_chain::usdc::asset_contract_id(
         &fermah_pay_stellar_chain::usdc::circle_usdc(Network::Testnet),
         Network::Testnet,
@@ -484,6 +616,9 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             fail_inclusions: 0,
             truncate_outcomes: false,
             simulation_barrier: None,
+            archived: HashSet::new(),
+            entries_behind: 0,
+            clock: clock.clone(),
         })),
         deployment: PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() },
         operator: operator.address(),
@@ -501,10 +636,9 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         h,
         tenant,
         stellar,
-        clock: ManualClock(Arc::new(Mutex::new(
-            OffsetDateTime::now_utc().replace_nanosecond(0).unwrap(),
-        ))),
+        clock,
         worker_pool: pool_as(&connect, "SET ROLE pay_stellar_worker", 3).await,
+        operator_pool: pool_as(&connect, "SET ROLE pay_stellar_operator", 1).await,
         operator_seed: operator.to_strkey().to_string(),
         source_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
         fee_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
@@ -524,12 +658,7 @@ impl World {
                 source: SecretKey::from_strkey(source_seed).unwrap(),
                 fee_source: SecretKey::from_strkey(&self.fee_seed).unwrap(),
             },
-            Policy {
-                inclusion_fee: 100,
-                resource_fee_margin_percent: 10,
-                validity: VALIDITY,
-                ingestion_margin: MARGIN,
-            },
+            Policy { inclusion_fee: 100, resource_fee_margin_percent: 10, validity: VALIDITY },
         );
         Worker::new(
             engine,
@@ -715,7 +844,7 @@ async fn test_deposit_not_included_is_sent_again_and_credited_once(
 
     // The window closes with the source sequence untouched: proven not
     // included, while the buyer's signature is still valid.
-    w.clock.advance(VALIDITY + MARGIN + Duration::from_secs(1));
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.settle(&worker).await;
 
     let settled = w.get_deposit(&deposit.deposit_id).await;
@@ -743,7 +872,7 @@ async fn test_deposit_included_elsewhere_is_credited_once_from_the_contract_mark
     // A copy of the broadcast authorization lands in someone else's
     // transaction; ours never does.
     w.stellar.include_elsewhere(&w.stellar.sent()[0]);
-    w.clock.advance(VALIDITY + MARGIN + Duration::from_secs(1));
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.settle(&worker).await;
 
     // Resending is refused (the nonce is spent), so the deposit waits.
@@ -775,7 +904,14 @@ async fn test_deposit_included_as_failed_is_decided_only_after_its_authorization
     assert_eq!(w.get_deposit(&failed.deposit_id).await.state(), DepositState::Submitted);
     assert_eq!(w.stellar.sent().len(), 1);
 
+    // The network is past the expiration, but the node serving the marker
+    // read is not: an absent marker there proves nothing yet.
     w.stellar.set_latest(failed.expiration_ledger + 1);
+    w.stellar.with(|n| n.entries_behind = 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_deposit(&failed.deposit_id).await.state(), DepositState::Submitted);
+
+    w.stellar.with(|n| n.entries_behind = 0);
     w.settle(&worker).await;
     let settled = w.get_deposit(&failed.deposit_id).await;
     assert_eq!(settled.state(), DepositState::Failed);
@@ -845,7 +981,7 @@ async fn test_lapsed_deposit_expires_unless_the_buyer_included_it_themselves(
     };
     let operator = w.stellar.operator.clone();
     w.stellar.with(|n| {
-        let (state, _) = n.execute(&call, &[entry], &operator).unwrap();
+        let (state, _, _) = n.execute(&call, &[entry], &operator).unwrap();
         n.state = state;
     });
 
@@ -949,13 +1085,19 @@ async fn test_batch_not_included_is_requeued_only_after_the_operator_authorizati
     w.stellar.with(|n| n.drop_sends = 1);
     let sends_before = w.stellar.sent().len();
     worker.step().await.unwrap();
-    w.clock.advance(VALIDITY + MARGIN + Duration::from_secs(1));
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.settle(&worker).await;
     // Not included, but its authorization could still be: it waits.
     assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Submitted);
     assert_eq!(w.stellar.sent().len(), sends_before + 1);
 
+    // Past the horizon on the network, not yet on the node read.
     w.stellar.set_latest(START_LEDGER + OPERATOR_LEDGERS + 1);
+    w.stellar.with(|n| n.entries_behind = 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Submitted);
+
+    w.stellar.with(|n| n.entries_behind = 0);
     w.settle(&worker).await;
     let settled = w.get_charge(&charge.charge_id).await;
     assert_eq!(settled.state(), ChargeState::Charged);
@@ -976,7 +1118,7 @@ async fn test_batch_applied_elsewhere_is_quarantined_not_charged_again(
     w.stellar.with(|n| n.drop_sends = 1);
     worker.step().await.unwrap();
     w.stellar.include_elsewhere(w.stellar.sent().last().unwrap());
-    w.clock.advance(VALIDITY + MARGIN + Duration::from_secs(1));
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.stellar.set_latest(START_LEDGER + OPERATOR_LEDGERS + 1);
     w.settle(&worker).await;
 
@@ -1006,7 +1148,7 @@ async fn test_batch_answer_of_the_wrong_length_quarantines_every_charge(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_quarantined_batch_quarantines_its_charges_and_keeps_them_debited(
+async fn test_batch_of_unknown_fate_is_decided_from_the_account_sequence(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1017,13 +1159,57 @@ async fn test_quarantined_batch_quarantines_its_charges_and_keeps_them_debited(
     w.stellar.with(|n| n.drop_sends = 2);
     worker.step().await.unwrap();
     // The source sequence moves past the batch although the batch is not
-    // found: the engine cannot tell whether it was included.
+    // found: the engine quarantines the submission. The contract still has
+    // the charge's sequence free, so the charge is settled again, once.
     w.stellar.with(|n| n.source_sequence += 1);
-    w.clock.advance(VALIDITY + MARGIN + Duration::from_secs(1));
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
     w.stellar.set_latest(START_LEDGER + OPERATOR_LEDGERS + 1);
     w.settle(&worker).await;
-    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
+    let quarantined: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pay_stellar.submissions WHERE state = 'quarantined'",
+    )
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(quarantined, 1);
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
     assert_eq!(w.balance(&x).await, (70, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some((70, 1)));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_archived_buyer_account_is_restored_and_the_batch_settles(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let idle = w.funded("idle", 100).await;
+    let active = w.funded("active", 100).await;
+    // The idle buyer's entry outlived its TTL and was archived.
+    w.stellar.with(|n| n.archived.insert(idle.key.address()));
+    let from_idle = w.charge(&idle, 10, "c-idle").await;
+    let from_active = w.charge(&active, 10, "c-active").await;
+    let worker = w.worker();
+    w.settle(&worker).await;
+    // The restore landed; the refused batch waits out the pause that keeps a
+    // failing restore from being resent every step.
+    assert!(w.stellar.with(|n| n.archived.is_empty()));
+    assert_eq!(w.get_charge(&from_active.charge_id).await.state(), ChargeState::Admitted);
+    w.clock.advance(RETRY_AFTER + Duration::from_secs(1));
+    w.settle(&worker).await;
+
+    for charge in [&from_idle, &from_active] {
+        assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
+    }
+    assert!(w.stellar.with(|n| n.archived.is_empty()));
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM pay_stellar.submissions WHERE kind <> 'deposit' ORDER BY created_at",
+    )
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(kinds, ["restore", "charge_batch"]);
+    assert_eq!(w.stellar.account(&idle.key.address()), Some((90, 1)));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1120,4 +1306,181 @@ async fn test_deposit_three_charges_and_a_retried_charge_end_in_matching_balance
     }
     assert_eq!(w.balance(&buyer).await, (40, 0));
     assert_eq!(w.stellar.account(&buyer.key.address()), Some((40, 3)));
+}
+
+// ---- resolving quarantine ---------------------------------------------------
+
+fn hash_of(hex: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    bytes.try_into().unwrap()
+}
+
+async fn quarantined(w: &World, id: &str) -> QuarantinedCharge {
+    quarantine::quarantined_charges(&w.operator_pool, Some(uuid::Uuid::parse_str(id).unwrap()))
+        .await
+        .unwrap()
+        .pop()
+        .expect("charge is quarantined")
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_quarantined_charges_are_resolved_from_the_contract_event(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charged = w.charge(&x, 10, "c-1").await;
+    let above = w.charge(&x, MAX_CHARGE as i64 + 10, "c-2").await;
+    // The return value is unusable, so both are quarantined, still debited.
+    w.stellar.with(|n| n.truncate_outcomes = true);
+    w.settle(&w.worker()).await;
+    assert_eq!(w.balance(&x).await, (100 - 10 - (MAX_CHARGE as i64 + 10), 0));
+    let batch = w.get_charge(&charged.charge_id).await.transaction_hash;
+
+    for (charge, expected) in [
+        (&charged, Resolution::Settled(Outcome::Charged)),
+        (&above, Resolution::Settled(Outcome::AboveLimit)),
+    ] {
+        let q = quarantined(&w, &charge.charge_id).await;
+        let (resolution, evidence) =
+            quarantine::prove_from_transaction(&w.stellar, &q, &hash_of(&batch)).await.unwrap();
+        assert_eq!(resolution, expected);
+        assert!(evidence.contains(&batch), "{evidence}");
+        quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    }
+    let settled = w.get_charge(&charged.charge_id).await;
+    let refused = w.get_charge(&above.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!((refused.state(), refused.outcome.as_str()), (ChargeState::Refused, "above_limit"));
+    // Only the refused amount came back.
+    assert_eq!(w.balance(&x).await, (90, 0));
+    let audit: Vec<(String, String)> = sqlx::query_as(
+        "SELECT resolution, resolved_by FROM pay_stellar.charge_resolutions ORDER BY resolved_at",
+    )
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(audit.len(), 2);
+
+    // A resolved charge cannot be resolved again, and its buyer settles again.
+    let again = quarantine::resolve(
+        &w.operator_pool,
+        uuid::Uuid::parse_str(&above.charge_id).unwrap(),
+        Resolution::Settled(Outcome::AboveLimit),
+        "twice",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(again, QuarantineError::NotQuarantined(_)), "{again:?}");
+    assert_eq!(w.balance(&x).await, (90, 0));
+    w.stellar.with(|n| n.truncate_outcomes = false);
+    let next = w.charge(&x, 5, "c-3").await;
+    w.settle(&w.worker()).await;
+    let next = w.get_charge(&next.charge_id).await;
+    assert_eq!((next.state(), next.sequence), (ChargeState::Charged, 3));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_evidence_that_does_not_settle_the_charge_is_refused(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let y = w.funded("y", 100).await;
+    // X's sequence 1 is already consumed: the contract answers duplicate.
+    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 1);
+    let duplicate = w.charge(&x, 10, "c-x").await;
+    let other = w.charge(&y, 10, "c-y").await;
+    w.settle(&w.worker()).await;
+    let q = quarantined(&w, &duplicate.charge_id).await;
+    let batch = hash_of(&w.get_charge(&duplicate.charge_id).await.transaction_hash);
+
+    // The batch answered `duplicate` for X: it consumed nothing, so it proves
+    // no outcome; and X's sequence is consumed, so readmission is refused.
+    let error = quarantine::prove_from_transaction(&w.stellar, &q, &batch).await.unwrap_err();
+    assert!(
+        matches!(error, QuarantineError::NotConsumed { outcome: "duplicate", .. }),
+        "{error:?}"
+    );
+    let error = quarantine::prove_readmission(&w.stellar, &q).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::SequenceConsumed { consumed: 1, .. }), "{error:?}");
+    // An entry for the right account and sequence but another amount proves
+    // nothing either: Y's charge settled for 10, not 11.
+    assert_eq!(w.get_charge(&other.charge_id).await.state(), ChargeState::Charged);
+    let wrong_amount = QuarantinedCharge { owner: y.key.address(), amount: 11, ..q.clone() };
+    let error =
+        quarantine::prove_from_transaction(&w.stellar, &wrong_amount, &batch).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::AmountMismatch { .. }), "{error:?}");
+
+    // Once the sequence is free again (here, set by the test), readmission
+    // is proven and the charge settles in the next batch.
+    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 0);
+    let (resolution, evidence) = quarantine::prove_readmission(&w.stellar, &q).await.unwrap();
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Admitted);
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.stellar.account(&x.key.address()), Some((90, 1)));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_only_the_resolution_function_leaves_quarantine(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-1").await;
+    w.stellar.with(|n| n.truncate_outcomes = true);
+    w.settle(&w.worker()).await;
+    let id = uuid::Uuid::parse_str(&charge.charge_id).unwrap();
+
+    // The worker, which may otherwise move charges, cannot move this one.
+    let error = sqlx::query(
+        "UPDATE pay_stellar.charges SET state = 'admitted', outcome = NULL, submission_id = NULL,
+             batch_index = NULL, settled_at = NULL WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&w.worker_pool)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("is already quarantined"), "{error}");
+    // No runtime role but the operator may call the function, and the
+    // operator may not bypass it.
+    for pool in [&w.worker_pool, &w.h.api, &w.h.issuer] {
+        let error =
+            sqlx::query("SELECT pay_stellar.resolve_quarantined_charge($1, 'charged', 'x')")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    }
+    for statement in [
+        "UPDATE pay_stellar.charges SET state = 'charged' WHERE id = $1",
+        "INSERT INTO pay_stellar.charge_resolutions (charge_id, resolution, evidence) VALUES ($1, 'charged', 'x')",
+    ] {
+        let error = sqlx::query(statement).bind(id).execute(&w.operator_pool).await.unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    }
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
+
+    // The audit trail cannot be rewritten, even by the owner.
+    let q = quarantined(&w, &charge.charge_id).await;
+    let batch = hash_of(&w.get_charge(&charge.charge_id).await.transaction_hash);
+    let (resolution, evidence) =
+        quarantine::prove_from_transaction(&w.stellar, &q, &batch).await.unwrap();
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    for statement in [
+        "UPDATE pay_stellar.charge_resolutions SET evidence = 'rewritten'",
+        "DELETE FROM pay_stellar.charge_resolutions",
+    ] {
+        let error = sqlx::query(statement).execute(&w.h.owner).await.unwrap_err();
+        assert!(error.to_string().contains("append-only"), "{error}");
+    }
 }

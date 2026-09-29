@@ -21,7 +21,6 @@ pub enum DepositState {
     Confirmed,
     Failed,
     Expired,
-    Quarantined,
 }
 
 impl DepositState {
@@ -33,7 +32,6 @@ impl DepositState {
             "confirmed" => Self::Confirmed,
             "failed" => Self::Failed,
             "expired" => Self::Expired,
-            "quarantined" => Self::Quarantined,
             _ => return Err(StoreError::Corrupt("deposit state outside the CHECK constraint")),
         })
     }

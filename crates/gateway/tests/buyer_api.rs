@@ -455,7 +455,8 @@ async fn privilege_map(owner: &PgPool) -> std::collections::BTreeSet<(String, St
         "SELECT r.role, c.relname::text, p.privilege
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
-         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_issuer'), ('pay_stellar_worker')) AS r(role)
+         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_issuer'), ('pay_stellar_worker'),
+                            ('pay_stellar_operator')) AS r(role)
          CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) AS p(privilege)
          WHERE c.relkind = 'r'
            AND CASE
@@ -489,6 +490,11 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_api", "ledger_contracts", "SELECT"),
         ("pay_stellar_api", "seller_deployments", "SELECT"),
         ("pay_stellar_api", "submissions", "SELECT"),
+        ("pay_stellar_operator", "buyers", "SELECT"),
+        ("pay_stellar_operator", "charge_resolutions", "SELECT"),
+        ("pay_stellar_operator", "charges", "SELECT"),
+        ("pay_stellar_operator", "ledger_contracts", "SELECT"),
+        ("pay_stellar_operator", "submissions", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "INSERT"),
         ("pay_stellar_issuer", "api_keys", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "UPDATE"),
@@ -530,7 +536,7 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
          FROM pg_attribute a
          JOIN pg_class c ON c.oid = a.attrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
-         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker')) AS r(role)
+         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker'), ('pay_stellar_operator')) AS r(role)
          CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS p(privilege)
          WHERE c.relname IN ('buyers', 'deposits', 'charges')
            AND a.attnum > 0 AND NOT a.attisdropped
