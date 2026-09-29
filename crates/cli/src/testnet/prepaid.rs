@@ -15,7 +15,8 @@ use fermah_pay_stellar_chain::onboarding::{
 };
 use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, PrepaidDeployment, Roles, WithdrawIntent, constructor_args,
+    ChargeRequest, DepositIntent, PrepaidDeployment, Roles, Totals, WithdrawIntent,
+    constructor_args, contract_totals,
 };
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
 use fermah_pay_stellar_chain::sponsored::{Credentials, Policy, Receipt, Submitter};
@@ -591,15 +592,8 @@ impl Context {
             .read(HostFunction::InvokeContract(pinned.get_totals_call()))
             .await?
             .context("get_totals returned nothing")?;
-        let ScVal::Map(Some(fields)) = &totals else { bail!("unexpected totals {totals:?}") };
-        let field = |name: &str| {
-            fields
-                .iter()
-                .find(|entry| matches!(&entry.key, ScVal::Symbol(s) if s.0.as_slice() == name.as_bytes()))
-                .and_then(|entry| i128_of(&entry.val))
-                .with_context(|| format!("totals without {name}"))
-        };
-        let (liabilities, revenue) = (field("liabilities")?, field("revenue")?);
+        let Totals { liabilities, revenue } =
+            contract_totals(&totals).with_context(|| format!("unexpected totals {totals:?}"))?;
         let held = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(NETWORK))
             .await?
             .usdc

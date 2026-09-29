@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                            INSERT INTO pay_stellar.chain_charge_entries\n                                (chain_event_id, entry_index, owner, charge_id, amount, outcome)\n                            VALUES ($1, $2, $3, $4, $5::text::numeric, $6)\n                            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Text",
+        "Bytea",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5d9f7f486940a68e062443bddda15e2a8976a49c5a0a00874f9c5e8a0e583f3a"
+}

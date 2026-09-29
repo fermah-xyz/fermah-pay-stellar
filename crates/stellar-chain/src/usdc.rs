@@ -7,7 +7,7 @@
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use stellar_xdr::{
     AlphaNum4, Asset, AssetCode4, ContractIdPreimage, Hash, HashIdPreimage,
-    HashIdPreimageContractId, WriteXdr,
+    HashIdPreimageContractId, LedgerKey, LedgerKeyTrustLine, WriteXdr,
 };
 
 use sha2::{Digest, Sha256};
@@ -48,6 +48,16 @@ pub fn asset_contract_id(asset: &Asset, network: Network) -> [u8; 32] {
         .to_xdr(stellar_xdr::Limits::none())
         .expect("invariant: a contract-id preimage always encodes");
     Sha256::digest(bytes).into()
+}
+
+/// Ledger key of `holder`'s trustline for `asset`, whose entry holds the
+/// balance of a classic account.
+#[must_use]
+pub fn trustline_key(holder: &AccountAddress, asset: &Asset) -> LedgerKey {
+    LedgerKey::Trustline(LedgerKeyTrustLine {
+        account_id: account_id(holder),
+        asset: crate::onboarding::trustline_asset(asset),
+    })
 }
 
 /// `C...` strkey form of a contract ID.

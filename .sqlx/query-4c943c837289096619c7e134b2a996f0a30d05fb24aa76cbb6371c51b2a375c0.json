@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT EXISTS (\n                        SELECT 1 FROM pay_stellar.chain_events later\n                        WHERE later.seller_deployment_id = $1 AND later.network = $2\n                          AND later.kind = 'role' AND later.payload->>'role' = $3\n                          AND later.event_id > $4\n                    ) AS \"superseded!\"\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "superseded!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4c943c837289096619c7e134b2a996f0a30d05fb24aa76cbb6371c51b2a375c0"
+}

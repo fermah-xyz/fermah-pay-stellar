@@ -92,16 +92,25 @@ enum Command {
     /// the charge's record on the contract (its outcome; or, if there is none,
     /// readmission while the charge is within its last ledger and expiry
     /// shortly after); with `--transaction`, from the contract's settlement
-    /// of the charge in that transaction, once the record has lapsed.
+    /// of the charge in that transaction, once the record has lapsed; with
+    /// `--events`, from every `charges` event of the contract between the
+    /// batch's authorization and the charge's last ledger (its settlement, or
+    /// expiry if there is none), once the record has lapsed.
     ResolveCharge {
         #[arg(long)]
         charge_id: Uuid,
         /// Hex hash of the transaction in which the contract settled the
         /// charge.
-        #[arg(long, conflicts_with = "record", required_unless_present = "record")]
+        #[arg(
+            long,
+            conflicts_with_all = ["record", "events"],
+            required_unless_present_any = ["record", "events"]
+        )]
         transaction: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "events")]
         record: bool,
+        #[arg(long)]
+        events: bool,
         #[arg(long)]
         network: Network,
         #[arg(long, env = "PAY_STELLAR_RPC_URL")]
@@ -177,20 +186,24 @@ async fn main() -> anyhow::Result<()> {
             let charges = quarantine::quarantined_charges(&pool, None).await?;
             serde_json::Value::Array(charges.iter().map(describe).collect())
         }
-        Command::ResolveCharge { charge_id, transaction, record, network, rpc_url } => {
+        Command::ResolveCharge { charge_id, transaction, record, events, network, rpc_url } => {
             let rpc = RpcClient::new(&rpc_url, Duration::from_secs(30))?;
             rpc.verify_network(network).await.context("checking the RPC network")?;
             let charge = quarantine::quarantined_charges(&pool, Some(charge_id))
                 .await?
                 .pop()
                 .with_context(|| format!("no quarantined charge {charge_id}"))?;
-            let (resolution, evidence) = match (transaction, record) {
-                (_, true) => quarantine::prove_from_record(&rpc, &charge).await?,
-                (Some(hash), false) => {
+            let (resolution, evidence) = match (transaction, record, events) {
+                (_, true, _) => quarantine::prove_from_record(&rpc, &charge).await?,
+                (_, _, true) => {
+                    let from = quarantine::authorization_ledger(&pool, charge_id).await?;
+                    quarantine::prove_from_events(&rpc, &charge, from).await?
+                }
+                (Some(hash), false, false) => {
                     let hash = parse_hash(&hash)?;
                     quarantine::prove_from_transaction(&rpc, &charge, &hash).await?
                 }
-                (None, false) => bail!("give --transaction or --record"),
+                (None, false, false) => bail!("give --transaction, --record or --events"),
             };
             quarantine::resolve(&pool, charge_id, resolution, &evidence).await?;
             serde_json::json!({

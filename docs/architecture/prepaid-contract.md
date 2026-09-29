@@ -22,7 +22,13 @@ The treasury key can move USDC without calling the contract. The contract
 cannot prevent that, so it cannot guarantee that the treasury holds at least
 what it owes. It records `liabilities` (all buyer balances) and `revenue`
 (charged, not yet paid out) so that the treasury's USDC balance can be
-compared against them.
+compared against them, which the [chain observer](observer.md) does.
+
+USDC's issuer can also revoke the authorization of the treasury's trustline
+(Circle's USDC issuer has `AUTH_REVOCABLE` set on both networks). The treasury
+then still holds the USDC, but the asset contract refuses every transfer to
+or from it, so every deposit and withdrawal fails until the authorization is
+restored or the treasury is rotated to another account.
 
 ## Roles
 

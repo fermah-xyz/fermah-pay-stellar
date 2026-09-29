@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{Harness, Ledger, Tenant, authed, pool_as, start_with};
+use common::{EventStream, Harness, Ledger, Tenant, authed, pool_as, start_with};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
@@ -21,9 +21,9 @@ use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
 };
 use fermah_pay_stellar_chain::rpc::{
-    FeeDistribution, FeePercentile, FeeStats, IncludedTransaction, LatestLedgerInfo, LedgerEntries,
-    LedgerEntryRecord, NodeView, RpcError, SendOutcome, Simulation, SimulationOutcome,
-    TransactionStatus,
+    EventPage, EventsFrom, FeeDistribution, FeePercentile, FeeStats, Health, IncludedTransaction,
+    LatestLedgerInfo, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
+    Simulation, SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -41,6 +41,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 };
 use fermah_pay_stellar_chain::transaction::{account_id, address_of};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_gateway::events::EventLog;
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::LatestLedger;
 use fermah_pay_stellar_gateway::quarantine::{
@@ -105,6 +106,9 @@ struct Net {
     /// Ledger-entry reads trail the latest ledger by this many ledgers.
     entries_behind: u32,
     clock: ManualClock,
+    /// The contract's events, and the oldest ledger the node retains.
+    events: EventStream,
+    oldest: u32,
 }
 
 #[derive(Clone)]
@@ -158,6 +162,13 @@ fn invocation(
 }
 
 impl Net {
+    /// Publishes the contract's `charges` event in the latest ledger.
+    fn log_charges(&mut self, data: ScVal) {
+        let closed =
+            self.clock.now().format(&time::format_description::well_known::Rfc3339).unwrap();
+        self.events.emit(CONTRACT, self.latest, closed, vec![symbol("charges")], data);
+    }
+
     /// Archived buyer accounts the call would read or write.
     fn touched_archived(&self, call: &InvokeContractArgs) -> Vec<AccountAddress> {
         let args = call.args.as_slice();
@@ -380,12 +391,30 @@ impl Stellar {
     /// Someone else includes the call and authorizations of `envelope` in a
     /// transaction of their own: the contract state changes, this gateway's
     /// source sequence does not.
+    /// Logs a `charges` event in which the contract answered `expired` for
+    /// the first charge `envelope` carries, as a sender naming the same
+    /// charge with an earlier last ledger would see.
+    fn log_expired_answer(&self, envelope: &TransactionEnvelope) {
+        let (call, _, _) = invocation(envelope);
+        let ScVal::Vec(Some(ScVec(charges))) = &call.args.as_slice()[0] else { panic!("charges") };
+        let ScVal::Vec(Some(ScVec(fields))) = &charges[0] else { panic!("charge") };
+        let entry = ScVal::Vec(Some(ScVec(
+            vec![fields[0].clone(), fields[1].clone(), fields[2].clone(), ScVal::U32(4)]
+                .try_into()
+                .unwrap(),
+        )));
+        self.with(|n| n.log_charges(ScVal::Vec(Some(ScVec(vec![entry].try_into().unwrap())))));
+    }
+
     fn include_elsewhere(&self, envelope: &TransactionEnvelope) {
         let (call, auth, _) = invocation(envelope);
         let operator = self.operator.clone();
         self.with(|n| {
-            let (state, _, _) = n.execute(&call, &auth, &operator).unwrap();
+            let (state, _, event) = n.execute(&call, &auth, &operator).unwrap();
             n.state = state;
+            if let Some(data) = event {
+                n.log_charges(data);
+            }
         });
     }
 }
@@ -494,6 +523,9 @@ impl Chain for Stellar {
                     match n.execute(&call, &auth, &operator) {
                         Ok((state, value, event)) => {
                             n.state = state;
+                            if let Some(data) = &event {
+                                n.log_charges(data.clone());
+                            }
                             let mut tx = included(envelope, n.latest, true, Some(value));
                             if let (Some(data), Some(TransactionMeta::V4(meta))) =
                                 (event, tx.meta.as_mut())
@@ -627,6 +659,21 @@ impl Chain for Stellar {
     }
 }
 
+impl EventLog for Stellar {
+    async fn health(&self) -> Result<Health, RpcError> {
+        Ok(self.with(|n| Health { latest_ledger: n.latest, oldest_ledger: n.oldest }))
+    }
+
+    async fn events(
+        &self,
+        contract: &[u8; 32],
+        from: &EventsFrom,
+        limit: u32,
+    ) -> Result<EventPage, RpcError> {
+        self.with(|n| n.events.page(contract, from, limit, n.oldest, n.latest))
+    }
+}
+
 impl LatestLedger for Stellar {
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         Ok(self.latest())
@@ -694,6 +741,8 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             archived: HashSet::new(),
             entries_behind: 0,
             clock: clock.clone(),
+            events: EventStream::default(),
+            oldest: 1,
         })),
         deployment: PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() },
         operator: operator.address(),
@@ -1376,8 +1425,60 @@ async fn test_batch_not_included_past_the_charges_last_ledger_is_refunded(
     assert_eq!(w.stellar.account(&x.key.address()), Some(100));
 }
 
+/// Sends a charge's batch, which the network never includes, and moves past
+/// the ledger up to which the charge's record would have lived: the record no
+/// longer tells whether the batch applied it.
+async fn decided_after_records_lapse(
+    w: &World,
+    worker: &Worker<Stellar, ManualClock>,
+    charge: &Charge,
+    applied_elsewhere: bool,
+) {
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    if applied_elsewhere {
+        w.stellar.include_elsewhere(w.stellar.sent().last().unwrap());
+    }
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.stellar.set_latest(charge.last_ledger + CHARGE_RECORD_GRACE + 1);
+}
+
 #[sqlx::test(migrations = "../../db/migrations")]
-async fn test_batch_decided_after_its_records_would_have_lapsed_is_quarantined(
+async fn test_batch_never_applied_and_decided_late_is_refunded_from_the_events(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    decided_after_records_lapse(&w, &worker, &charge, false).await;
+    w.settle(&worker).await;
+    let refunded = w.get_charge(&charge.charge_id).await;
+    assert_eq!((refunded.state(), refunded.outcome.as_str()), (ChargeState::Refused, "expired"));
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(100));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_batch_applied_elsewhere_and_decided_late_is_settled_from_its_event(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    decided_after_records_lapse(&w, &worker, &charge, true).await;
+    w.settle(&worker).await;
+    let settled = w.get_charge(&charge.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!(w.balance(&x).await, (70, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_expired_answer_before_the_settlement_does_not_refund_the_charge(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
@@ -1387,13 +1488,126 @@ async fn test_batch_decided_after_its_records_would_have_lapsed_is_quarantined(
     let worker = w.worker();
     w.stellar.with(|n| n.drop_sends = 2);
     worker.step().await.unwrap();
+    let batch = w.stellar.sent().last().unwrap().clone();
+    // An `expired` answer debits nothing and records nothing; the batch
+    // applied afterwards is the charge's settlement.
+    w.stellar.log_expired_answer(&batch);
+    w.stellar.include_elsewhere(&batch);
     w.clock.advance(VALIDITY + Duration::from_secs(1));
-    // No record now proves nothing: a record of an applied charge would
-    // have lapsed too.
     w.stellar.set_latest(charge.last_ledger + CHARGE_RECORD_GRACE + 1);
+    w.settle(&worker).await;
+    let settled = w.get_charge(&charge.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!(w.balance(&x).await, (70, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_late_decision_without_the_whole_event_range_stays_quarantined(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 30, "c-1").await;
+    let worker = w.worker();
+    decided_after_records_lapse(&w, &worker, &charge, false).await;
+    // The node no longer holds the ledger at which the batch was authorized.
+    w.stellar.with(|n| n.oldest = START_LEDGER + 1);
     w.settle(&worker).await;
     assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
     assert_eq!(w.balance(&x).await, (70, 0));
+    let reason = w.last_error("charges", &charge.charge_id).await.unwrap();
+    assert!(
+        reason.contains(&format!(
+            "retains events only from ledger {}, so ledgers {START_LEDGER} to {START_LEDGER} cannot be searched",
+            START_LEDGER + 1
+        )),
+        "{reason}"
+    );
+}
+
+/// A charge quarantined because the node the worker read had pruned the
+/// events of its batch, whose authorization was applied elsewhere or not;
+/// with the latest ledger when the batch was signed.
+async fn quarantined_late(
+    w: &World,
+    x: &TestBuyer,
+    key: &str,
+    applied_elsewhere: bool,
+) -> (Charge, u32) {
+    let charge = w.charge(x, 30, key).await;
+    let worker = w.worker();
+    let signed_at = w.stellar.latest();
+    decided_after_records_lapse(w, &worker, &charge, applied_elsewhere).await;
+    let oldest = w.stellar.with(|n| std::mem::replace(&mut n.oldest, n.latest));
+    w.settle(&worker).await;
+    w.stellar.with(|n| n.oldest = oldest);
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
+    (charge, signed_at)
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_events_resolve_a_quarantined_charge_as_settled_or_expired(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let applied = quarantined_late(&w, &x, "c-1", true).await;
+    let never = quarantined_late(&w, &x, "c-2", false).await;
+    assert_eq!(w.balance(&x).await, (40, 0));
+
+    for ((charge, signed_at), expected, state, balance) in [
+        (&applied, Resolution::Settled(Outcome::Charged), ChargeState::Charged, 40),
+        (&never, Resolution::Expired, ChargeState::Refused, 70),
+    ] {
+        let q = quarantined(&w, &charge.charge_id).await;
+        let from = quarantine::authorization_ledger(&w.operator_pool, q.id).await.unwrap();
+        assert_eq!(from, Some(*signed_at), "the ledger the operator signed at");
+        let (resolution, evidence) =
+            quarantine::prove_from_events(&w.stellar, &q, from).await.unwrap();
+        assert_eq!(resolution, expected);
+        assert!(
+            evidence.contains(&format!("in ledgers {signed_at} to {}", charge.last_ledger)),
+            "{evidence}"
+        );
+        quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+        assert_eq!(w.get_charge(&charge.charge_id).await.state(), state);
+        assert_eq!(w.balance(&x).await, (balance, 0));
+    }
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_events_that_do_not_cover_the_charge_resolve_nothing(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let (charge, signed_at) = quarantined_late(&w, &x, "c-1", false).await;
+    assert_eq!(signed_at, START_LEDGER);
+    let q = quarantined(&w, &charge.charge_id).await;
+    let from = quarantine::authorization_ledger(&w.operator_pool, q.id).await.unwrap();
+
+    // Pruned history.
+    w.stellar.with(|n| n.oldest = START_LEDGER + 1);
+    let error = quarantine::prove_from_events(&w.stellar, &q, from).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::EventsPruned { from: START_LEDGER, .. }), "{error:?}");
+    w.stellar.with(|n| n.oldest = 1);
+    // A node not yet past the charge's last ledger, when it could still land.
+    let latest = w.stellar.latest();
+    w.stellar.set_latest(charge.last_ledger - 1);
+    let error = quarantine::prove_from_events(&w.stellar, &q, from).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::EventsBeforeLastLedger { .. }), "{error:?}");
+    w.stellar.set_latest(latest);
+    // No known authorization ledger: nothing bounds the search.
+    let error = quarantine::prove_from_events(&w.stellar, &q, None).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::NoAuthorizationLedger { .. }), "{error:?}");
+    // Control: the same charge against the whole range resolves.
+    let (resolution, _) = quarantine::prove_from_events(&w.stellar, &q, from).await.unwrap();
+    assert_eq!(resolution, Resolution::Expired);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

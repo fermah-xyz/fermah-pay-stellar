@@ -16,10 +16,11 @@ and its evidence shows each one separately.
 
 ```text
 seller ──gRPC + API key──> gateway ──> PostgreSQL <── worker ──> Stellar RPC
-                              │                                     ▲
-buyer wallet ── signs the deposit authorization the gateway prepared │
-                                                                     │
-operator tools ──────────────────────────────────────────────────────┘
+                                          ▲                         ▲  ▲
+                                          └────── observer ─────────┘  │
+buyer wallet ── signs the deposit authorization the gateway prepared   │
+                                                                       │
+operator tools ────────────────────────────────────────────────────────┘
 ```
 
 - **Gateway** (`crates/gateway`, binary `fermah-pay-stellar-gateway`): the
@@ -32,6 +33,11 @@ operator tools ─────────────────────�
   admitted charges through the durable submission engine and applies each
   outcome to the rows it settles; see
   [settlement](transactions.md#settlement).
+- **Chain observer** (binary `fermah-pay-stellar-observer`): reads every
+  event of each deployment's contract, matches it against the gateway's
+  records, and reconciles the treasury's USDC, the contract's totals and the
+  database. It holds no key and can only append observations and findings;
+  see [chain observer](observer.md).
 - **Stellar access** (`crates/stellar-chain`): key handling, transaction
   signing, the USDC asset identity per network, a typed Stellar RPC client,
   and sponsored buyer onboarding.

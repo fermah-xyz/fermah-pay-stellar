@@ -15,6 +15,8 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 use fermah_pay_stellar_chain::transaction::account_id;
 use fermah_pay_stellar_domain::AccountAddress;
 
+use crate::events::EventLog;
+
 /// An account's sequence number as a node read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceSequence {
@@ -23,7 +25,8 @@ pub struct SourceSequence {
     pub latest_ledger: u32,
 }
 
-pub trait Chain: Send + Sync {
+/// The event reads are what decide a charge once its record has lapsed.
+pub trait Chain: EventLog {
     fn account_sequence(
         &self,
         account: &AccountAddress,

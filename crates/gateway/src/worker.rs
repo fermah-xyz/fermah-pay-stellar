@@ -39,6 +39,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::events::{ChargeSearch, FoundEntry, search_charge};
 use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
 
 #[derive(Clone, Copy, Debug)]
@@ -153,6 +154,14 @@ fn settled(outcome: Outcome) -> Option<ChargeDecision> {
         },
         Outcome::Duplicate => return None,
     })
+}
+
+/// A charge whose settlement is looked for in the contract's events.
+struct SettledCharge<'a> {
+    owner: &'a AccountAddress,
+    charge_id: &'a [u8; 32],
+    amount: i64,
+    last_ledger: i64,
 }
 
 struct Snapshot {
@@ -312,7 +321,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     ) -> Result<(), WorkerError> {
         let rows = sqlx::query!(
             r#"
-            SELECT c.id, c.charge_id, c.last_ledger, c.batch_index AS "batch_index!",
+            SELECT c.id, c.charge_id, c.last_ledger, c.amount, c.batch_index AS "batch_index!",
                    b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address,
                    (SELECT count(*) FROM pay_stellar.charges a
                     WHERE a.submission_id = c.submission_id) AS "batch_size!"
@@ -400,18 +409,104 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     None if snapshot.ledger <= row.last_ledger + i64::from(CHARGE_RECORD_GRACE) => {
                         ChargeDecision::Refused(Outcome::Expired)
                     }
-                    None => ChargeDecision::Quarantine {
-                        outcome: None,
-                        reason: format!(
-                            "no record at ledger {}, past the ledger its record would have lived to",
-                            snapshot.ledger
-                        ),
-                    },
+                    // Only the contract's events can still tell.
+                    None => {
+                        let charge = SettledCharge {
+                            owner,
+                            charge_id: id,
+                            amount: row.amount,
+                            last_ledger: row.last_ledger,
+                        };
+                        match self
+                            .decide_from_events(submission, &deployment, &charge, snapshot.ledger)
+                            .await?
+                        {
+                            Some(decision) => decision,
+                            None => continue,
+                        }
+                    }
                 };
                 decisions.push((row.id, decision));
             }
         }
         self.apply_charge_decisions(&decisions).await
+    }
+
+    /// Decides a charge whose record has lapsed from the contract's `charges`
+    /// events, from the ledger at which its batch was authorized through the
+    /// charge's last ledger. No transaction could include the batch earlier,
+    /// and after that ledger the contract refuses the charge whoever sends it,
+    /// so an entry in that range is the charge's settlement and no entry
+    /// proves it was never applied. `None` while the node has not reached the
+    /// charge's last ledger; a quarantine when the range cannot be read whole.
+    async fn decide_from_events(
+        &self,
+        submission: Uuid,
+        deployment: &PrepaidDeployment,
+        charge: &SettledCharge<'_>,
+        read_at: i64,
+    ) -> Result<Option<ChargeDecision>, WorkerError> {
+        let lapsed = format!(
+            "no record at ledger {read_at}, past the ledger its record would have lived to"
+        );
+        let quarantine = |reason: String| ChargeDecision::Quarantine { outcome: None, reason };
+        let Some(from) = self.engine.authorized_from(submission).await? else {
+            return Ok(Some(quarantine(format!(
+                "{lapsed}; the ledger its batch was authorized at is not recorded, so its events cannot be searched"
+            ))));
+        };
+        let to = u32::try_from(charge.last_ledger)
+            .map_err(|_| WorkerError::Corrupt("charge last ledger out of range"))?;
+        let search = search_charge(
+            self.engine.chain(),
+            &deployment.contract,
+            charge.owner,
+            charge.charge_id,
+            from,
+            to,
+        )
+        .await
+        .map_err(WorkerError::Chain)?;
+        let entries = match search {
+            ChargeSearch::Behind { .. } => return Ok(None),
+            ChargeSearch::Pruned { oldest } => {
+                return Ok(Some(quarantine(format!(
+                    "{lapsed}; the node retains events only from ledger {oldest}, so ledgers {from} to {} cannot be searched",
+                    oldest.saturating_sub(1)
+                ))));
+            }
+            ChargeSearch::Unreadable { event } => {
+                return Ok(Some(quarantine(format!(
+                    "{lapsed}; charges event {event} does not decode"
+                ))));
+            }
+            ChargeSearch::Complete { entries, .. } => entries,
+        };
+        // Inside the range the contract answers `duplicate` only while the
+        // charge's record lives, which an earlier entry created; with no
+        // settling entry, a duplicate answer means part of the story is
+        // missing. `expired` answers change nothing.
+        let Some(found) = entries.iter().find(|found| found.settles()) else {
+            return Ok(Some(if !entries.iter().any(FoundEntry::is_duplicate) {
+                ChargeDecision::Refused(Outcome::Expired)
+            } else {
+                ChargeDecision::Quarantine {
+                    outcome: Some(Outcome::Duplicate),
+                    reason: format!(
+                        "{lapsed}; ledgers {from} to {to} show the charge only as a duplicate"
+                    ),
+                }
+            }));
+        };
+        if found.entry.amount != i128::from(charge.amount) {
+            return Ok(Some(quarantine(format!(
+                "charges event {} settled the charge for {}, not {}",
+                found.event, found.entry.amount, charge.amount
+            ))));
+        }
+        Ok(Some(settled(found.entry.outcome).unwrap_or_else(|| {
+            quarantine(format!("charges event {} answered duplicate", found.event))
+        })))
     }
 
     /// Admitted charges past their last ledger were never applied (an
@@ -924,6 +1019,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             Err(EngineError::SourceBusy { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        // The operator signed after the network reached `latest`, so no
+        // transaction can include this batch's authorization earlier.
+        let prepared = prepared.authorized_from(latest);
 
         let ids: Vec<Uuid> = batch.iter().map(|c| c.id).collect();
         let indexes: Vec<i16> =
