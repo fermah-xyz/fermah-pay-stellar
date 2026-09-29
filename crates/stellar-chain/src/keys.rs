@@ -6,7 +6,7 @@ use std::fmt;
 use ed25519_dalek::{Signer, SigningKey};
 use fermah_pay_stellar_domain::AccountAddress;
 use stellar_xdr::{BytesM, DecoratedSignature, Signature, SignatureHint};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub struct SecretKey(SigningKey);
 
@@ -27,18 +27,22 @@ impl SecretKey {
     }
 
     pub fn from_strkey(seed: &str) -> Result<Self, SecretKeyError> {
-        let key = stellar_strkey::ed25519::PrivateKey::from_string(seed)
+        let mut key = stellar_strkey::ed25519::PrivateKey::from_string(seed)
             .map_err(|_| SecretKeyError::Malformed)?;
-        let bytes = Zeroizing::new(key.0);
-        Ok(Self(SigningKey::from_bytes(&bytes)))
+        let signing = SigningKey::from_bytes(&key.0);
+        key.0.zeroize();
+        Ok(Self(signing))
     }
 
     /// The `S...` seed, for writing to a caller-chosen secret store. The
-    /// returned buffer is wiped on drop.
+    /// returned buffer is wiped on drop, and so are the seed bytes copied to
+    /// encode it.
     #[must_use]
     pub fn to_strkey(&self) -> Zeroizing<String> {
-        let key = stellar_strkey::ed25519::PrivateKey(self.0.to_bytes());
-        Zeroizing::new(stellar_strkey::Unredacted(&key).to_string().to_string())
+        let mut key = stellar_strkey::ed25519::PrivateKey(self.0.to_bytes());
+        let encoded = Zeroizing::new(stellar_strkey::Unredacted(&key).to_string());
+        key.0.zeroize();
+        Zeroizing::new(encoded.as_str().to_owned())
     }
 
     #[must_use]

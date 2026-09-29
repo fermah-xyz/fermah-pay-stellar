@@ -15,8 +15,8 @@ use std::rc::Rc;
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, SettledEntry,
-    WithdrawIntent, account_state, batch_outcomes, settled_entries,
+    ChargeRequest, ContractConfig, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent,
+    SettledEntry, WithdrawIntent, account_state, batch_outcomes, contract_config, settled_entries,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::Deployer as _;
@@ -1544,4 +1544,25 @@ fn test_gateway_reads_each_settled_charge_from_the_batch_event() {
     );
     // Control: the same events, attributed to another contract, yield nothing.
     assert!(events.events().iter().all(|event| settled_entries(event, &[0; 32]).is_none()));
+}
+
+/// A deployment's binding is moved after a role rotation from what
+/// `get_config` returns, so the decoding is pinned against the real host.
+#[test]
+fn test_gateway_reads_the_roles_from_get_config() {
+    let w = world();
+    let val: Val = w.client().get_config().into_val(&w.env);
+    let encoded =
+        <xdr::ScVal as soroban_sdk::TryFromVal<Env, Val>>::try_from_val(&w.env, &val).unwrap();
+    assert_eq!(
+        contract_config(&encoded),
+        Some(ContractConfig {
+            admin: w.admin.key.address(),
+            operator: w.operator.key.address(),
+            seller: w.seller.key.address(),
+            treasury: w.treasury.key.address(),
+            usdc: contract_bytes(&w.usdc),
+            paused: false,
+        })
+    );
 }

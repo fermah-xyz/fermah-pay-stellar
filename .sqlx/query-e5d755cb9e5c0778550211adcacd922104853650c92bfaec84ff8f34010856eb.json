@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pay_stellar.sync_ledger_binding($1, $2, $3, $4) AS \"changed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "changed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e5d755cb9e5c0778550211adcacd922104853650c92bfaec84ff8f34010856eb"
+}

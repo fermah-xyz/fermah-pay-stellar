@@ -3,7 +3,7 @@ use clap::Parser;
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_gateway::config::Config;
 use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LedgerApi};
-use fermah_pay_stellar_gateway::server::serve;
+use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::store::Store;
 use sqlx::postgres::PgPoolOptions;
@@ -40,7 +40,11 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", config.listen_addr))?;
     tracing::info!(listen_addr = %config.listen_addr, network = %config.network, "gateway serving");
 
-    serve(listener, store, config.network, ledger, shutdown::signal())
+    let limits = ServerLimits {
+        max_concurrent_requests: config.max_concurrent_requests.get(),
+        request_timeout: std::time::Duration::from_secs(config.request_timeout_secs),
+    };
+    serve(listener, store, config.network, ledger, limits, shutdown::signal())
         .await
         .context("serving gRPC")?;
     tracing::info!("gateway stopped");

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use fermah_pay_stellar_chain::prepaid::{PrepaidDeployment, contract_config};
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
@@ -74,6 +75,16 @@ enum Command {
         #[arg(long)]
         key_id: Uuid,
     },
+    /// Move a deployment's binding to the operator and treasury its ledger
+    /// contract now names, after a role rotation on the contract. The
+    /// accounts are read from the contract's `get_config`; the contract and
+    /// its USDC must still match the binding.
+    SyncLedger {
+        #[arg(long)]
+        deployment_id: Uuid,
+        #[arg(long, env = "PAY_STELLAR_RPC_URL")]
+        rpc_url: String,
+    },
     /// List quarantined charges (operator role).
     QuarantinedCharges,
     /// Resolve a quarantined charge (operator role). The resolution is read
@@ -124,6 +135,41 @@ async fn main() -> anyhow::Result<()> {
             serde_json::json!({
                 "deployment_id": deployment_id.to_string(),
                 "contract": binding.contract,
+            })
+        }
+        Command::SyncLedger { deployment_id, rpc_url } => {
+            let bound = issuance::ledger_binding(&pool, deployment_id).await?;
+            let rpc = RpcClient::new(&rpc_url, Duration::from_secs(30))?;
+            rpc.verify_network(bound.network).await.context("checking the RPC network")?;
+            let contract = contract_id(&bound.contract)?;
+            let usdc = contract_id(&bound.usdc)?;
+            let deployment = PrepaidDeployment { contract, usdc, treasury: bound.treasury.clone() };
+            let value = rpc
+                .read_contract(&bound.treasury, deployment.get_config_call())
+                .await
+                .context("reading the contract's configuration")?
+                .context("get_config returned nothing")?;
+            let config = contract_config(&value).context("get_config returned another shape")?;
+            if config.usdc != usdc {
+                bail!("the contract's USDC is not the bound one");
+            }
+            let evidence = format!(
+                "get_config of {}: operator {}, treasury {}",
+                bound.contract, config.operator, config.treasury
+            );
+            let changed = issuance::sync_ledger_binding(
+                &pool,
+                deployment_id,
+                &config.operator,
+                &config.treasury,
+                &evidence,
+            )
+            .await?;
+            serde_json::json!({
+                "deployment_id": deployment_id.to_string(),
+                "changed": changed,
+                "operator": config.operator.to_string(),
+                "treasury": config.treasury.to_string(),
             })
         }
         Command::QuarantinedCharges => {
@@ -182,4 +228,10 @@ fn parse_hash(hex: &str) -> anyhow::Result<[u8; 32]> {
         .collect::<Option<Vec<u8>>>()
         .context("transaction hash is not hex")?;
     <[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("transaction hash is not 32 bytes"))
+}
+
+fn contract_id(strkey: &str) -> anyhow::Result<[u8; 32]> {
+    stellar_strkey::Contract::from_string(strkey)
+        .map(|contract| contract.0)
+        .map_err(|_| anyhow::anyhow!("{strkey} is not a contract address"))
 }

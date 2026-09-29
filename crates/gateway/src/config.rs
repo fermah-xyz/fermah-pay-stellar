@@ -37,6 +37,17 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS", default_value = "720")]
     pub deposit_authorization_ledgers: NonZeroU32,
 
+    /// Requests processed at once, across all connections. Every request,
+    /// authenticated or not, costs a database lookup, so this bounds the
+    /// load unauthenticated traffic can put on the database; rate limiting
+    /// per client belongs in front of the gateway.
+    #[arg(long, env = "PAY_STELLAR_MAX_CONCURRENT_REQUESTS", default_value = "64")]
+    pub max_concurrent_requests: std::num::NonZeroUsize,
+
+    /// Seconds after which a request still running is cancelled.
+    #[arg(long, env = "PAY_STELLAR_REQUEST_TIMEOUT_SECS", default_value = "30")]
+    pub request_timeout_secs: u64,
+
     /// Maximum database connections.
     #[arg(long, env = "PAY_STELLAR_DATABASE_MAX_CONNECTIONS", default_value = "16")]
     pub database_max_connections: NonZeroU32,

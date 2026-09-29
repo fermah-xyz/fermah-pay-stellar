@@ -8,12 +8,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fermah_pay_stellar_domain::AccountAddress;
 use fermah_pay_stellar_domain::Network;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use stellar_xdr::{
-    LedgerEntryData, LedgerEntryExt, LedgerKey, Limits, ReadXdr, ScVal, SorobanAuthorizationEntry,
-    SorobanTransactionData, TransactionEnvelope, TransactionMeta, TransactionResult, WriteXdr,
+    HostFunction, InvokeContractArgs, LedgerEntryData, LedgerEntryExt, LedgerKey, LedgerKeyAccount,
+    Limits, ReadXdr, ScVal, SorobanAuthorizationEntry, SorobanTransactionData, TransactionEnvelope,
+    TransactionMeta, TransactionResult, TransactionV1Envelope, VecM, WriteXdr,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +32,19 @@ pub enum RpcError {
     Decode { method: &'static str, detail: String },
     #[error("RPC serves network `{actual}`, but this process is pinned to {expected}")]
     WrongNetwork { expected: Network, actual: String },
+    #[error("simulation refused the call: {0}")]
+    SimulationRefused(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RpcClientError {
+    #[error("RPC URL is not a valid URL")]
+    InvalidUrl,
+    /// The URL is not echoed: provider URLs often embed an API key.
+    #[error("RPC URL must use https unless it points at this host")]
+    Insecure,
+    #[error("building the HTTP client")]
+    Build(#[source] reqwest::Error),
 }
 
 #[derive(Clone, Debug)]
@@ -149,11 +164,29 @@ pub enum SimulationOutcome {
 }
 
 impl RpcClient {
-    pub fn new(url: &str, request_timeout: Duration) -> Result<Self, reqwest::Error> {
+    /// Plain `http` is accepted only for a node on this host: across a
+    /// network, whoever sits on the path could forge ledger reads and answers
+    /// about what was included.
+    pub fn new(url: &str, request_timeout: Duration) -> Result<Self, RpcClientError> {
+        let parsed = reqwest::Url::parse(url).map_err(|_| RpcClientError::InvalidUrl)?;
+        let loopback = parsed.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        match parsed.scheme() {
+            "https" => {}
+            "http" if loopback => {}
+            _ => return Err(RpcClientError::Insecure),
+        }
         let http = reqwest::Client::builder()
             .tls_backend_preconfigured(tls_config())
             .timeout(request_timeout)
-            .build()?;
+            .build()
+            .map_err(RpcClientError::Build)?;
         Ok(Self { http, url: Arc::from(url) })
     }
 
@@ -341,6 +374,50 @@ impl RpcClient {
         }
     }
 
+    /// The value a read-only contract call returns, by simulation; no key
+    /// signs anything. `source` must be an existing account; its sequence
+    /// number only makes the simulated transaction well formed.
+    pub async fn read_contract(
+        &self,
+        source: &AccountAddress,
+        call: InvokeContractArgs,
+    ) -> Result<Option<ScVal>, RpcError> {
+        const METHOD: &str = "simulateTransaction";
+        let key = LedgerKey::Account(LedgerKeyAccount {
+            account_id: crate::transaction::account_id(source),
+        });
+        let sequence = self
+            .get_ledger_entries(&[key])
+            .await?
+            .iter()
+            .find_map(|record| match &record.data {
+                LedgerEntryData::Account(entry) => Some(entry.seq_num.0),
+                _ => None,
+            })
+            .ok_or_else(|| RpcError::Decode {
+                method: METHOD,
+                detail: format!("source account {source} does not exist"),
+            })?;
+        let tx = crate::soroban::invocation_transaction(
+            source,
+            sequence + 1,
+            HostFunction::InvokeContract(call),
+            vec![],
+            100,
+            u64::MAX,
+        )
+        .map_err(|e| RpcError::Decode { method: METHOD, detail: e.to_string() })?;
+        let envelope =
+            TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: VecM::default() });
+        match self.simulate_transaction(&envelope, AuthMode::Record).await? {
+            SimulationOutcome::Succeeded(simulation) => Ok(simulation.result),
+            SimulationOutcome::Failed { error, .. } => Err(RpcError::SimulationRefused(error)),
+            SimulationOutcome::RestoreRequired { .. } => {
+                Err(RpcError::SimulationRefused("the contract's state is archived".to_owned()))
+            }
+        }
+    }
+
     pub async fn simulate_transaction(
         &self,
         envelope: &TransactionEnvelope,
@@ -442,12 +519,12 @@ impl RpcClient {
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
-            .map_err(|source| RpcError::Transport { method, source })?;
+            .map_err(|source| RpcError::Transport { method, source: source.without_url() })?;
         let envelope: Envelope<T> = response.json().await.map_err(|source| {
             if source.is_decode() {
                 RpcError::Decode { method, detail: source.to_string() }
             } else {
-                RpcError::Transport { method, source }
+                RpcError::Transport { method, source: source.without_url() }
             }
         })?;
         match (envelope.result, envelope.error) {
@@ -496,6 +573,22 @@ pub fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_plain_http_is_accepted_only_for_this_host() {
+        let timeout = Duration::from_secs(1);
+        for url in [
+            "http://127.0.0.1:8000",
+            "http://localhost:8000/rpc",
+            "http://[::1]:8000",
+            "https://rpc.example",
+        ] {
+            assert!(RpcClient::new(url, timeout).is_ok(), "{url}");
+        }
+        for url in ["http://rpc.example", "http://10.0.0.5:8000", "ftp://127.0.0.1"] {
+            assert!(matches!(RpcClient::new(url, timeout), Err(RpcClientError::Insecure)), "{url}");
+        }
+    }
     use super::*;
 
     #[test]

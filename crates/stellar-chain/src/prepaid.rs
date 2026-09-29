@@ -204,6 +204,11 @@ impl PrepaidDeployment {
     }
 
     #[must_use]
+    pub fn get_config_call(&self) -> InvokeContractArgs {
+        call(self.contract, "get_config", vec![])
+    }
+
+    #[must_use]
     pub fn charge_call(&self, charge: &ChargeRequest) -> InvokeContractArgs {
         call(self.contract, "charge", vec![charge_val(charge)])
     }
@@ -379,6 +384,48 @@ pub fn settled_in(meta: &TransactionMeta, contract: &[u8; 32]) -> Vec<SettledEnt
         _ => Vec::new(),
     };
     events.into_iter().filter_map(|event| settled_entries(event, contract)).flatten().collect()
+}
+
+/// The contract's current roles and asset, as `get_config` returns them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractConfig {
+    pub admin: AccountAddress,
+    pub operator: AccountAddress,
+    pub seller: AccountAddress,
+    pub treasury: AccountAddress,
+    pub usdc: [u8; 32],
+    pub paused: bool,
+}
+
+/// Decodes `get_config`'s return value; `None` for any other shape.
+#[must_use]
+pub fn contract_config(value: &ScVal) -> Option<ContractConfig> {
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    let account = |name: &[u8]| match field(name)? {
+        ScVal::Address(ScAddress::Account(account)) => {
+            Some(crate::transaction::address_of(account))
+        }
+        _ => None,
+    };
+    let usdc = match field(b"usdc")? {
+        ScVal::Address(ScAddress::Contract(ContractId(Hash(id)))) => *id,
+        _ => return None,
+    };
+    let ScVal::Bool(paused) = field(b"paused")? else { return None };
+    Some(ContractConfig {
+        admin: account(b"admin")?,
+        operator: account(b"operator")?,
+        seller: account(b"seller")?,
+        treasury: account(b"treasury")?,
+        usdc,
+        paused: *paused,
+    })
 }
 
 /// The balance and last consumed charge sequence in an account entry read

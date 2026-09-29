@@ -12,7 +12,7 @@ use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::issuance;
 use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LatestLedger, LedgerApi};
-use fermah_pay_stellar_gateway::server::serve;
+use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::Store;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
@@ -110,7 +110,11 @@ pub async fn start_with<L: LatestLedger>(
         network,
         DepositPolicy { authorization_validity_ledgers: AUTHORIZATION_VALIDITY_LEDGERS },
     );
-    tokio::spawn(serve(listener, store, network, ledger_api, async {
+    let limits = ServerLimits {
+        max_concurrent_requests: 64,
+        request_timeout: std::time::Duration::from_secs(30),
+    };
+    tokio::spawn(serve(listener, store, network, ledger_api, limits, async {
         let _ = stop.await;
     }));
     Harness { addr, owner, api, issuer, ledger, _shutdown: shutdown }

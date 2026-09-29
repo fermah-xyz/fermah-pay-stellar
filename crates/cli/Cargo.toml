@@ -33,6 +33,7 @@ getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+stellar-strkey.workspace = true
 time.workspace = true
 tokio.workspace = true
 tonic.workspace = true
