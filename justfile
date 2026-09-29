@@ -11,7 +11,7 @@ db-down:
 
 # Apply migrations to the local database.
 migrate: db-up
-    cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin -- --database-url {{database_url}} migrate
+    SQLX_OFFLINE=true cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-admin -- --database-url {{database_url}} migrate
 
 # Refresh the offline query cache after changing SQL or migrations.
 sqlx-prepare: migrate

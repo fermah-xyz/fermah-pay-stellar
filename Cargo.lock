@@ -1126,6 +1126,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "clap",
+ "fermah-pay-stellar-chain",
  "fermah-pay-stellar-domain",
  "fermah-pay-stellar-proto",
  "getrandom 0.4.3",

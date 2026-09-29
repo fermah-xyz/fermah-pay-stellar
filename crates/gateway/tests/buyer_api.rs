@@ -555,7 +555,7 @@ async fn privilege_map(owner: &PgPool) -> std::collections::BTreeSet<(String, St
         "SELECT r.role, c.relname::text, p.privilege
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'pay_stellar'
-         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_issuer')) AS r(role)
+         CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_issuer'), ('pay_stellar_worker')) AS r(role)
          CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) AS p(privilege)
          WHERE c.relkind = 'r'
            AND CASE
@@ -588,6 +588,9 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_issuer", "products", "SELECT"),
         ("pay_stellar_issuer", "seller_deployments", "INSERT"),
         ("pay_stellar_issuer", "seller_deployments", "SELECT"),
+        ("pay_stellar_worker", "submissions", "INSERT"),
+        ("pay_stellar_worker", "submissions", "SELECT"),
+        ("pay_stellar_worker", "submissions", "UPDATE"),
     ]
     .into_iter()
     .map(|(r, t, p)| (r.to_owned(), t.to_owned(), p.to_owned()))

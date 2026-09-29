@@ -8,13 +8,14 @@ edited.
 
 ## Roles
 
-The first migration creates two group roles that cannot log in and grants
-them only what their process needs:
+The migrations create group roles that cannot log in and grant them only
+what their process needs:
 
 | Group role | Granted to | Privileges |
 |---|---|---|
 | `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; `SELECT`, `INSERT` on buyers |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys |
+| `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; the signed envelope, hashes and sequence of a recorded submission cannot be changed, and a final outcome cannot be rewritten |
 
 Group roles are cluster-wide. If several databases on one server host this
 schema, they share the role names; the migration tolerates the roles already
