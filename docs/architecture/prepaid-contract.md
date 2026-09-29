@@ -143,7 +143,10 @@ this contract.
 Every entry the contract writes, and the contract instance on every state
 change, has its time-to-live extended to about 30 days once fewer than about
 7 days remain, so an account that keeps being charged or funded is not
-archived between uses. An account that is only read is not extended.
+archived between uses. An account that is only read is not extended. An
+account idle long enough to be archived is restored by the settlement worker
+before its next deposit or charge; see
+[settlement](transactions.md#settlement).
 
 ## Building
 

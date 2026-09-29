@@ -51,10 +51,16 @@ includes it ends `EXPIRED`; prepare a new one.
 | `AWAITING_SIGNATURE` | no | waiting for the signed entry |
 | `SIGNED` | no | verified; waiting to be submitted |
 | `SUBMITTED` | no | in a transaction sent to the network |
-| `CONFIRMED` | yes | included; `amount` added to the available balance |
-| `FAILED` | yes | refused or failed on-chain; nothing credited |
-| `EXPIRED` | yes | the authorization lapsed before inclusion |
-| `QUARANTINED` | yes | the outcome could not be established; an operator reviews it |
+| `CONFIRMED` | yes | processed by the contract; `amount` added to the available balance |
+| `FAILED` | yes | included as failed, and the contract never processed it |
+| `EXPIRED` | yes | the authorization lapsed and the contract never processed it |
+
+A deposit whose transaction fails or is not included stays `SUBMITTED` (or
+returns to `SIGNED` to be sent again) until its outcome is certain: the
+signed entry could still be included by another transaction until its
+expiration ledger, so `FAILED` and `EXPIRED` are only decided afterwards, from
+the contract's own record of the deposit. A deposit the buyer includes
+through a transaction of their own is confirmed the same way.
 
 ## Charges
 

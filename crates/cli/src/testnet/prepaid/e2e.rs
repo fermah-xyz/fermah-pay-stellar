@@ -156,7 +156,6 @@ impl Context {
                 inclusion_fee: self.policy.inclusion_fee,
                 resource_fee_margin_percent: 20,
                 validity: Duration::from_secs(60),
-                ingestion_margin: Duration::from_secs(30),
             },
         );
         let worker = Worker::new(

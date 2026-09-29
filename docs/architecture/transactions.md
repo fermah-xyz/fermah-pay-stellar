@@ -74,8 +74,13 @@ schema in [`0002_submissions.sql`](../../db/migrations/0002_submissions.sql)):
 | State | Evidence |
 |---|---|
 | `succeeded` / `failed` | the network returns the transaction for the envelope's hash |
-| `expired` | the validity window has passed (plus an ingestion margin), the hash is not found, and the source's sequence never reached the envelope's sequence: it can never be included |
-| `quarantined` | the window has passed and the hash is not found, but the source's sequence was consumed: the evidence contradicts itself and an operator decides |
+| `expired` | the RPC node has ingested a ledger that closed after the envelope's upper time bound, still does not find its hash, retains history back to when the envelope was recorded, and reads the source's sequence below the envelope's at that ledger or later: it was never included and never can be |
+| `quarantined` | the node is past the window and does not find the hash, but the source's sequence was consumed, or the node's history does not reach back far enough to tell |
+
+The local clock is never evidence of expiry: a node that lags behind the
+network would report an included envelope as not found and the source's
+sequence as unconsumed, both consistently stale. Every "not found" is
+therefore judged at the ledger the node has actually ingested.
 
 - **Final means final.** A database trigger refuses any change to a submission
   that is no longer in flight, so a later RPC answer cannot rewrite an
@@ -103,16 +108,23 @@ outcomes:
   with a charge in flight or in quarantine gets no new batch until it is
   resolved.
 - **A lapsed authorization decides, not a missing transaction.** When a
-  submission fails or expires, the authorizations in its broadcast envelope
-  could still be included by someone else's transaction until their
-  expiration ledger. So the worker waits for them to lapse and then reads the
-  contract's own state: for a deposit, the marker the contract writes when it
-  processes that deposit ID; for a charge, the account's last consumed
-  sequence. A deposit whose marker exists is credited; a charge whose sequence
+  submission fails, expires or is quarantined, the authorizations in its
+  broadcast envelope could still be included by someone else's transaction
+  until their expiration ledger. So the worker waits for them to lapse and
+  then reads the contract's own state, and uses the read only if the node
+  served it at a ledger past that expiration: for a deposit, the marker the
+  contract writes when it processes that deposit ID; for a charge, the
+  account's last consumed sequence. A deposit whose marker exists is
+  credited, otherwise it ends `failed` or `expired`; a charge whose sequence
   is still free is admitted again for the next batch; a charge whose sequence
   was consumed outside the gateway's batch is quarantined. A deposit whose
   transaction expired while the buyer's signature is still valid is sent
   again with the same signed entry, which its nonce lets land at most once.
+- **Archived state is restored, not skipped.** A buyer account idle long
+  enough for its entry to be archived makes simulation of any call touching
+  it ask for a restore. The worker records and sends the restore transaction
+  the simulation describes, through the same engine, and retries the refused
+  deposit or batch after a pause.
 
 | Contract outcome | Charge becomes | Available balance |
 |---|---|---|

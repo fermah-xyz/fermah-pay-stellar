@@ -38,7 +38,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, State};
+use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
 
 /// The contract's batch limit.
 pub const MAX_BATCH: usize = 100;
@@ -155,6 +155,11 @@ fn decision_for(outcome: Outcome) -> ChargeDecision {
     }
 }
 
+struct Snapshot {
+    entries: HashMap<LedgerKey, LedgerEntryData>,
+    ledger: i64,
+}
+
 struct DepositRow {
     id: Uuid,
     deposit_id: [u8; 32],
@@ -255,16 +260,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         self.engine.chain().latest_ledger().await.map(i64::from).map_err(WorkerError::Chain)
     }
 
-    async fn existing(
-        &self,
-        keys: Vec<LedgerKey>,
-    ) -> Result<HashMap<LedgerKey, LedgerEntryData>, WorkerError> {
-        if keys.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let records =
-            self.engine.chain().ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
-        Ok(records.into_iter().map(|record| (record.key, record.data)).collect())
+    /// The entries that exist among `keys`, and the ledger the node read
+    /// them at: an absent entry is evidence only as of that ledger.
+    async fn existing(&self, keys: Vec<LedgerKey>) -> Result<Snapshot, WorkerError> {
+        let read = self.engine.chain().ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
+        Ok(Snapshot {
+            entries: read.entries.into_iter().map(|record| (record.key, record.data)).collect(),
+            ledger: i64::from(read.latest_ledger),
+        })
     }
 
     // ---- applying outcomes -------------------------------------------------
@@ -358,18 +361,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     }
                 }
             }
-            State::Quarantined => rows
-                .iter()
-                .map(|row| {
-                    let reason = "the submission carrying it was quarantined".to_owned();
-                    (row.id, ChargeDecision::Quarantine { outcome: None, reason })
-                })
-                .collect(),
-            State::Failed | State::Expired => {
+            // Not applied by this submission, or unknown whether it was: the
+            // account's consumed sequence decides, read at a ledger after
+            // every authorization the envelope carried has lapsed.
+            State::Failed | State::Expired | State::Quarantined => {
                 let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
-                if self.latest_ledger().await? <= horizon {
-                    return Ok(());
-                }
                 let deployment = deployment(
                     &first.contract_address,
                     &first.usdc_address,
@@ -381,11 +377,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                         .collect::<Result<HashSet<_>, _>>()?;
                 let keys: Vec<LedgerKey> =
                     owners.iter().map(|owner| deployment.account_key(owner)).collect();
-                let entries = self.existing(keys).await?;
+                let snapshot = self.existing(keys).await?;
+                if snapshot.ledger <= horizon {
+                    return Ok(());
+                }
                 rows.iter()
                     .map(|row| {
                         let owner = address(&row.wallet_address)?;
-                        let consumed = match entries.get(&deployment.account_key(&owner)) {
+                        let consumed = match snapshot.entries.get(&deployment.account_key(&owner)) {
                             None => 0,
                             Some(entry) => account_state(entry).map(|(_, seq)| seq)
                                 .ok_or(WorkerError::Corrupt("account entry does not decode"))?,
@@ -396,13 +395,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                             row.id,
                             if consumed < sequence {
                                 ChargeDecision::Requeue(format!(
-                                    "submission {submission} was not applied; sequence {sequence} is still free"
+                                    "submission {submission} did not apply it; sequence {sequence} is still free"
                                 ))
                             } else {
                                 ChargeDecision::Quarantine {
                                     outcome: None,
                                     reason: format!(
-                                        "submission {submission} was not applied, yet the account has consumed sequence {consumed}"
+                                        "submission {submission} did not show it applied, yet the account has consumed sequence {consumed}"
                                     ),
                                 }
                             },
@@ -529,45 +528,36 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         match resolution.state {
             State::Installed => Ok(()),
             State::Succeeded => self.confirm(deposit.id).await,
-            State::Quarantined => {
-                tracing::error!(deposit_id = %deposit.id, "deposit quarantined");
-                self.close_deposit(
-                    deposit.id,
-                    "quarantined",
-                    "the submission carrying it was quarantined",
-                )
-                .await
+            // Never included, and the buyer's signature is still good: the
+            // same entry can be sent again. Its nonce makes at most one
+            // inclusion possible, so a node that still sees the signature as
+            // valid only costs a refused send.
+            State::Expired if self.latest_ledger().await? <= deposit.expiration_ledger => {
+                self.resend_deposit(deposit.id).await
             }
-            State::Expired | State::Failed => {
-                if self.latest_ledger().await? <= deposit.expiration_ledger {
-                    if resolution.state == State::Expired {
-                        // Never included, and the buyer's signature is still
-                        // good: the same entry can be sent again. Its nonce
-                        // makes at most one inclusion possible.
-                        return self.resend_deposit(deposit.id).await;
-                    }
-                    // Included but failed: the entry may still be included
-                    // elsewhere until it lapses, so the outcome waits.
-                    return Ok(());
-                }
+            // Failed, expired, or of unknown fate: once the signature has
+            // lapsed the contract's own marker decides; until then the entry
+            // may still be included elsewhere, and `conclude` waits.
+            State::Expired | State::Failed | State::Quarantined => {
                 let closing = if resolution.state == State::Failed { "failed" } else { "expired" };
                 self.conclude(&[deposit], closing).await
             }
         }
     }
 
-    /// Decides deposits whose authorization has lapsed from the contract's
-    /// deposit marker: credited if it exists, `closing` otherwise.
+    /// Decides deposits from the contract's deposit marker: credited if it
+    /// exists, `closing` if it is absent at a ledger after the buyer's
+    /// authorization lapsed. A deposit whose authorization the reading node
+    /// has not yet seen lapse stays undecided.
     async fn conclude(&self, deposits: &[DepositRow], closing: &str) -> Result<(), WorkerError> {
         let keys =
             deposits.iter().map(|d| d.deployment.deposit_key(&d.owner, &d.deposit_id)).collect();
-        let markers = self.existing(keys).await?;
+        let snapshot = self.existing(keys).await?;
         for deposit in deposits {
-            if markers
-                .contains_key(&deposit.deployment.deposit_key(&deposit.owner, &deposit.deposit_id))
-            {
+            let key = deposit.deployment.deposit_key(&deposit.owner, &deposit.deposit_id);
+            if snapshot.entries.contains_key(&key) {
                 self.confirm(deposit.id).await?;
-            } else {
+            } else if snapshot.ledger > deposit.expiration_ledger {
                 self.close_deposit(
                     deposit.id,
                     closing,
@@ -729,7 +719,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let function = HostFunction::InvokeContract(deployment.deposit_call(&intent));
         let prepared = match self.engine.prepare(Kind::Deposit, function, vec![entry]).await {
             Ok(prepared) => prepared,
-            Err(error @ (EngineError::SimulationFailed(_) | EngineError::RestoreRequired)) => {
+            Err(EngineError::RestoreRequired(restore)) => {
+                return self.restore(&restore, row.id).await;
+            }
+            Err(error @ EngineError::SimulationFailed(_)) => {
                 tracing::warn!(deposit_id = %row.id, error = %error, "network refused the deposit in simulation");
                 self.note_deposit(row.id, &error.to_string()).await?;
                 self.set_aside(row.id);
@@ -761,6 +754,27 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             return Ok(None);
         }
         tx.commit().await.map_err(store("commit deposit submission"))?;
+        Ok(Some(prepared.id))
+    }
+
+    /// Sends the restore of the archived entries a simulation named, e.g.
+    /// the account of a buyer idle long enough for its entry to expire. The
+    /// refused work is set aside until the next retry, by which time the
+    /// restore has usually landed; if it failed, simulation asks again.
+    async fn restore(&self, restore: &Restore, refused: Uuid) -> Result<Option<Uuid>, WorkerError> {
+        let prepared = match self.engine.prepare_restore(restore).await {
+            Ok(prepared) => prepared,
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
+        match self.engine.record(&mut conn, &prepared).await {
+            Ok(_) => {}
+            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        tracing::info!(submission_id = %prepared.id, refused = %refused, "restoring archived ledger entries");
+        self.set_aside(refused);
         Ok(Some(prepared.id))
     }
 
@@ -871,7 +885,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let function = HostFunction::InvokeContract(deployment.charge_batch_call(&requests));
         let prepared = match self.engine.prepare(Kind::ChargeBatch, function, vec![signed]).await {
             Ok(prepared) => prepared,
-            Err(error @ (EngineError::SimulationFailed(_) | EngineError::RestoreRequired)) => {
+            Err(EngineError::RestoreRequired(restore)) => {
+                return self.restore(&restore, target.seller_deployment_id).await;
+            }
+            Err(error @ EngineError::SimulationFailed(_)) => {
                 tracing::warn!(
                     seller_deployment_id = %target.seller_deployment_id,
                     error = %error,

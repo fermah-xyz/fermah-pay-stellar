@@ -8,9 +8,12 @@
 //! - an acknowledgement or error from `sendTransaction` never settles the
 //!   outcome: a resend of an envelope that already landed is refused, so a
 //!   refusal says nothing about whether the first send was included;
-//! - an envelope is `expired` only when its validity window has passed and
-//!   the source account's sequence never reached the envelope's sequence,
-//!   which together prove it can never be included;
+//! - an envelope is `expired` only when the RPC node has ingested a ledger that
+//!   closed after the envelope's upper time bound, still does not find it,
+//!   retains history back to when the envelope was recorded, and reads the
+//!   source account's sequence below the envelope's at that ledger or later:
+//!   together these prove it was never included and never can be. The local
+//!   clock proves nothing here, because the node may lag behind the network;
 //! - if the sequence was reached but the envelope is not found, the evidence
 //!   contradicts itself and the submission is `quarantined` for an operator.
 //!
@@ -28,8 +31,8 @@ use fermah_pay_stellar_chain::rpc::{
 use fermah_pay_stellar_chain::soroban::{self, AssemblyError};
 use fermah_pay_stellar_chain::stellar_xdr::{
     FeeBumpTransactionInnerTx, HostFunction, Limits, OperationBody, ReadXdr, ScVal,
-    SorobanAuthorizationEntry, SorobanCredentials, TransactionEnvelope, TransactionV1Envelope,
-    VecM, WriteXdr,
+    SorobanAuthorizationEntry, SorobanCredentials, SorobanTransactionData, Transaction,
+    TransactionEnvelope, TransactionV1Envelope, VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::{self, SigningError};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
@@ -37,7 +40,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub use chain::Chain;
+pub use chain::{Chain, SourceSequence};
 
 /// Where the engine reads the current time; tests control it to reach the
 /// end of a validity window without waiting.
@@ -59,6 +62,7 @@ pub enum Kind {
     Deposit,
     ChargeBatch,
     Withdrawal,
+    Restore,
 }
 
 impl Kind {
@@ -67,6 +71,7 @@ impl Kind {
             Self::Deposit => "deposit",
             Self::ChargeBatch => "charge_batch",
             Self::Withdrawal => "withdrawal",
+            Self::Restore => "restore",
         }
     }
 }
@@ -124,9 +129,6 @@ pub struct Policy {
     pub resource_fee_margin_percent: u8,
     /// How long an envelope may be included after it is built.
     pub validity: Duration,
-    /// Time after the validity window for ledgers to close and the RPC to
-    /// ingest them, before a missing envelope counts as never included.
-    pub ingestion_margin: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -138,7 +140,7 @@ pub enum EngineError {
     #[error("simulation refused the transaction: {0}")]
     SimulationFailed(String),
     #[error("archived ledger state must be restored before this call")]
-    RestoreRequired,
+    RestoreRequired(Box<Restore>),
     #[error("assembling the transaction")]
     Assembly(#[source] AssemblyError),
     #[error("signing the transaction")]
@@ -155,6 +157,21 @@ pub enum EngineError {
     UnknownSubmission(Uuid),
     #[error("stored submission violates an invariant: {0}")]
     Corrupt(&'static str),
+}
+
+/// What a simulation that needs archived state restored returned: the
+/// footprint to restore and its resource fee.
+#[derive(Clone, Debug)]
+pub struct Restore {
+    pub transaction_data: SorobanTransactionData,
+    pub min_resource_fee: i64,
+}
+
+struct Slot {
+    source: AccountAddress,
+    sequence: i64,
+    valid_until: OffsetDateTime,
+    valid_until_unix: u64,
 }
 
 /// A signed, fee-bumped envelope not yet recorded.
@@ -206,6 +223,7 @@ struct Row {
     source: AccountAddress,
     sequence: i64,
     valid_until: OffsetDateTime,
+    created_at: OffsetDateTime,
     outer_hash: [u8; 32],
     envelope_xdr: String,
     ledger: Option<i32>,
@@ -285,32 +303,14 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         function: HostFunction,
         auth: Vec<SorobanAuthorizationEntry>,
     ) -> Result<Prepared, EngineError> {
-        let source = self.keys.source.address();
-        if let Some(id) = self.in_flight(&source).await? {
-            return Err(EngineError::SourceBusy { account: source, id });
-        }
-        let current = self
-            .chain
-            .account_sequence(&source)
-            .await
-            .map_err(EngineError::Chain)?
-            .ok_or_else(|| EngineError::SourceMissing(source.clone()))?;
-        let sequence = current + 1;
-        let valid_until_unix = self
-            .clock
-            .now()
-            .unix_timestamp()
-            .saturating_add(i64::try_from(self.policy.validity.as_secs()).unwrap_or(i64::MAX));
-        let valid_until = OffsetDateTime::from_unix_timestamp(valid_until_unix)
-            .map_err(|_| EngineError::Corrupt("validity window beyond the representable range"))?;
-
+        let slot = self.next_slot().await?;
         let unassembled = soroban::invocation_transaction(
-            &source,
-            sequence,
+            &slot.source,
+            slot.sequence,
             function,
             auth,
             self.policy.inclusion_fee,
-            u64::try_from(valid_until_unix).unwrap_or(0),
+            slot.valid_until_unix,
         )
         .map_err(EngineError::Assembly)?;
         let for_simulation = TransactionEnvelope::Tx(TransactionV1Envelope {
@@ -323,8 +323,11 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                 SimulationOutcome::Failed { error, .. } => {
                     return Err(EngineError::SimulationFailed(error));
                 }
-                SimulationOutcome::RestoreRequired { .. } => {
-                    return Err(EngineError::RestoreRequired);
+                SimulationOutcome::RestoreRequired { transaction_data, min_resource_fee } => {
+                    return Err(EngineError::RestoreRequired(Box::new(Restore {
+                        transaction_data: *transaction_data,
+                        min_resource_fee,
+                    })));
                 }
             };
         let tx = soroban::assemble(
@@ -334,6 +337,58 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             self.policy.resource_fee_margin_percent,
         )
         .map_err(EngineError::Assembly)?;
+        self.seal(kind, slot, tx)
+    }
+
+    /// Builds the transaction that restores the archived entries a refused
+    /// simulation named, with the resources that simulation returned. It is
+    /// recorded and sent like any other submission.
+    pub async fn prepare_restore(&self, restore: &Restore) -> Result<Prepared, EngineError> {
+        let slot = self.next_slot().await?;
+        let unassembled = soroban::restore_transaction(
+            &slot.source,
+            slot.sequence,
+            self.policy.inclusion_fee,
+            slot.valid_until_unix,
+        );
+        let tx = soroban::assemble(
+            unassembled,
+            restore.transaction_data.clone(),
+            restore.min_resource_fee,
+            self.policy.resource_fee_margin_percent,
+        )
+        .map_err(EngineError::Assembly)?;
+        self.seal(Kind::Restore, slot, tx)
+    }
+
+    async fn next_slot(&self) -> Result<Slot, EngineError> {
+        let source = self.keys.source.address();
+        if let Some(id) = self.in_flight(&source).await? {
+            return Err(EngineError::SourceBusy { account: source, id });
+        }
+        let current = self
+            .chain
+            .account_sequence(&source)
+            .await
+            .map_err(EngineError::Chain)?
+            .sequence
+            .ok_or_else(|| EngineError::SourceMissing(source.clone()))?;
+        let valid_until_unix = self
+            .clock
+            .now()
+            .unix_timestamp()
+            .saturating_add(i64::try_from(self.policy.validity.as_secs()).unwrap_or(i64::MAX));
+        let valid_until = OffsetDateTime::from_unix_timestamp(valid_until_unix)
+            .map_err(|_| EngineError::Corrupt("validity window beyond the representable range"))?;
+        Ok(Slot {
+            source,
+            sequence: current + 1,
+            valid_until,
+            valid_until_unix: u64::try_from(valid_until_unix).unwrap_or(0),
+        })
+    }
+
+    fn seal(&self, kind: Kind, slot: Slot, tx: Transaction) -> Result<Prepared, EngineError> {
         let inner_hash =
             transaction::transaction_hash(&tx, self.network).map_err(EngineError::Signing)?;
         let TransactionEnvelope::Tx(inner) =
@@ -352,14 +407,13 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let envelope_xdr = envelope
             .to_xdr_base64(Limits::none())
             .map_err(|e| EngineError::Assembly(AssemblyError::Encode(e.to_string())))?;
-
         Ok(Prepared {
             id: Uuid::now_v7(),
             kind,
-            source,
+            source: slot.source,
             fee_source: self.keys.fee_source.address(),
-            sequence,
-            valid_until,
+            sequence: slot.sequence,
+            valid_until: slot.valid_until,
             inner_hash,
             outer_hash,
             envelope_xdr,
@@ -460,25 +514,42 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         match status {
             TransactionStatus::Success(tx) => self.finish(id, State::Succeeded, &tx).await,
             TransactionStatus::Failed(tx) => self.finish(id, State::Failed, &tx).await,
-            TransactionStatus::NotFound => {
-                let closed = row.valid_until
-                    + time::Duration::try_from(self.policy.ingestion_margin)
-                        .map_err(|_| EngineError::Corrupt("ingestion margin out of range"))?;
-                if self.clock.now() <= closed {
+            TransactionStatus::NotFound { node } => {
+                if node.latest_close_time <= row.valid_until.unix_timestamp() {
                     return resolution_of(&row);
+                }
+                if node.oldest_close_time > row.created_at.unix_timestamp() {
+                    let reason = format!(
+                        "envelope {} not found, but the node's history starts after it was recorded",
+                        hex_lower(&row.outer_hash)
+                    );
+                    return self.close(id, State::Quarantined, Some(&reason)).await;
                 }
                 match self.chain.account_sequence(&row.source).await {
                     Err(error) => {
                         self.note(id, &format!("sequence query failed: {error}")).await?;
                         resolution_of(&row)
                     }
-                    Ok(Some(current)) if current < row.sequence => {
+                    // Read from a node behind the one that did not find the
+                    // envelope: a low sequence there proves nothing.
+                    Ok(read) if read.latest_ledger < node.latest_ledger => {
+                        let note = format!(
+                            "sequence read at ledger {} is behind ledger {}",
+                            read.latest_ledger, node.latest_ledger
+                        );
+                        self.note(id, &note).await?;
+                        resolution_of(&row)
+                    }
+                    Ok(SourceSequence { sequence: Some(current), .. })
+                        if current < row.sequence =>
+                    {
                         self.close(id, State::Expired, None).await
                     }
-                    Ok(current) => {
+                    Ok(read) => {
                         let reason = format!(
-                            "envelope {} not found after its window, but the source sequence is {current:?} (envelope sequence {})",
+                            "envelope {} not found after its window, but the source sequence is {:?} (envelope sequence {})",
                             hex_lower(&row.outer_hash),
+                            read.sequence,
                             row.sequence
                         );
                         self.close(id, State::Quarantined, Some(&reason)).await
@@ -550,8 +621,8 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     async fn load(&self, id: Uuid) -> Result<Row, EngineError> {
         let row = sqlx::query!(
             r#"
-            SELECT state, source_address, sequence, valid_until, outer_hash, envelope_xdr,
-                   ledger, fee_charged, return_value_xdr
+            SELECT state, source_address, sequence, valid_until, created_at, outer_hash,
+                   envelope_xdr, ledger, fee_charged, return_value_xdr
             FROM pay_stellar.submissions
             WHERE id = $1 AND network = $2
             "#,
@@ -570,6 +641,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                 .map_err(|_| EngineError::Corrupt("source address outside the CHECK constraint"))?,
             sequence: row.sequence,
             valid_until: row.valid_until,
+            created_at: row.created_at,
             outer_hash: hash32(row.outer_hash)?,
             envelope_xdr: row.envelope_xdr,
             ledger: row.ledger,

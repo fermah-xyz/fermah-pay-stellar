@@ -59,7 +59,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | seed file of the account that sequences every transaction; no other process may submit from it |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | seed file of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | seed file of the contracts' operator; the worker serves the deployments bound with this operator |
-| Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS`, `PAY_STELLAR_INGESTION_MARGIN_SECS` | a transaction's inclusion window and the wait after it, defaults 60 and 30 |
+| Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 100, default 100 |
 

@@ -10,11 +10,12 @@
 
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use stellar_xdr::{
-    FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt,
+    ExtensionPoint, FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt,
     FeeBumpTransactionInnerTx, HostFunction, InvokeHostFunctionOp, Memo, Operation, OperationBody,
-    Preconditions, SequenceNumber, SorobanAuthorizationEntry, SorobanTransactionData, TimeBounds,
-    TimePoint, Transaction, TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
-    TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, VecM, WriteXdr,
+    Preconditions, RestoreFootprintOp, SequenceNumber, SorobanAuthorizationEntry,
+    SorobanTransactionData, TimeBounds, TimePoint, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
+    TransactionV1Envelope, VecM, WriteXdr,
 };
 
 use sha2::{Digest, Sha256};
@@ -66,6 +67,35 @@ pub fn invocation_transaction(
             .expect("invariant: one operation fits the operation limit"),
         ext: TransactionExt::V0,
     })
+}
+
+/// An unassembled transaction restoring archived entries. Its footprint and
+/// resources come from the simulation that asked for the restore, applied by
+/// [`assemble`]; like every submission it carries a finite upper time bound.
+#[must_use]
+pub fn restore_transaction(
+    source: &AccountAddress,
+    sequence: i64,
+    inclusion_fee: u32,
+    valid_until_unix: u64,
+) -> Transaction {
+    let operation = Operation {
+        source_account: None,
+        body: OperationBody::RestoreFootprint(RestoreFootprintOp { ext: ExtensionPoint::V0 }),
+    };
+    Transaction {
+        source_account: muxed_account(source),
+        fee: inclusion_fee,
+        seq_num: SequenceNumber(sequence),
+        cond: Preconditions::Time(TimeBounds {
+            min_time: TimePoint(0),
+            max_time: TimePoint(valid_until_unix),
+        }),
+        memo: Memo::None,
+        operations: VecM::try_from(vec![operation])
+            .expect("invariant: one operation fits the operation limit"),
+        ext: TransactionExt::V0,
+    }
 }
 
 /// Applies simulated resources. The resource fee is raised by
