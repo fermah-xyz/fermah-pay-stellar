@@ -891,3 +891,72 @@ async fn test_api_role_cannot_create_rows_past_their_initial_state(
     let code = error.as_database_error().unwrap().code().unwrap().into_owned();
     assert_eq!(code, "42501", "{error}");
 }
+
+// ---- ledger binding -------------------------------------------------------
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_binding_follows_a_rotation_only_through_the_audited_sync(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, _) = setup(&h).await;
+    let operator = AccountAddress::from_public_key([21; 32]);
+    let treasury = AccountAddress::from_public_key([22; 32]);
+
+    // Nothing but the function may change a binding.
+    let error = sqlx::query("UPDATE pay_stellar.ledger_contracts SET operator_address = $1")
+        .bind(operator.as_str())
+        .execute(&h.issuer)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    for pool in [&h.api] {
+        let error = sqlx::query("SELECT pay_stellar.sync_ledger_binding($1, $2, $3, 'x')")
+            .bind(t.deployment_id)
+            .bind(operator.as_str())
+            .bind(treasury.as_str())
+            .execute(pool)
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    }
+
+    let changed = issuance::sync_ledger_binding(
+        &h.issuer,
+        t.deployment_id,
+        &operator,
+        &treasury,
+        "get_config",
+    )
+    .await
+    .unwrap();
+    let again = issuance::sync_ledger_binding(
+        &h.issuer,
+        t.deployment_id,
+        &operator,
+        &treasury,
+        "get_config",
+    )
+    .await
+    .unwrap();
+    assert!(changed && !again);
+    let bound = issuance::ledger_binding(&h.issuer, t.deployment_id).await.unwrap();
+    assert_eq!((bound.operator, bound.treasury), (operator, treasury.clone()));
+    let audit: Vec<(String, String)> = sqlx::query_as(
+        "SELECT previous_treasury, current_treasury FROM pay_stellar.ledger_binding_changes",
+    )
+    .fetch_all(&h.owner)
+    .await
+    .unwrap();
+    assert_eq!(audit, [(treasury_of_setup(), treasury.as_str().to_owned())]);
+    let error = sqlx::query("DELETE FROM pay_stellar.ledger_binding_changes")
+        .execute(&h.owner)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("append-only"), "{error}");
+}
+
+fn treasury_of_setup() -> String {
+    treasury().as_str().to_owned()
+}

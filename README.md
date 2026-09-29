@@ -50,7 +50,15 @@ docs/                 architecture, API, quickstart, self-hosting, evidence
 
 Requirements: Rust (the pinned toolchain in `rust-toolchain.toml` installs
 automatically through rustup), Docker, and [`just`](https://github.com/casey/just).
-No `protoc` or other system tools are needed.
+No `protoc` is needed. `just gate` also runs
+[`cargo-machete`](https://github.com/bnjbvr/cargo-machete) 0.9.2 and
+[`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) 0.20.2, and
+`just sqlx-prepare` needs `sqlx-cli` 0.9.0:
+
+```bash
+cargo install cargo-machete@0.9.2 cargo-deny@0.20.2 --locked
+cargo install sqlx-cli@0.9.0 --no-default-features --features rustls,postgres --locked
+```
 
 ```bash
 just db-up     # local PostgreSQL on 127.0.0.1:55433

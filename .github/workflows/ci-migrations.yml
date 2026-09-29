@@ -116,7 +116,10 @@ jobs:
           fi
 
   # Catches a migration that succeeds on an empty database but fails against
-  # the schema the comparison point already has.
+  # the schema the comparison point already has. The tables are empty, so a
+  # migration that fails only on existing rows (a new NOT NULL column without
+  # a default, a constraint existing data violates) is not caught here and
+  # needs review.
   upgrade:
     name: Upgrade comparison point to head
     needs: base

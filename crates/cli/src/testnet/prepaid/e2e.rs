@@ -25,7 +25,7 @@ use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{transaction, usdc};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::{DepositPolicy, LedgerApi};
-use fermah_pay_stellar_gateway::server::serve;
+use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::Store;
 use fermah_pay_stellar_gateway::submission::{Engine, Keys, Policy as EnginePolicy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
@@ -116,7 +116,7 @@ impl Context {
         let deployment =
             issuance::create_seller_deployment(&issuer, product, "testnet", NETWORK).await?;
         let key = issuance::issue_api_key(&issuer, deployment, "end-to-end").await?;
-        let token = key.token.to_string();
+        let token = key.token;
         issuance::bind_ledger_contract(
             &issuer,
             deployment,
@@ -140,7 +140,9 @@ impl Context {
             DepositPolicy { authorization_validity_ledgers: 720 },
         );
         let mut gateway_stop = stopped.clone();
-        let gateway = tokio::spawn(serve(listener, store, NETWORK, ledger, async move {
+        let limits =
+            ServerLimits { max_concurrent_requests: 16, request_timeout: Duration::from_secs(30) };
+        let gateway = tokio::spawn(serve(listener, store, NETWORK, ledger, limits, async move {
             let _ = gateway_stop.wait_for(|stop| *stop).await;
         }));
         let engine = Engine::new(

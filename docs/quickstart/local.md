@@ -20,7 +20,8 @@ choose real secrets anywhere else):
 docker compose -f deploy/local/compose.yaml exec -T postgres \
   psql -U pay_stellar_owner -d pay_stellar -v ON_ERROR_STOP=1 -c "
     CREATE ROLE pay_stellar_gateway LOGIN PASSWORD 'gateway-local' IN ROLE pay_stellar_api;
-    CREATE ROLE pay_stellar_admin   LOGIN PASSWORD 'admin-local'   IN ROLE pay_stellar_issuer;"
+    CREATE ROLE pay_stellar_admin   LOGIN PASSWORD 'admin-local'   IN ROLE pay_stellar_issuer;
+    GRANT CONNECT ON DATABASE pay_stellar TO pay_stellar_gateway, pay_stellar_admin;"
 ```
 
 ## 2. Provision a seller and an API key

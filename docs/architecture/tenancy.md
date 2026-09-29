@@ -55,8 +55,10 @@ endpoint reachable without a key.
 
 | Process | Database role | Can | Cannot |
 |---|---|---|---|
-| Gateway (`fermah-pay-stellar-gateway`) | member of `pay_stellar_api` | authenticate keys; create and read buyers | update or delete buyers; create or revoke keys; read key labels |
-| Issuer (`fermah-pay-stellar-admin`) | member of `pay_stellar_issuer` | create products, deployments and keys; revoke keys | delete keys; touch buyers |
+| Gateway (`fermah-pay-stellar-gateway`) | member of `pay_stellar_api` | authenticate keys; create and read buyers; create deposits and charges in their initial state; debit a buyer's available balance when admitting a charge | change a buyer's wallet or credit a balance; move a deposit or charge past its initial state; create or revoke keys; read key labels |
+| Worker (`fermah-pay-stellar-worker`) | member of `pay_stellar_worker` | record submissions; settle deposits and charges; credit confirmed deposits and refused charges | change amounts, wallets or sequences; leave a final state; touch keys |
+| Issuer (`fermah-pay-stellar-admin`) | member of `pay_stellar_issuer` | create products, deployments and keys; revoke keys; bind a deployment to its ledger contract and follow its role rotations | delete keys or bring a revoked key back; touch buyers, deposits or charges |
+| Operator (`fermah-pay-stellar-admin`) | member of `pay_stellar_operator` | read charges; resolve quarantined charges from on-chain evidence | change any row except through the resolution function |
 | Migrations (`fermah-pay-stellar-admin migrate`) | database owner | change the schema | (runs only during deployment) |
 
 The gateway process therefore cannot mint credentials, and a wallet linked to

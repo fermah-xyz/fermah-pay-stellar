@@ -424,6 +424,44 @@ async fn test_issuer_role_cannot_delete_keys(opts: PgPoolOptions, connect: PgCon
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
+async fn test_revoked_key_cannot_be_brought_back(opts: PgPoolOptions, connect: PgConnectOptions) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let t = h.tenant("alpha", "main", Network::Testnet).await;
+    assert!(issuance::revoke_api_key(&h.issuer, t.key_id).await.unwrap());
+    // The issuer may set `revoked_at`, and only a guard stops it clearing it.
+    let error = sqlx::query("UPDATE pay_stellar.api_keys SET revoked_at = NULL WHERE id = $1")
+        .bind(t.key_id)
+        .execute(&h.issuer)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("is revoked"), "{error}");
+    let status =
+        client(&h).await.get_buyer(authed(by_id(&Uuid::nil().to_string()), &t.token)).await;
+    assert_eq!(status.unwrap_err().code(), Code::Unauthenticated);
+    // Revoking again changes nothing and is not an error.
+    assert!(!issuance::revoke_api_key(&h.issuer, t.key_id).await.unwrap());
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_runtime_roles_cannot_connect_through_public(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    // Group roles are shared by every database on the server; a login role
+    // that belongs to one elsewhere must not reach this database by default.
+    let connectable: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT r, has_database_privilege(r, current_database(), 'CONNECT')
+         FROM unnest(ARRAY['pay_stellar_api', 'pay_stellar_issuer', 'pay_stellar_worker',
+                           'pay_stellar_operator']) AS r",
+    )
+    .fetch_all(&h.owner)
+    .await
+    .unwrap();
+    assert!(connectable.iter().all(|(_, can)| !can), "{connectable:?}");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
 async fn test_issued_key_is_stored_only_as_its_digest(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
@@ -499,6 +537,7 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_issuer", "api_keys", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "UPDATE"),
         ("pay_stellar_issuer", "ledger_contracts", "INSERT"),
+        ("pay_stellar_issuer", "ledger_binding_changes", "SELECT"),
         ("pay_stellar_issuer", "ledger_contracts", "SELECT"),
         ("pay_stellar_issuer", "products", "INSERT"),
         ("pay_stellar_issuer", "products", "SELECT"),

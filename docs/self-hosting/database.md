@@ -28,18 +28,30 @@ contract refuses any charge above the on-chain balance and any reused charge
 sequence or deposit ID, whatever the database says.
 
 Group roles are cluster-wide. If several databases on one server host this
-schema, they share the role names; the migration tolerates the roles already
-existing.
+schema, for example staging and production, they share the role names and
+therefore the table privileges: a login role that is a member of
+`pay_stellar_api` for one database holds the same privileges in the other.
+The migrations revoke the default right of every role to connect to the
+database, so a login role reaches only the databases it is explicitly allowed
+to connect to. Prefer one server per environment all the same.
 
-Create one login role per process and make it a member of its group role:
+Create one login role per process, make it a member of its group role, and
+allow it to connect to this database only:
 
 ```sql
-CREATE ROLE pay_stellar_gateway   LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_api;
-CREATE ROLE pay_stellar_admin     LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_issuer;
+CREATE ROLE pay_stellar_gateway    LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_api;
+CREATE ROLE pay_stellar_admin      LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_issuer;
 CREATE ROLE pay_stellar_settlement LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_worker;
+CREATE ROLE pay_stellar_ops        LOGIN PASSWORD '<secret>' IN ROLE pay_stellar_operator;
+GRANT CONNECT ON DATABASE pay_stellar
+    TO pay_stellar_gateway, pay_stellar_admin, pay_stellar_settlement, pay_stellar_ops;
 ```
 
-Run migrations with the owner of the database, not with either login role.
+Run migrations with the owner of the database, not with any login role. The
+first migration creates the group roles, so the owner needs the `CREATEROLE`
+attribute, or a superuser must create `pay_stellar_api`, `pay_stellar_issuer`,
+`pay_stellar_worker` and `pay_stellar_operator` beforehand; the migrations
+skip roles that already exist.
 Do not grant `pay_stellar_issuer` to the gateway's login role: the gateway
 must not be able to issue keys.
 
@@ -51,7 +63,9 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_NETWORK` | `stellar:testnet` or `stellar:pubnet` |
 | Gateway | `PAY_STELLAR_LISTEN_ADDR` | listen address, default `127.0.0.1:50051` |
 | Gateway | `PAY_STELLAR_DATABASE_MAX_CONNECTIONS` | pool size, default 16, must be at least 1 |
-| Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup |
+| Gateway | `PAY_STELLAR_MAX_CONCURRENT_REQUESTS` | requests processed at once across all connections, default 64; the rest wait |
+| Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |
+| Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup. Must be `https` unless it points at this host |
 | Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
 | Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit signature stays valid, default 720 (about an hour) |
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
@@ -72,3 +86,8 @@ and a pubnet gateway refuses test keys.
 
 The gateway serves plaintext gRPC. Terminate TLS in front of it (for example
 at a load balancer or sidecar) whenever traffic leaves the host.
+
+Every request, authenticated or not, costs the gateway a database lookup of
+its key. The gateway bounds how many it processes at once and for how long,
+but it does not limit requests per client: put a rate limit per client in the
+proxy or load balancer in front of it.

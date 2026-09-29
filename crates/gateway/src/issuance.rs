@@ -167,3 +167,61 @@ pub async fn bind_ledger_contract(
     .map_err(|source| IssuanceError::Query { operation: "insert ledger binding", source })?;
     Ok(())
 }
+
+/// What a deployment is bound to, as the issuer role reads it.
+#[derive(Clone, Debug)]
+pub struct BoundLedger {
+    pub network: Network,
+    pub contract: String,
+    pub usdc: String,
+    pub treasury: AccountAddress,
+    pub operator: AccountAddress,
+}
+
+pub async fn ledger_binding(
+    pool: &PgPool,
+    seller_deployment_id: Uuid,
+) -> Result<BoundLedger, IssuanceError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT network, contract_address, usdc_address, treasury_address, operator_address
+        FROM pay_stellar.ledger_contracts WHERE seller_deployment_id = $1
+        "#,
+        seller_deployment_id,
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|source| IssuanceError::Query { operation: "read ledger binding", source })?
+    .ok_or(IssuanceError::UnknownDeployment)?;
+    let account = |raw: &str| raw.parse().map_err(|_| IssuanceError::UnknownDeployment);
+    Ok(BoundLedger {
+        network: row.network.parse().map_err(|_| IssuanceError::UnknownDeployment)?,
+        contract: row.contract_address,
+        usdc: row.usdc_address,
+        treasury: account(&row.treasury_address)?,
+        operator: account(&row.operator_address)?,
+    })
+}
+
+/// Moves the binding to the operator and treasury the contract now names,
+/// through the database function that records every change. Returns whether
+/// anything changed. The caller reads `operator` and `treasury` from the
+/// contract; they are never typed in.
+pub async fn sync_ledger_binding(
+    pool: &PgPool,
+    seller_deployment_id: Uuid,
+    operator: &AccountAddress,
+    treasury: &AccountAddress,
+    evidence: &str,
+) -> Result<bool, IssuanceError> {
+    sqlx::query_scalar!(
+        r#"SELECT pay_stellar.sync_ledger_binding($1, $2, $3, $4) AS "changed!""#,
+        seller_deployment_id,
+        operator.as_str(),
+        treasury.as_str(),
+        evidence,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|source| IssuanceError::Query { operation: "sync ledger binding", source })
+}
