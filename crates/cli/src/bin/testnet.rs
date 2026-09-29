@@ -97,6 +97,15 @@ enum Command {
     },
     /// Compare the treasury's USDC with the ledger's liabilities and revenue.
     Solvency,
+    /// Run one seller's flow through the gateway API against the recorded
+    /// deployment: a new zero-XLM buyer deposits Circle USDC, is charged three
+    /// times, and a retried charge is not charged again. The gateway and the
+    /// settlement worker run in-process on the given database.
+    EndToEnd {
+        /// PostgreSQL URL of the database owner; the run applies migrations.
+        #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
     /// Withdraw AMOUNT of BUYER's credit back to the buyer.
     Withdraw {
         #[arg(long)]
@@ -165,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Charge { buyer, seq, amount } => context()?.charge(buyer, seq, amount).await?,
         Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
         Command::Solvency => context()?.solvency().await?,
+        Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
         Command::OnboardBuyer {
             sponsor_secret_file,
             sponsor_secret_out,

@@ -1,0 +1,59 @@
+{
+  "buyer": "GDDG66S7SACGMO7X7XY3EAQSNXDF3T7SYNOLAOIBXEVZT7L74FQKDOWE",
+  "charge_transactions": [
+    {
+      "hash": "92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7"
+    }
+  ],
+  "charges": [
+    {
+      "amount": 100000,
+      "ledger": 4924204,
+      "sequence": 1,
+      "state": "charged",
+      "transaction_hash": "92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7"
+    },
+    {
+      "amount": 200000,
+      "ledger": 4924204,
+      "sequence": 2,
+      "state": "charged",
+      "transaction_hash": "92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7"
+    },
+    {
+      "amount": 300000,
+      "ledger": 4924204,
+      "sequence": 3,
+      "state": "charged",
+      "transaction_hash": "92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7"
+    }
+  ],
+  "conflicting_reuse": "idempotency_conflict",
+  "contract": "CD5PNN5OSF6QZTBEHRTJPWHRHKMLDGVYJD6OPTTEVUCYUIXPCFERCHRW",
+  "criterion": "api-end-to-end",
+  "deposit": {
+    "amount": 1000000,
+    "ledger": 4924203,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/83457b8ac1bd6c221e552e82324e9c0b6df050f0fca9f872ec829c2c2f3a7990",
+    "transaction_hash": "83457b8ac1bd6c221e552e82324e9c0b6df050f0fca9f872ec829c2c2f3a7990"
+  },
+  "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, and the gateway balance equals the contract balance",
+  "funding_transaction": "c70392b265e5cf2969be9e9d957bb8acdca5798823cebe0967b32be0d7b69a38",
+  "network": "stellar:testnet",
+  "observed": {
+    "buyer_usdc_after": 0,
+    "buyer_xlm_stroops_after": 0,
+    "buyer_xlm_stroops_before": 0,
+    "contract_balance": "400000",
+    "contract_charge_seq": 3,
+    "gateway_available": 400000,
+    "gateway_pending": 0
+  },
+  "onboarding_transaction": "f7eaad0cbf0257e5976ab7930ed01824cf2cf5556a08baeae40a9a25ae6a6ba2",
+  "recorded_at": "2026-09-29T01:16:50.537625659Z",
+  "retried_charge": {
+    "created": false,
+    "same_charge": true
+  }
+}

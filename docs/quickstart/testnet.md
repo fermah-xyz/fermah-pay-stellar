@@ -73,3 +73,29 @@ testnet withdraw --buyer 1 --amount 100000
 `charge-batch` settles one charge for every buyer in a single transaction.
 Charge sequences are per buyer account and must be consecutive; a repeated
 sequence is refused as a duplicate and never debits again.
+
+## 6. End to end through the API
+
+```bash
+just db-up
+testnet end-to-end \
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar
+```
+
+This runs the gateway and the settlement worker inside the command, each on
+its production database role, against the deployment recorded in step 3, and
+acts as a seller would, only through the gRPC API:
+
+1. creates a new buyer account with 0 XLM (sponsored) and sends it 0.1 USDC
+   from the reserve;
+2. registers the buyer, prepares a deposit, signs the returned authorization
+   entry with the buyer's key, and submits it; the worker sends and pays for
+   the transaction;
+3. creates three charges and waits until they settle on-chain;
+4. repeats the first charge with the same idempotency key, which returns the
+   original charge, and reuses the key with another amount, which is refused;
+5. checks that the gateway's balance equals the contract's and that the buyer
+   still holds 0 XLM.
+
+The command exits non-zero if any step does not hold, and writes an
+`api-end-to-end` evidence record with every transaction hash.

@@ -1101,12 +1101,14 @@ dependencies = [
  "fermah-pay-stellar-chain",
  "fermah-pay-stellar-domain",
  "fermah-pay-stellar-gateway",
+ "fermah-pay-stellar-proto",
  "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sqlx",
  "time",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
