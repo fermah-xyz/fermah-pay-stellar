@@ -502,6 +502,14 @@ impl Chain for Stellar {
     }
 
     async fn ledger_entries(&self, keys: &[LedgerKey]) -> Result<LedgerEntries, RpcError> {
+        // The real RPC refuses a read of no keys.
+        if keys.is_empty() {
+            return Err(RpcError::Server {
+                method: "getLedgerEntries",
+                code: -32603,
+                message: "could not query captive core: no keys specified in request".to_owned(),
+            });
+        }
         let contract_data = |key: &LedgerKey, val: ScVal| {
             let LedgerKey::ContractData(LedgerKeyContractData { contract, key: data_key, .. }) =
                 key

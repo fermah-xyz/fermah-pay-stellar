@@ -263,6 +263,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// The entries that exist among `keys`, and the ledger the node read
     /// them at: an absent entry is evidence only as of that ledger.
     async fn existing(&self, keys: Vec<LedgerKey>) -> Result<Snapshot, WorkerError> {
+        // The RPC refuses a read of no keys; with nothing to read there is
+        // nothing to decide, and ledger 0 is before every expiration.
+        if keys.is_empty() {
+            return Ok(Snapshot { entries: HashMap::new(), ledger: 0 });
+        }
         let read = self.engine.chain().ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
         Ok(Snapshot {
             entries: read.entries.into_iter().map(|record| (record.key, record.data)).collect(),
