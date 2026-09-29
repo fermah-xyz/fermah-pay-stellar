@@ -19,9 +19,10 @@ use fermah_pay_stellar_chain::prepaid::{
     WithdrawIntent, account_state, batch_outcomes, settled_entries,
 };
 use fermah_pay_stellar_domain::AccountAddress;
+use soroban_sdk::testutils::Deployer as _;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{self, ScErrorCode, ScErrorType};
-use soroban_sdk::{Event as _, IntoVal, Symbol, TryIntoVal, Val};
+use soroban_sdk::{Event as _, IntoVal, Symbol, TryIntoVal, Val, symbol_short};
 
 use super::*;
 
@@ -253,7 +254,6 @@ impl World {
         auths: &[xdr::SorobanAuthorizationEntry],
     ) -> Result<T, soroban_sdk::Error> {
         self.env.set_auths(auths);
-        let seen = self.env.host().get_diagnostic_events().unwrap().0.len();
         match self.env.try_invoke_contract::<T, soroban_sdk::Error>(
             &self.contract,
             &Symbol::new(&self.env, function),
@@ -261,17 +261,20 @@ impl World {
         ) {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(conversion)) => panic!("return value conversion failed: {conversion:?}"),
-            Err(Ok(error)) if error == generic_host_error() => Err(self.root_cause(seen)),
+            Err(Ok(error)) if error == generic_host_error() => Err(self.root_cause()),
             Err(Ok(error)) => Err(error),
             Err(Err(invoke)) => panic!("unclassified invoke error: {invoke:?}"),
         }
     }
 
-    fn root_cause(&self, seen: usize) -> soroban_sdk::Error {
+    /// The error of the invocation that just failed: the most recent error
+    /// event. The host does not keep every earlier invocation's events, so
+    /// an index taken before the call cannot locate this one's.
+    fn root_cause(&self) -> soroban_sdk::Error {
         let events = self.env.host().get_diagnostic_events().unwrap().0;
-        let start = if events.len() >= seen { seen } else { 0 };
-        events[start..]
+        events
             .iter()
+            .rev()
             .find_map(|event| {
                 let xdr::ContractEventBody::V0(body) = &event.event.body;
                 match (body.topics.first(), body.topics.get(1)) {
@@ -333,8 +336,15 @@ impl World {
         &self,
         charges: &[ChargeRequest],
     ) -> Result<soroban_sdk::Vec<Outcome>, soroban_sdk::Error> {
-        let auth =
-            self.signed(&self.operator, self.deployment().charge_batch_authorization(charges));
+        self.charge_batch_by(&self.operator, charges)
+    }
+
+    fn charge_batch_by(
+        &self,
+        signer: &Party,
+        charges: &[ChargeRequest],
+    ) -> Result<soroban_sdk::Vec<Outcome>, soroban_sdk::Error> {
+        let auth = self.signed(signer, self.deployment().charge_batch_authorization(charges));
         let mut entries = soroban_sdk::Vec::new(&self.env);
         for c in charges {
             entries.push_back(Charge(
@@ -1002,71 +1012,236 @@ fn test_duplicate_withdrawal_id_is_refused() {
 
 // ---- administration --------------------------------------------------------
 
+/// Invokes an entry point with one signed entry per signer, each for exactly
+/// this call.
+fn signed_call(
+    w: &World,
+    signers: &[&Party],
+    function: &str,
+    args: soroban_sdk::Vec<Val>,
+) -> Result<(), soroban_sdk::Error> {
+    let scargs: std::vec::Vec<xdr::ScVal> =
+        args.iter().map(|v| v.try_into_val(&w.env).unwrap()).collect();
+    let invocation = xdr::SorobanAuthorizedInvocation {
+        function: xdr::SorobanAuthorizedFunction::ContractFn(xdr::InvokeContractArgs {
+            contract_address: xdr::ScAddress::Contract(xdr::ContractId(xdr::Hash(contract_bytes(
+                &w.contract,
+            )))),
+            function_name: xdr::ScSymbol(function.try_into().unwrap()),
+            args: xdr::VecM::try_from(scargs).unwrap(),
+        }),
+        sub_invocations: xdr::VecM::default(),
+    };
+    let auths: std::vec::Vec<_> =
+        signers.iter().map(|signer| w.signed(signer, invocation.clone())).collect();
+    w.invoke(function, args, &auths)
+}
+
 fn admin_call(
     w: &World,
     signer: &Party,
     function: &str,
     args: soroban_sdk::Vec<Val>,
 ) -> Result<(), soroban_sdk::Error> {
-    let scargs: std::vec::Vec<xdr::ScVal> =
-        args.iter().map(|v| v.try_into_val(&w.env).unwrap()).collect();
-    let auth = w.signed(
-        signer,
-        xdr::SorobanAuthorizedInvocation {
-            function: xdr::SorobanAuthorizedFunction::ContractFn(xdr::InvokeContractArgs {
-                contract_address: xdr::ScAddress::Contract(xdr::ContractId(xdr::Hash(
-                    contract_bytes(&w.contract),
-                ))),
-                function_name: xdr::ScSymbol(function.try_into().unwrap()),
-                args: xdr::VecM::try_from(scargs).unwrap(),
-            }),
-            sub_invocations: xdr::VecM::default(),
-        },
-    );
-    w.invoke(function, args, &[auth])
+    signed_call(w, &[signer], function, args)
+}
+
+fn no_args(w: &World) -> soroban_sdk::Vec<Val> {
+    soroban_sdk::Vec::new(&w.env)
 }
 
 #[test]
-fn test_pause_by_admin_stops_charges() {
-    let w = world();
-    funded(&w, 1, 10 * USDC);
-    admin_call(&w, &w.admin, "pause", soroban_sdk::Vec::new(&w.env)).unwrap();
-    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]), Err(contract_error(Error::Paused)));
+#[should_panic(expected = "Error(Contract, #117)")]
+fn test_construction_with_one_address_in_two_roles_is_refused() {
+    let env = Env::default();
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let asset = sac.asset();
+    let admin = add_party(&env, &asset, 0);
+    let operator = add_party(&env, &asset, 0);
+    let seller = add_party(&env, &asset, 0);
+    // The operator doubling as treasury could pay out USDC it charges.
+    deploy(&env, &admin, &operator, &seller, &operator, &sac.address());
 }
 
 #[test]
-fn test_pause_by_operator_is_refused() {
+fn test_every_admin_entry_point_refuses_another_signer() {
     let w = world();
-    let mut signer_is_operator = w.signed(
-        &w.operator,
-        xdr::SorobanAuthorizedInvocation {
-            function: xdr::SorobanAuthorizedFunction::ContractFn(xdr::InvokeContractArgs {
-                contract_address: xdr::ScAddress::Contract(xdr::ContractId(xdr::Hash(
-                    contract_bytes(&w.contract),
-                ))),
-                function_name: xdr::ScSymbol("pause".try_into().unwrap()),
-                args: xdr::VecM::default(),
-            }),
-            sub_invocations: xdr::VecM::default(),
-        },
-    );
-    if let xdr::SorobanCredentials::AddressV2(creds) = &mut signer_is_operator.credentials {
-        creds.address = xdr::ScAddress::Account(account_xdr_id(&w.admin.key));
+    let newcomer = w.party(0);
+    let limits = Limits { min_deposit: MIN_DEPOSIT, max_charge: USDC };
+    let calls: [(&str, soroban_sdk::Vec<Val>); 8] = [
+        ("pause", no_args(&w)),
+        ("unpause", no_args(&w)),
+        ("set_limits", (limits,).into_val(&w.env)),
+        ("set_admin", (newcomer.address.clone(),).into_val(&w.env)),
+        ("set_operator", (newcomer.address.clone(),).into_val(&w.env)),
+        ("set_seller", (newcomer.address.clone(),).into_val(&w.env)),
+        ("set_treasury", (newcomer.address.clone(),).into_val(&w.env)),
+        ("upgrade", (BytesN::from_array(&w.env, &[7; 32]),).into_val(&w.env)),
+    ];
+    for (function, args) in calls {
+        // The operator authorizes as itself, and a rotation's newcomer signs
+        // too: only the admin's authorization is missing.
+        let result = signed_call(&w, &[&w.operator, &newcomer], function, args);
+        assert_eq!(result, Err(auth_failure()), "{function}");
     }
-    let result: Result<(), _> =
-        w.invoke("pause", soroban_sdk::Vec::new(&w.env), &[signer_is_operator]);
-    assert_eq!(result, Err(auth_failure()));
-    assert!(!w.client().get_config().paused);
+    let config = w.client().get_config();
+    assert_eq!(
+        (config.admin, config.operator, config.paused, config.limits.max_charge),
+        (w.admin.address.clone(), w.operator.address.clone(), false, MAX_CHARGE)
+    );
 }
 
 #[test]
-fn test_operator_rotation_revokes_old_operator() {
+fn test_pause_stops_every_money_movement_until_unpaused() {
+    let w = world();
+    let buyer = funded(&w, 1, 10 * USDC);
+    admin_call(&w, &w.admin, "pause", no_args(&w)).unwrap();
+    let paused = Err(contract_error(Error::Paused));
+    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]).map(|_| ()), paused);
+    assert_eq!(w.deposit(&buyer, 1, USDC, 2), paused);
+    let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
+    let auths = [
+        w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+    ];
+    assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), paused);
+    assert_eq!(withdraw_revenue(&w, 1, 1), paused);
+
+    admin_call(&w, &w.admin, "unpause", no_args(&w)).unwrap();
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 1, USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Charged]
+    );
+}
+
+#[test]
+fn test_rotation_needs_both_the_admin_and_the_new_holder() {
     let w = world();
     funded(&w, 1, 10 * USDC);
     let replacement = w.party(0);
-    admin_call(&w, &w.admin, "set_operator", (replacement.address.clone(),).into_val(&w.env))
-        .unwrap();
-    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]), Err(auth_failure()));
+    let args = || (replacement.address.clone(),).into_val(&w.env);
+    for signers in [&[&w.admin][..], &[&replacement][..]] {
+        assert_eq!(signed_call(&w, signers, "set_operator", args()), Err(auth_failure()));
+    }
+    signed_call(&w, &[&w.admin, &replacement], "set_operator", args()).unwrap();
+
+    let expected = RoleChanged {
+        role: symbol_short!("operator"),
+        previous: w.operator.address.clone(),
+        current: replacement.address.clone(),
+    };
+    assert_eq!(
+        w.env.events().all().filter_by_contract(&w.contract),
+        [expected.to_xdr(&w.env, &w.contract)]
+    );
+    // The previous operator can no longer charge; the new one can.
+    assert_eq!(w.charge_batch(&[w.charge(1, 1, USDC)]).map(|_| ()), Err(auth_failure()));
+    assert_eq!(
+        w.charge_batch_by(&replacement, &[w.charge(1, 1, USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Charged]
+    );
+}
+
+#[test]
+fn test_rotation_onto_another_role_or_the_same_holder_is_refused() {
+    let w = world();
+    let cases = [
+        ("set_operator", &w.treasury),
+        ("set_treasury", &w.seller),
+        ("set_seller", &w.admin),
+        ("set_admin", &w.operator),
+        ("set_operator", &w.operator),
+    ];
+    for (function, holder) in cases {
+        let args = (holder.address.clone(),).into_val(&w.env);
+        assert_eq!(
+            signed_call(&w, &[&w.admin, holder], function, args),
+            Err(contract_error(Error::DuplicateRole)),
+            "{function}"
+        );
+    }
+}
+
+#[test]
+fn test_admin_rotation_moves_every_admin_power() {
+    let w = world();
+    let successor = w.party(0);
+    signed_call(
+        &w,
+        &[&w.admin, &successor],
+        "set_admin",
+        (successor.address.clone(),).into_val(&w.env),
+    )
+    .unwrap();
+    assert_eq!(admin_call(&w, &w.admin, "pause", no_args(&w)), Err(auth_failure()));
+    admin_call(&w, &successor, "pause", no_args(&w)).unwrap();
+    assert!(w.client().get_config().paused);
+}
+
+#[test]
+fn test_treasury_rotation_sends_new_deposits_to_the_new_treasury() {
+    let w = world();
+    let successor = w.party(0);
+    signed_call(
+        &w,
+        &[&w.admin, &successor],
+        "set_treasury",
+        (successor.address.clone(),).into_val(&w.env),
+    )
+    .unwrap();
+    let buyer = w.party(10 * USDC);
+    // Signed for the old treasury: the contract now transfers to the new one,
+    // so the buyer's authorization no longer matches and nothing moves.
+    assert_eq!(w.deposit(&buyer, 1, USDC, 1), Err(auth_failure()));
+
+    let rotated = PrepaidDeployment { treasury: successor.key.address(), ..w.deployment() };
+    let intent = w.deposit_intent(&buyer, 1, USDC, 2);
+    let auth = w.signed(&buyer, rotated.deposit_authorization(&intent));
+    w.invoke::<()>("deposit", w.deposit_args(&intent, &buyer.address), &[auth]).unwrap();
+    assert_eq!((w.usdc_balance(&successor), w.usdc_balance(&w.treasury)), (USDC, 0));
+}
+
+#[test]
+fn test_seller_rotation_moves_revenue_withdrawal() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    w.charge_batch(&[w.charge(1, 1, 2 * USDC)]).unwrap();
+    let successor = w.party(0);
+    signed_call(
+        &w,
+        &[&w.admin, &successor],
+        "set_seller",
+        (successor.address.clone(),).into_val(&w.env),
+    )
+    .unwrap();
+    assert_eq!(withdraw_revenue(&w, USDC, 1), Err(auth_failure()));
+
+    let intent = RevenueWithdrawIntent {
+        destination: successor.key.address(),
+        amount: USDC,
+        withdrawal_id: id32(2),
+    };
+    let auths = [
+        w.signed(&successor, w.deployment().seller_revenue_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent)),
+    ];
+    let args: soroban_sdk::Vec<Val> =
+        (successor.address.clone(), USDC, BytesN::from_array(&w.env, &id32(2))).into_val(&w.env);
+    w.invoke::<()>("withdraw_revenue", args, &auths).unwrap();
+    assert_eq!(w.usdc_balance(&successor), USDC);
+}
+
+#[test]
+fn test_admin_calls_keep_the_instance_alive() {
+    let w = world();
+    // Idle until fewer ledgers than the extension threshold remain.
+    let idle = TTL_EXTEND_TO - TTL_THRESHOLD + 1;
+    let start = w.env.ledger().sequence();
+    w.env.ledger().set_sequence_number(start + idle);
+    let before = w.env.deployer().get_contract_instance_ttl(&w.contract);
+    assert!(before < TTL_THRESHOLD, "{before}");
+    admin_call(&w, &w.admin, "pause", no_args(&w)).unwrap();
+    assert_eq!(w.env.deployer().get_contract_instance_ttl(&w.contract), TTL_EXTEND_TO);
 }
 
 #[test]
@@ -1077,6 +1252,17 @@ fn test_invalid_limits_are_refused() {
         admin_call(&w, &w.admin, "set_limits", (limits,).into_val(&w.env)),
         Err(contract_error(Error::InvalidLimits))
     );
+}
+
+#[test]
+#[ignore = "needs the contract Wasm: set PREPAID_WASM (see `just contract-resources`)"]
+fn test_full_upgrade_by_admin_keeps_balances() {
+    let code = wasm_under_test();
+    let w = world_with(Some(&code));
+    funded(&w, 1, 10 * USDC);
+    let hash = w.env.deployer().upload_contract_wasm(code.as_slice());
+    admin_call(&w, &w.admin, "upgrade", (hash,).into_val(&w.env)).unwrap();
+    assert_eq!(w.client().get_balance(&w.owner_address(1)), 10 * USDC);
 }
 
 // ---- revenue ----------------------------------------------------------------

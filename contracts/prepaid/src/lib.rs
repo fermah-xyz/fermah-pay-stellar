@@ -29,8 +29,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    Address, BytesN, ContractExecutable, Env, Vec, contract, contracterror, contractevent,
-    contractimpl, contracttype, panic_with_error, token,
+    Address, BytesN, ContractExecutable, Env, Symbol, Vec, contract, contracterror, contractevent,
+    contractimpl, contracttype, panic_with_error, symbol_short, token,
 };
 
 /// Largest number of charges one `charge_batch` call accepts.
@@ -68,6 +68,9 @@ pub enum Error {
     WithdrawalAlreadyProcessed = 114,
     InsufficientRevenue = 115,
     Overflow = 116,
+    /// Two roles would share one address, or a rotation names the current
+    /// holder of the role.
+    DuplicateRole = 117,
 }
 
 #[contracttype]
@@ -173,6 +176,17 @@ pub struct Withdrawn {
     pub withdrawal_id: BytesN<32>,
 }
 
+/// A role moved to another address. Every role change is visible on-chain,
+/// so a rotation nobody expected can be detected.
+#[contractevent(topics = ["role"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleChanged {
+    #[topic]
+    pub role: Symbol,
+    pub previous: Address,
+    pub current: Address,
+}
+
 #[contractevent(topics = ["revenue"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevenueWithdrawn {
@@ -187,7 +201,9 @@ pub struct PrepaidLedger;
 #[contractimpl]
 impl PrepaidLedger {
     /// Runs once, atomically with deployment, so no one can initialize the
-    /// contract with other roles between deployment and set-up.
+    /// contract with other roles between deployment and set-up. The four
+    /// roles must be four distinct addresses: each authorizes something the
+    /// others must not be able to do alone.
     pub fn __constructor(
         env: Env,
         admin: Address,
@@ -199,8 +215,10 @@ impl PrepaidLedger {
     ) {
         validate_limits(&env, &limits);
         let config = Config { admin, operator, seller, treasury, usdc, limits, paused: false };
+        require_distinct_roles(&env, &config);
         env.storage().instance().set(&Key::Config, &config);
         env.storage().instance().set(&Key::Totals, &Totals { liabilities: 0, revenue: 0 });
+        extend_instance(&env);
     }
 
     /// Moves `amount` USDC from `owner` to the treasury and credits the
@@ -381,21 +399,14 @@ impl PrepaidLedger {
         let mut config = config(&env);
         config.admin.require_auth();
         config.paused = true;
-        env.storage().instance().set(&Key::Config, &config);
+        store_config(&env, &config);
     }
 
     pub fn unpause(env: Env) {
         let mut config = config(&env);
         config.admin.require_auth();
         config.paused = false;
-        env.storage().instance().set(&Key::Config, &config);
-    }
-
-    pub fn set_operator(env: Env, operator: Address) {
-        let mut config = config(&env);
-        config.admin.require_auth();
-        config.operator = operator;
-        env.storage().instance().set(&Key::Config, &config);
+        store_config(&env, &config);
     }
 
     pub fn set_limits(env: Env, limits: Limits) {
@@ -403,15 +414,40 @@ impl PrepaidLedger {
         config.admin.require_auth();
         validate_limits(&env, &limits);
         config.limits = limits;
-        env.storage().instance().set(&Key::Config, &config);
+        store_config(&env, &config);
+    }
+
+    /// Hands the admin role to `admin`, which must authorize taking it, so
+    /// the role cannot be moved to an address nobody controls.
+    pub fn set_admin(env: Env, admin: Address) {
+        rotate(&env, symbol_short!("admin"), admin, |config| &mut config.admin);
+    }
+
+    /// Moves the operator role, e.g. after its key leaked; the previous key
+    /// can no longer authorize charges.
+    pub fn set_operator(env: Env, operator: Address) {
+        rotate(&env, symbol_short!("operator"), operator, |config| &mut config.operator);
+    }
+
+    pub fn set_seller(env: Env, seller: Address) {
+        rotate(&env, symbol_short!("seller"), seller, |config| &mut config.seller);
+    }
+
+    /// Points deposits and withdrawals at another treasury account. The
+    /// contract holds no USDC, so nothing moves here: the previous treasury
+    /// must transfer what it holds to the new one, which needs a USDC
+    /// trustline, for the liabilities to stay covered.
+    pub fn set_treasury(env: Env, treasury: Address) {
+        rotate(&env, symbol_short!("treasury"), treasury, |config| &mut config.treasury);
     }
 
     /// Replaces the contract code. The admin can change what every balance
-    /// means through this, which is why it is a separate key from the
-    /// operator and the treasury.
+    /// means through this, which is why it is a separate key from every
+    /// other role.
     pub fn upgrade(env: Env, wasm_hash: BytesN<32>) {
         config(&env).admin.require_auth();
         env.deployer().update_current_contract(ContractExecutable::Wasm(wasm_hash));
+        extend_instance(&env);
     }
 }
 
@@ -444,6 +480,34 @@ fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Se
         }
     };
     Settled(owner, seq, amount, outcome)
+}
+
+/// Moves one role to `current`, authorized by the admin and by `current`.
+fn rotate(env: &Env, role: Symbol, current: Address, slot: fn(&mut Config) -> &mut Address) {
+    let mut config = config(env);
+    if *slot(&mut config) == current {
+        panic_with_error!(env, Error::DuplicateRole);
+    }
+    config.admin.require_auth();
+    current.require_auth();
+    let previous = core::mem::replace(slot(&mut config), current.clone());
+    require_distinct_roles(env, &config);
+    store_config(env, &config);
+    RoleChanged { role, previous, current }.publish(env);
+}
+
+fn require_distinct_roles(env: &Env, config: &Config) {
+    let roles = [&config.admin, &config.operator, &config.seller, &config.treasury];
+    for (i, role) in roles.iter().enumerate() {
+        if roles[i + 1..].contains(role) {
+            panic_with_error!(env, Error::DuplicateRole);
+        }
+    }
+}
+
+fn store_config(env: &Env, config: &Config) {
+    env.storage().instance().set(&Key::Config, config);
+    extend_instance(env);
 }
 
 fn config(env: &Env) -> Config {

@@ -32,12 +32,26 @@ compared against them.
 | Treasury | its side of `withdraw` and `withdraw_revenue` |
 | Operator | `charge`, `charge_batch` |
 | Seller | its side of `withdraw_revenue` |
-| Admin | `pause`, `unpause`, `set_operator`, `set_limits`, `upgrade` |
+| Admin | `pause`, `unpause`, `set_limits`, `upgrade`, and every role rotation |
 
-All roles and the USDC contract are fixed by the constructor, which runs
-atomically with deployment. The admin can replace the contract code through
-`upgrade` and therefore holds power over what every balance means; it is a
-separate key from the operator and the treasury.
+The constructor, which runs atomically with deployment, sets the four roles
+and the USDC contract, and refuses to run unless admin, operator, seller and
+treasury are four distinct addresses: each authorizes something the others
+must not be able to do alone.
+
+Each role can be moved with `set_admin`, `set_operator`, `set_seller` or
+`set_treasury`. A rotation needs the admin's authorization and that of the
+new holder, so a role cannot be handed to an address nobody controls; it is
+refused if it would make two roles share an address or names the current
+holder, and it emits a `role` event with the previous and new address. After
+`set_operator` the previous operator can no longer charge. The contract holds
+no USDC, so `set_treasury` moves nothing: the previous treasury must transfer
+its USDC to the new one, which needs a USDC trustline, for the liabilities to
+stay covered.
+
+The admin can replace the contract code through `upgrade`, and so holds power
+over what every balance means: it is the deployment's root of trust and
+should be kept offline or in hardware.
 
 ## What each signer authorizes
 
@@ -137,11 +151,13 @@ this contract.
 | 114 | `WithdrawalAlreadyProcessed` |
 | 115 | `InsufficientRevenue` |
 | 116 | `Overflow` |
+| 117 | `DuplicateRole` |
 
 ## Storage lifetime
 
-Every entry the contract writes, and the contract instance on every state
-change, has its time-to-live extended to about 30 days once fewer than about
+Every entry the contract writes, and the contract instance on every call
+that changes state, administrative calls included, has its time-to-live
+extended to about 30 days once fewer than about
 7 days remain, so an account that keeps being charged or funded is not
 archived between uses. An account that is only read is not extended. An
 account idle long enough to be archived is restored by the settlement worker

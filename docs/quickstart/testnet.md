@@ -53,21 +53,23 @@ salt, and records the deployment in the profile.
 ## 4. Buyers
 
 ```bash
-testnet onboard-buyers --count 100 --usdc-each 1000000
+testnet onboard-buyers --count 100 --usdc-each 700000
 ```
 
 Creates buyers 1 to 100 with zero XLM and sponsored reserves (19 per
-transaction) and tops each up to 0.1 USDC from the reserve in one payment
+transaction) and tops each up to 0.07 USDC from the reserve in one payment
 transaction. The command fails if any buyer ends up holding XLM.
 
 ## 5. Deposit, charge, withdraw
 
 ```bash
-testnet deposit --first 1 --last 100 --amount 500000
+testnet deposit --first 1 --last 100 --amount 300000
 testnet charge-batch --first 1 --last 100 --seq 1 --amount 100000
 testnet charge --buyer 1 --seq 2 --amount 100000
 testnet charge --buyer 1 --seq 2 --amount 100000     # refused: duplicate
-testnet withdraw --buyer 1 --amount 100000
+testnet withdraw --buyer 2 --amount 150000
+testnet charge-batch --first 1 --last 100 --seq 2 --amount 150000
+testnet solvency
 ```
 
 `charge-batch` settles one charge for every buyer in a single transaction.

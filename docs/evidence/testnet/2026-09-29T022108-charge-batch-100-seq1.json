@@ -1,14 +1,14 @@
 {
   "amount": "100000",
-  "contract": "CD5PNN5OSF6QZTBEHRTJPWHRHKMLDGVYJD6OPTTEVUCYUIXPCFERCHRW",
+  "contract": "CAWRQEYPSOMB6OJNJ3M7SYBHDLEMG3NSOPHKKCF44RHOA5Z2V3NCHQK5",
   "criterion": "charge-batch",
   "entries": 100,
   "expected": "one transaction settles every charge; each entry's outcome is returned and emitted",
-  "fee_charged_stroops": 479589,
+  "fee_charged_stroops": 479601,
   "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
   "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
-  "inner_transaction_hash": "0800db63dd9903aa6f0248c4a89fd3deb2c3f9014e4fcd53eae2c6ce49442f19",
-  "ledger": 4923068,
+  "inner_transaction_hash": "48800cbe3f1ae872bdc92fe6170d513e979739cbd9ccb6f95bdeca15f0d15317",
+  "ledger": 4924976,
   "network": "stellar:testnet",
   "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
   "outcomes": [
@@ -113,15 +113,15 @@
     "Charged",
     "Charged"
   ],
-  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/14b2d4087a7bcccabc3419ab4bccb10d18d3bf8239070051255db7ad3076333d",
-  "recorded_at": "2026-09-28T23:42:08.940722389Z",
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/607ebfd9f021552ec8a4593fa5777ad22e862dfb377a556098ebacbbd7ce75a9",
+  "recorded_at": "2026-09-29T02:21:08.562131275Z",
   "resources": {
     "disk_read_bytes": 188,
     "footprint_read_only": 2,
     "footprint_read_write": 102,
-    "instructions": 26559107,
+    "instructions": 26575020,
     "write_bytes": 21564
   },
   "sequence": 1,
-  "transaction_hash": "14b2d4087a7bcccabc3419ab4bccb10d18d3bf8239070051255db7ad3076333d"
+  "transaction_hash": "607ebfd9f021552ec8a4593fa5777ad22e862dfb377a556098ebacbbd7ce75a9"
 }
