@@ -75,3 +75,23 @@ Measured fees for a charge on testnet:
 Batching settles 100 charges in one transaction instead of 100, and costs
 about a quarter of the per-charge fee of single charges: most of a charge's
 fee is for the ledger entry it writes, which a batch cannot share.
+
+### API end to end on testnet
+
+[`api-end-to-end`](testnet/2026-09-29T011650-api-end-to-end.json), recorded
+by `fermah-pay-stellar-testnet end-to-end` against the deployment above. A
+seller's calls go only through the gateway's gRPC API; the gateway and the
+settlement worker run under their production database roles.
+
+| Step | Transaction |
+|---|---|
+| New buyer created with 0 XLM, reserves sponsored | [`f7eaad0c…`](https://stellar.expert/explorer/testnet/tx/f7eaad0cbf0257e5976ab7930ed01824cf2cf5556a08baeae40a9a25ae6a6ba2) |
+| Buyer sent 0.1 Circle USDC from the reserve | [`c70392b2…`](https://stellar.expert/explorer/testnet/tx/c70392b265e5cf2969be9e9d957bb8acdca5798823cebe0967b32be0d7b69a38) |
+| Deposit of 0.1 USDC, authorized by one buyer signature, sent and paid by the worker | [`83457b8a…`](https://stellar.expert/explorer/testnet/tx/83457b8ac1bd6c221e552e82324e9c0b6df050f0fca9f872ec829c2c2f3a7990) |
+| Three charges (0.01, 0.02, 0.03 USDC), settled in one batch | [`92f08932…`](https://stellar.expert/explorer/testnet/tx/92f0893285459622fdf470bfe37edb1705497787591452a45c794d6fa7f5bad7) |
+
+Observed afterwards: the retried charge returned the original charge
+(`created: false`), reusing its key with another amount was refused with
+`idempotency_conflict`, the gateway's available balance and the contract's
+account balance are both 0.04 USDC with charge sequence 3, and the buyer
+held 0 XLM before and after.

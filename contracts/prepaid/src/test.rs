@@ -16,7 +16,7 @@ use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
     ChargeRequest, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent, WithdrawIntent,
-    account_charge_seq, batch_outcomes,
+    account_state, batch_outcomes,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
@@ -1293,9 +1293,10 @@ fn test_gateway_storage_keys_match_the_contract_layout() {
     };
     let deployment = w.deployment();
     let owner = w.owner_of(1);
-    // Both charges consumed their sequence, the refused one included.
+    // Both charges consumed their sequence, the refused one included; only
+    // the first debited.
     let account = entry(&deployment.account_key(&owner)).expect("account entry at the derived key");
-    assert_eq!(account_charge_seq(&account), Some(2));
+    assert_eq!(account_state(&account), Some((USDC - 100, 2)));
     assert!(entry(&deployment.deposit_key(&owner, &id32(1))).is_some());
     // Controls: a deposit id never used, and an owner that never deposited.
     assert!(entry(&deployment.deposit_key(&owner, &id32(2))).is_none());

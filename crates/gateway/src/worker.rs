@@ -25,7 +25,7 @@ use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, Outcome, PrepaidDeployment, account_charge_seq, batch_outcomes,
+    ChargeRequest, DepositIntent, Outcome, PrepaidDeployment, account_state, batch_outcomes,
 };
 use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -387,7 +387,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                         let owner = address(&row.wallet_address)?;
                         let consumed = match entries.get(&deployment.account_key(&owner)) {
                             None => 0,
-                            Some(entry) => account_charge_seq(entry)
+                            Some(entry) => account_state(entry).map(|(_, seq)| seq)
                                 .ok_or(WorkerError::Corrupt("account entry does not decode"))?,
                         };
                         let sequence = u64::try_from(row.sequence)

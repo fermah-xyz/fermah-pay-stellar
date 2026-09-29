@@ -319,19 +319,25 @@ pub fn batch_outcomes(value: &ScVal) -> Option<Vec<Outcome>> {
         .collect()
 }
 
-/// The last consumed charge sequence in an account entry read from the
-/// ledger; `None` if the entry is not an account entry of this contract.
+/// The balance and last consumed charge sequence in an account entry read
+/// from the ledger; `None` if the entry is not an account entry of this
+/// contract.
 #[must_use]
-pub fn account_charge_seq(entry: &LedgerEntryData) -> Option<u64> {
+pub fn account_state(entry: &LedgerEntryData) -> Option<(i128, u64)> {
     let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
         entry
     else {
         return None;
     };
-    fields.iter().find_map(|field| match (&field.key, &field.val) {
-        (ScVal::Symbol(name), ScVal::U64(seq)) if name.0.as_slice() == b"charge_seq" => Some(*seq),
-        _ => None,
-    })
+    let field = |name: &[u8]| {
+        fields.iter().find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+    };
+    let balance = match &field(b"balance")?.val {
+        ScVal::I128(Int128Parts { hi, lo }) => (i128::from(*hi) << 64) | i128::from(*lo),
+        _ => return None,
+    };
+    let ScVal::U64(seq) = field(b"charge_seq")?.val else { return None };
+    Some((balance, seq))
 }
 
 fn call(contract: [u8; 32], function: &str, args: Vec<ScVal>) -> InvokeContractArgs {

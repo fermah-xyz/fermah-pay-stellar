@@ -32,6 +32,8 @@ use super::evidence::{self, tx_url};
 use super::ledger::balances;
 use super::profile::{Deployment, Profile};
 
+mod e2e;
+
 const NETWORK: Network = Network::Testnet;
 const SPONSOR: &str = "operator-sponsor";
 const SUBMITTER: &str = "submitter";
