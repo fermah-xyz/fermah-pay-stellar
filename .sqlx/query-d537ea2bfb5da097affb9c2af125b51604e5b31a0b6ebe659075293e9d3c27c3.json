@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT state, source_address, sequence, valid_until, outer_hash, envelope_xdr,\n                   ledger, fee_charged, return_value_xdr\n            FROM pay_stellar.submissions\n            WHERE id = $1 AND network = $2\n            ",
+  "query": "\n            SELECT state, source_address, sequence, valid_until, created_at, outer_hash,\n                   envelope_xdr, ledger, fee_charged, return_value_xdr\n            FROM pay_stellar.submissions\n            WHERE id = $1 AND network = $2\n            ",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "outer_hash",
         "type_info": "Bytea",
         "origin": {
@@ -59,7 +70,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "envelope_xdr",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "ledger",
         "type_info": "Int4",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "fee_charged",
         "type_info": "Int8",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "return_value_xdr",
         "type_info": "Text",
         "origin": {
@@ -116,10 +127,11 @@
       false,
       false,
       false,
+      false,
       true,
       true,
       true
     ]
   },
-  "hash": "d6fd3137e1043aa14477377d0a1f35b90caefca0649798962da3dbccc164f5d6"
+  "hash": "d537ea2bfb5da097affb9c2af125b51604e5b31a0b6ebe659075293e9d3c27c3"
 }

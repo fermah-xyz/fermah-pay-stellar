@@ -79,7 +79,7 @@ double-charge or overdraw whatever the database holds.
 | `SUBMITTED` | no | in a batch sent to the network |
 | `CHARGED` | yes | the contract debited the on-chain balance |
 | `REFUSED` | yes | the contract refused it (`insufficient_balance` or `above_limit`); the amount is back in the available balance |
-| `QUARANTINED` | yes | the contract's answer contradicts the gateway's records (`duplicate`, `out_of_order`, `unknown_account`), or the outcome could not be established; the amount stays debited while an operator reviews |
+| `QUARANTINED` | no | the contract's answer contradicts the gateway's records (`duplicate`, `out_of_order`, `unknown_account`), or the outcome could not be established; the amount stays debited until an operator resolves it from on-chain evidence to `CHARGED`, `REFUSED` or back to `ADMITTED` |
 
 `GetBalance(buyer_id)` returns `available`, what new charges may still
 debit, and `pending_charges`, the sum of admitted and submitted charges.

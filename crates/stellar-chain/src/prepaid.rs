@@ -7,10 +7,10 @@
 
 use fermah_pay_stellar_domain::AccountAddress;
 use stellar_xdr::{
-    BytesM, ContractDataDurability, ContractDataEntry, ContractId, Hash, Int128Parts,
-    InvokeContractArgs, LedgerEntryData, LedgerKey, LedgerKeyContractData, ScAddress, ScBytes,
-    ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction,
-    SorobanAuthorizedInvocation, StringM, VecM,
+    BytesM, ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody,
+    ContractId, Hash, Int128Parts, InvokeContractArgs, LedgerEntryData, LedgerKey,
+    LedgerKeyContractData, ScAddress, ScBytes, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec,
+    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM, TransactionMeta, VecM,
 };
 
 use crate::transaction::account_id;
@@ -317,6 +317,68 @@ pub fn batch_outcomes(value: &ScVal) -> Option<Vec<Outcome>> {
             _ => None,
         })
         .collect()
+}
+
+/// One entry of the contract's `charges` event: which account, which
+/// sequence, which amount, and what the contract decided.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SettledEntry {
+    pub owner: AccountAddress,
+    pub seq: u64,
+    pub amount: i128,
+    pub outcome: Outcome,
+}
+
+/// The entries of a `charges` event emitted by `contract`; `None` if the
+/// event is another contract's, another kind, or malformed.
+#[must_use]
+pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec<SettledEntry>> {
+    if event.contract_id != Some(ContractId(Hash(*contract))) {
+        return None;
+    }
+    let ContractEventBody::V0(body) = &event.body;
+    let [ScVal::Symbol(topic)] = body.topics.as_slice() else { return None };
+    if topic.0.as_slice() != b"charges" {
+        return None;
+    }
+    let ScVal::Vec(Some(ScVec(entries))) = &body.data else { return None };
+    entries
+        .iter()
+        .map(|entry| {
+            let ScVal::Vec(Some(ScVec(fields))) = entry else { return None };
+            let [
+                ScVal::Address(ScAddress::Account(owner)),
+                ScVal::U64(seq),
+                amount,
+                ScVal::U32(code),
+            ] = fields.as_slice()
+            else {
+                return None;
+            };
+            let ScVal::I128(Int128Parts { hi, lo }) = amount else { return None };
+            Some(SettledEntry {
+                owner: crate::transaction::address_of(owner),
+                seq: *seq,
+                amount: (i128::from(*hi) << 64) | i128::from(*lo),
+                outcome: Outcome::from_code(*code)?,
+            })
+        })
+        .collect()
+}
+
+/// Every `charges` entry `contract` emitted in an included transaction.
+#[must_use]
+pub fn settled_in(meta: &TransactionMeta, contract: &[u8; 32]) -> Vec<SettledEntry> {
+    let events: Vec<&ContractEvent> = match meta {
+        TransactionMeta::V4(meta) => {
+            meta.operations.iter().flat_map(|op| op.events.iter()).collect()
+        }
+        TransactionMeta::V3(meta) => {
+            meta.soroban_meta.iter().flat_map(|soroban| soroban.events.iter()).collect()
+        }
+        _ => Vec::new(),
+    };
+    events.into_iter().filter_map(|event| settled_entries(event, contract)).flatten().collect()
 }
 
 /// The balance and last consumed charge sequence in an account entry read

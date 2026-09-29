@@ -136,7 +136,8 @@ The last row contradicts the gateway's own records: it sends an account's
 sequence only after every earlier one settled, and charges only accounts a
 confirmed deposit created. The charge is held for an operator rather than
 guessed at. A charge is also quarantined when its batch's outcome cannot be
-established.
+established. An operator resolves it from the contract's own record; see
+[resolving quarantined charges](../self-hosting/quarantine.md).
 
 ## Credentials
 

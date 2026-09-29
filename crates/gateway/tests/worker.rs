@@ -17,27 +17,30 @@ use common::{Harness, Ledger, Tenant, authed, pool_as, start_with};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
+use fermah_pay_stellar_chain::prepaid::{Outcome, PrepaidDeployment};
 use fermah_pay_stellar_chain::rpc::{
     IncludedTransaction, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
     Simulation, SimulationOutcome, TransactionStatus,
 };
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    ContractDataDurability, ContractDataEntry, ContractId, ExtensionPoint,
-    FeeBumpTransactionInnerTx, Hash, HostFunction, Int128Parts, InvokeContractArgs,
-    LedgerEntryChanges, LedgerEntryData, LedgerEntryExt, LedgerFootprint, LedgerKey,
-    LedgerKeyContractData, Limits, OperationBody, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol,
-    ScVal, ScVec, SorobanAuthorizationEntry, SorobanCredentials, SorobanResources,
-    SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
-    SorobanTransactionMetaV2, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
-    TransactionMetaV4, TransactionResult, TransactionResultExt, TransactionResultResult, VecM,
-    WriteXdr,
+    ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType,
+    ContractEventV0, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction,
+    Int128Parts, InvokeContractArgs, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt,
+    LedgerFootprint, LedgerKey, LedgerKeyContractData, Limits, OperationBody, OperationMetaV2,
+    ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAuthorizationEntry,
+    SorobanCredentials, SorobanResources, SorobanTransactionData, SorobanTransactionDataExt,
+    SorobanTransactionMetaExt, SorobanTransactionMetaV2, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
+    TransactionResultResult, VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::address_of;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::LatestLedger;
+use fermah_pay_stellar_gateway::quarantine::{
+    self, QuarantineError, QuarantinedCharge, Resolution,
+};
 use fermah_pay_stellar_gateway::submission::{Chain, Clock, Engine, Keys, Policy, SourceSequence};
 use fermah_pay_stellar_gateway::worker::{Settings, Step, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
@@ -173,7 +176,7 @@ impl Net {
         call: &InvokeContractArgs,
         auth: &[SorobanAuthorizationEntry],
         operator: &AccountAddress,
-    ) -> Result<(ContractState, ScVal), String> {
+    ) -> Result<(ContractState, ScVal, Option<ScVal>), String> {
         let mut state = self.state.clone();
         let mut authorized = HashSet::new();
         for entry in auth {
@@ -211,7 +214,7 @@ impl Net {
                 }
                 *held -= amount;
                 state.accounts.entry(owner).or_insert((0, 0)).0 += amount;
-                Ok((state, ScVal::Void))
+                Ok((state, ScVal::Void, None))
             }
             b"charge_batch" => {
                 if !authorized.contains(operator) {
@@ -219,6 +222,7 @@ impl Net {
                 }
                 let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
                 let mut outcomes = Vec::new();
+                let mut settled = Vec::new();
                 for charge in charges.iter() {
                     let ScVal::Vec(Some(ScVec(fields))) = charge else { panic!("charge") };
                     let owner = owner_of(&fields[0]);
@@ -241,11 +245,24 @@ impl Net {
                         }
                     };
                     outcomes.push(ScVal::U32(code));
+                    settled.push(ScVal::Vec(Some(ScVec(
+                        vec![
+                            fields[0].clone(),
+                            fields[1].clone(),
+                            fields[2].clone(),
+                            ScVal::U32(code),
+                        ]
+                        .try_into()
+                        .unwrap(),
+                    ))));
                 }
                 if self.truncate_outcomes {
                     outcomes.pop();
                 }
-                Ok((state, ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap())))))
+                // The contract's event carries every entry, whatever the
+                // return value holds.
+                let event = ScVal::Vec(Some(ScVec(settled.try_into().unwrap())));
+                Ok((state, ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap()))), Some(event)))
             }
             other => panic!("unexpected call {}", String::from_utf8_lossy(other)),
         }
@@ -255,6 +272,25 @@ impl Net {
 fn outer_hash(envelope: &TransactionEnvelope) -> [u8; 32] {
     let TransactionEnvelope::TxFeeBump(bump) = envelope else { panic!("not a fee bump") };
     fee_bump_hash(&bump.tx, Network::Testnet).unwrap()
+}
+
+/// The operation meta holding the contract's `charges` event.
+fn charges_event(data: ScVal) -> OperationMetaV2 {
+    OperationMetaV2 {
+        ext: ExtensionPoint::V0,
+        changes: LedgerEntryChanges(VecM::default()),
+        events: vec![ContractEvent {
+            ext: ExtensionPoint::V0,
+            contract_id: Some(ContractId(Hash(CONTRACT))),
+            type_: ContractEventType::Contract,
+            body: ContractEventBody::V0(ContractEventV0 {
+                topics: vec![symbol("charges")].try_into().unwrap(),
+                data,
+            }),
+        }]
+        .try_into()
+        .unwrap(),
+    }
 }
 
 fn included(
@@ -320,7 +356,7 @@ impl Stellar {
         let (call, auth, _) = invocation(envelope);
         let operator = self.operator.clone();
         self.with(|n| {
-            let (state, _) = n.execute(&call, &auth, &operator).unwrap();
+            let (state, _, _) = n.execute(&call, &auth, &operator).unwrap();
             n.state = state;
         });
     }
@@ -428,14 +464,15 @@ impl Chain for Stellar {
                     TransactionStatus::Failed(included(envelope, n.latest, false, None))
                 } else {
                     match n.execute(&call, &auth, &operator) {
-                        Ok((state, value)) => {
+                        Ok((state, value, event)) => {
                             n.state = state;
-                            TransactionStatus::Success(included(
-                                envelope,
-                                n.latest,
-                                true,
-                                Some(value),
-                            ))
+                            let mut tx = included(envelope, n.latest, true, Some(value));
+                            if let (Some(data), Some(TransactionMeta::V4(meta))) =
+                                (event, tx.meta.as_mut())
+                            {
+                                meta.operations = vec![charges_event(data)].try_into().unwrap();
+                            }
+                            TransactionStatus::Success(tx)
                         }
                         Err(_) => {
                             TransactionStatus::Failed(included(envelope, n.latest, false, None))
@@ -545,6 +582,7 @@ struct World {
     stellar: Stellar,
     clock: ManualClock,
     worker_pool: PgPool,
+    operator_pool: PgPool,
     operator_seed: String,
     source_seed: String,
     fee_seed: String,
@@ -600,6 +638,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         stellar,
         clock,
         worker_pool: pool_as(&connect, "SET ROLE pay_stellar_worker", 3).await,
+        operator_pool: pool_as(&connect, "SET ROLE pay_stellar_operator", 1).await,
         operator_seed: operator.to_strkey().to_string(),
         source_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
         fee_seed: SecretKey::generate().unwrap().to_strkey().to_string(),
@@ -942,7 +981,7 @@ async fn test_lapsed_deposit_expires_unless_the_buyer_included_it_themselves(
     };
     let operator = w.stellar.operator.clone();
     w.stellar.with(|n| {
-        let (state, _) = n.execute(&call, &[entry], &operator).unwrap();
+        let (state, _, _) = n.execute(&call, &[entry], &operator).unwrap();
         n.state = state;
     });
 
@@ -1267,4 +1306,181 @@ async fn test_deposit_three_charges_and_a_retried_charge_end_in_matching_balance
     }
     assert_eq!(w.balance(&buyer).await, (40, 0));
     assert_eq!(w.stellar.account(&buyer.key.address()), Some((40, 3)));
+}
+
+// ---- resolving quarantine ---------------------------------------------------
+
+fn hash_of(hex: &str) -> [u8; 32] {
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+    bytes.try_into().unwrap()
+}
+
+async fn quarantined(w: &World, id: &str) -> QuarantinedCharge {
+    quarantine::quarantined_charges(&w.operator_pool, Some(uuid::Uuid::parse_str(id).unwrap()))
+        .await
+        .unwrap()
+        .pop()
+        .expect("charge is quarantined")
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_quarantined_charges_are_resolved_from_the_contract_event(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charged = w.charge(&x, 10, "c-1").await;
+    let above = w.charge(&x, MAX_CHARGE as i64 + 10, "c-2").await;
+    // The return value is unusable, so both are quarantined, still debited.
+    w.stellar.with(|n| n.truncate_outcomes = true);
+    w.settle(&w.worker()).await;
+    assert_eq!(w.balance(&x).await, (100 - 10 - (MAX_CHARGE as i64 + 10), 0));
+    let batch = w.get_charge(&charged.charge_id).await.transaction_hash;
+
+    for (charge, expected) in [
+        (&charged, Resolution::Settled(Outcome::Charged)),
+        (&above, Resolution::Settled(Outcome::AboveLimit)),
+    ] {
+        let q = quarantined(&w, &charge.charge_id).await;
+        let (resolution, evidence) =
+            quarantine::prove_from_transaction(&w.stellar, &q, &hash_of(&batch)).await.unwrap();
+        assert_eq!(resolution, expected);
+        assert!(evidence.contains(&batch), "{evidence}");
+        quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    }
+    let settled = w.get_charge(&charged.charge_id).await;
+    let refused = w.get_charge(&above.charge_id).await;
+    assert_eq!((settled.state(), settled.outcome.as_str()), (ChargeState::Charged, "charged"));
+    assert_eq!((refused.state(), refused.outcome.as_str()), (ChargeState::Refused, "above_limit"));
+    // Only the refused amount came back.
+    assert_eq!(w.balance(&x).await, (90, 0));
+    let audit: Vec<(String, String)> = sqlx::query_as(
+        "SELECT resolution, resolved_by FROM pay_stellar.charge_resolutions ORDER BY resolved_at",
+    )
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(audit.len(), 2);
+
+    // A resolved charge cannot be resolved again, and its buyer settles again.
+    let again = quarantine::resolve(
+        &w.operator_pool,
+        uuid::Uuid::parse_str(&above.charge_id).unwrap(),
+        Resolution::Settled(Outcome::AboveLimit),
+        "twice",
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(again, QuarantineError::NotQuarantined(_)), "{again:?}");
+    assert_eq!(w.balance(&x).await, (90, 0));
+    w.stellar.with(|n| n.truncate_outcomes = false);
+    let next = w.charge(&x, 5, "c-3").await;
+    w.settle(&w.worker()).await;
+    let next = w.get_charge(&next.charge_id).await;
+    assert_eq!((next.state(), next.sequence), (ChargeState::Charged, 3));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_evidence_that_does_not_settle_the_charge_is_refused(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let y = w.funded("y", 100).await;
+    // X's sequence 1 is already consumed: the contract answers duplicate.
+    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 1);
+    let duplicate = w.charge(&x, 10, "c-x").await;
+    let other = w.charge(&y, 10, "c-y").await;
+    w.settle(&w.worker()).await;
+    let q = quarantined(&w, &duplicate.charge_id).await;
+    let batch = hash_of(&w.get_charge(&duplicate.charge_id).await.transaction_hash);
+
+    // The batch answered `duplicate` for X: it consumed nothing, so it proves
+    // no outcome; and X's sequence is consumed, so readmission is refused.
+    let error = quarantine::prove_from_transaction(&w.stellar, &q, &batch).await.unwrap_err();
+    assert!(
+        matches!(error, QuarantineError::NotConsumed { outcome: "duplicate", .. }),
+        "{error:?}"
+    );
+    let error = quarantine::prove_readmission(&w.stellar, &q).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::SequenceConsumed { consumed: 1, .. }), "{error:?}");
+    // An entry for the right account and sequence but another amount proves
+    // nothing either: Y's charge settled for 10, not 11.
+    assert_eq!(w.get_charge(&other.charge_id).await.state(), ChargeState::Charged);
+    let wrong_amount = QuarantinedCharge { owner: y.key.address(), amount: 11, ..q.clone() };
+    let error =
+        quarantine::prove_from_transaction(&w.stellar, &wrong_amount, &batch).await.unwrap_err();
+    assert!(matches!(error, QuarantineError::AmountMismatch { .. }), "{error:?}");
+
+    // Once the sequence is free again (here, set by the test), readmission
+    // is proven and the charge settles in the next batch.
+    w.stellar.with(|n| n.state.accounts.get_mut(&x.key.address()).unwrap().1 = 0);
+    let (resolution, evidence) = quarantine::prove_readmission(&w.stellar, &q).await.unwrap();
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Admitted);
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_charge(&duplicate.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.stellar.account(&x.key.address()), Some((90, 1)));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_only_the_resolution_function_leaves_quarantine(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-1").await;
+    w.stellar.with(|n| n.truncate_outcomes = true);
+    w.settle(&w.worker()).await;
+    let id = uuid::Uuid::parse_str(&charge.charge_id).unwrap();
+
+    // The worker, which may otherwise move charges, cannot move this one.
+    let error = sqlx::query(
+        "UPDATE pay_stellar.charges SET state = 'admitted', outcome = NULL, submission_id = NULL,
+             batch_index = NULL, settled_at = NULL WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&w.worker_pool)
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("is already quarantined"), "{error}");
+    // No runtime role but the operator may call the function, and the
+    // operator may not bypass it.
+    for pool in [&w.worker_pool, &w.h.api, &w.h.issuer] {
+        let error =
+            sqlx::query("SELECT pay_stellar.resolve_quarantined_charge($1, 'charged', 'x')")
+                .bind(id)
+                .execute(pool)
+                .await
+                .unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    }
+    for statement in [
+        "UPDATE pay_stellar.charges SET state = 'charged' WHERE id = $1",
+        "INSERT INTO pay_stellar.charge_resolutions (charge_id, resolution, evidence) VALUES ($1, 'charged', 'x')",
+    ] {
+        let error = sqlx::query(statement).bind(id).execute(&w.operator_pool).await.unwrap_err();
+        assert_eq!(error.as_database_error().unwrap().code().unwrap(), "42501", "{error}");
+    }
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Quarantined);
+
+    // The audit trail cannot be rewritten, even by the owner.
+    let q = quarantined(&w, &charge.charge_id).await;
+    let batch = hash_of(&w.get_charge(&charge.charge_id).await.transaction_hash);
+    let (resolution, evidence) =
+        quarantine::prove_from_transaction(&w.stellar, &q, &batch).await.unwrap();
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    for statement in [
+        "UPDATE pay_stellar.charge_resolutions SET evidence = 'rewritten'",
+        "DELETE FROM pay_stellar.charge_resolutions",
+    ] {
+        let error = sqlx::query(statement).execute(&w.h.owner).await.unwrap_err();
+        assert!(error.to_string().contains("append-only"), "{error}");
+    }
 }
