@@ -18,6 +18,11 @@ use stellar_xdr::{
     TransactionMeta, TransactionResult, TransactionV1Envelope, VecM, WriteXdr,
 };
 
+mod conditions;
+pub use conditions::{
+    FeeDistribution, FeePercentile, FeeStats, LatestLedgerInfo, UnknownPercentile,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
     #[error("RPC transport failure calling {method}")]

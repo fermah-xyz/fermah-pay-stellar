@@ -150,6 +150,25 @@ pub fn fee_bump(
     })
 }
 
+/// The inclusion bid per operation of a fee bump built by [`fee_bump`]:
+/// what is left of its fee after the inner resource fee, per operation
+/// including the fee bump itself. `None` if the fee does not divide that
+/// way, i.e. the fee bump was not built by [`fee_bump`].
+#[must_use]
+pub fn fee_bump_inclusion_fee(bump: &FeeBumpTransaction) -> Option<u32> {
+    let FeeBumpTransactionInnerTx::Tx(inner) = &bump.inner_tx;
+    let resource_fee = match &inner.tx.ext {
+        TransactionExt::V1(data) => data.resource_fee,
+        TransactionExt::V0 => 0,
+    };
+    let operations = i64::try_from(inner.tx.operations.len()).ok()?.checked_add(1)?;
+    let inclusion = bump.fee.checked_sub(resource_fee)?;
+    if inclusion < 0 || inclusion % operations != 0 {
+        return None;
+    }
+    u32::try_from(inclusion / operations).ok()
+}
+
 /// The hash the network reports for a fee-bumped submission.
 pub fn fee_bump_hash(tx: &FeeBumpTransaction, network: Network) -> Result<[u8; 32], AssemblyError> {
     let payload = TransactionSignaturePayload {
@@ -269,6 +288,25 @@ mod tests {
         };
         let bump = fee_bump(inner, &sponsor.address(), 100).unwrap();
         assert_eq!((bump.fee, bump.fee_source), (10_200, muxed_account(&sponsor.address())));
+    }
+
+    #[test]
+    fn test_fee_bump_inclusion_fee_reads_back_the_bid() {
+        let (source, sponsor) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+        let tx = assemble(unassembled(&source), resources(0), 10_000, 20).unwrap();
+        let TransactionEnvelope::Tx(inner) =
+            transaction::sign(tx, Network::Testnet, &[&source]).unwrap()
+        else {
+            panic!("expected a v1 envelope")
+        };
+        for bid in [100, 12_345, 1_000_000] {
+            let bump = fee_bump(inner.clone(), &sponsor.address(), bid).unwrap();
+            assert_eq!(fee_bump_inclusion_fee(&bump), Some(bid));
+        }
+        // 12_000 resource fee + 2 * 100 + 1: not a fee this module builds.
+        let mut odd = fee_bump(inner, &sponsor.address(), 100).unwrap();
+        odd.fee += 1;
+        assert_eq!(fee_bump_inclusion_fee(&odd), None);
     }
 
     #[test]
