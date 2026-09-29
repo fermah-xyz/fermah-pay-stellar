@@ -24,6 +24,8 @@ name = "fermah-pay-stellar-observer"
 path = "src/bin/observer.rs"
 
 [dependencies]
+axum.workspace = true
+serde.workspace = true
 fermah-pay-stellar-chain.workspace = true
 fermah-pay-stellar-domain.workspace = true
 fermah-pay-stellar-proto.workspace = true

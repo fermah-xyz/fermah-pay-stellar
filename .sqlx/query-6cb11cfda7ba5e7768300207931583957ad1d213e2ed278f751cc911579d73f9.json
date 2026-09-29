@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id FROM pay_stellar.buyers\n            WHERE wallet_address = $1 AND product_id = $2 AND seller_deployment_id = $3\n              AND network = $4\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6cb11cfda7ba5e7768300207931583957ad1d213e2ed278f751cc911579d73f9"
+}

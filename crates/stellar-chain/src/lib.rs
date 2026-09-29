@@ -14,6 +14,7 @@ pub mod onboarding;
 pub mod payments;
 pub mod prepaid;
 pub mod rpc;
+pub mod sep53;
 pub mod soroban;
 pub mod sponsored;
 pub mod submission;

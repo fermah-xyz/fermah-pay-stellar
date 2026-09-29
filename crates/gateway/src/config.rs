@@ -17,6 +17,11 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_LISTEN_ADDR", default_value = "127.0.0.1:50051")]
     pub listen_addr: SocketAddr,
 
+    /// Address the x402 facilitator interface (HTTP) listens on; not served
+    /// when unset.
+    #[arg(long, env = "PAY_STELLAR_X402_LISTEN_ADDR")]
+    pub x402_listen_addr: Option<SocketAddr>,
+
     /// The one Stellar network this process serves (`stellar:testnet` or
     /// `stellar:pubnet`). Keys and deployments of the other network are
     /// rejected.

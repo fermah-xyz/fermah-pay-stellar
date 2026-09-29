@@ -133,6 +133,7 @@ jobs:
               (.charges[] | "| Charge \(.contract_charge_id[0:12])… (\(.amount) units) | \(link(.transaction_hash)) |"),
               "| Retried charge | returned the original charge (created: \(.retried_charge.created)) |",
               "| Replayed charge sent to the contract | \(.contract_replay.result) |",
+              "| x402 commitment settled through /settle | \(link(.x402.transaction_hash)) |",
               "| Final balance | gateway \(.observed.gateway_available), contract \(.observed.contract_balance) |"
             ' "$record"
           } >> "$GITHUB_STEP_SUMMARY"

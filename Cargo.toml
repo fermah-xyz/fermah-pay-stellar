@@ -32,6 +32,7 @@ fermah-pay-stellar-chain = { path = "crates/stellar-chain" }
 fermah-pay-stellar-gateway = { path = "crates/gateway" }
 
 anyhow = "1.0.104"
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 ed25519-dalek = { version = "3.0.0", default-features = false, features = ["zeroize"] }
@@ -57,7 +58,7 @@ tonic = "0.14.6"
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = "0.14.6"
-tower = { version = "0.5.3", features = ["limit"] }
+tower = { version = "0.5.3", features = ["limit", "timeout"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.26.1", features = ["v7"] }

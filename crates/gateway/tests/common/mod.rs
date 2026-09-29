@@ -56,6 +56,11 @@ impl LatestLedger for Ledger {
 
 pub struct Harness {
     pub addr: SocketAddr,
+    /// The x402 interface over the same store and network view, called in
+    /// process.
+    pub x402: axum::Router,
+    /// What the x402 interface reads as the current unix time.
+    pub now: Arc<std::sync::atomic::AtomicI64>,
     pub owner: PgPool,
     pub api: PgPool,
     pub issuer: PgPool,
@@ -121,10 +126,16 @@ pub async fn start_with<L: LatestLedger>(
         max_concurrent_requests: 64,
         request_timeout: std::time::Duration::from_secs(30),
     };
+    let now = Arc::new(std::sync::atomic::AtomicI64::new(1_800_000_000));
+    let clock = Arc::clone(&now);
+    let x402 = fermah_pay_stellar_gateway::x402::router_with_clock(
+        ledger_api.clone(),
+        Arc::new(move || clock.load(Ordering::SeqCst)),
+    );
     tokio::spawn(serve(listener, store, network, ledger_api, limits, async {
         let _ = stop.await;
     }));
-    Harness { addr, owner, api, issuer, ledger, _shutdown: shutdown }
+    Harness { addr, x402, now, owner, api, issuer, ledger, _shutdown: shutdown }
 }
 
 pub struct Tenant {

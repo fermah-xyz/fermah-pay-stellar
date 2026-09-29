@@ -11,13 +11,15 @@
 use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
+use base64::Engine as _;
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::onboarding::onboard_buyers;
 use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{ChargeRequest, MAX_BATCH, account_balance, charge_record};
-use fermah_pay_stellar_chain::rpc::{FeePercentile, hex_lower};
+use fermah_pay_stellar_chain::rpc::{FeePercentile, hex_lower, http_client};
+use fermah_pay_stellar_chain::sep53;
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
 };
@@ -25,19 +27,20 @@ use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{transaction, usdc};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
-use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
+use fermah_pay_stellar_gateway::server::{ServerLimits, serve, serve_x402};
 use fermah_pay_stellar_gateway::store::Store;
 use fermah_pay_stellar_gateway::submission::{
     Engine, FeePolicy, Keys, Policy as EnginePolicy, SystemClock,
 };
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
+use fermah_pay_stellar_gateway::x402::commitment_message;
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
     ChargeState, CreateBuyerRequest, CreateChargeRequest, DepositState, GetBalanceRequest,
     GetChargeRequest, GetDepositRequest, PrepareDepositRequest, SubmitDepositRequest,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use tokio::net::TcpListener;
@@ -53,6 +56,8 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../db/migrations")
 /// 0.1 USDC in, 0.01 + 0.02 + 0.03 USDC charged.
 const DEPOSIT: i64 = 1_000_000;
 const CHARGES: [i64; 3] = [100_000, 200_000, 300_000];
+/// Settled through the x402 interface, from a commitment the buyer signs.
+const X402_AMOUNT: i64 = 50_000;
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_secs(2);
 
@@ -144,6 +149,12 @@ impl Context {
         let mut gateway_stop = stopped.clone();
         let limits =
             ServerLimits { max_concurrent_requests: 16, request_timeout: Duration::from_secs(30) };
+        let x402_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let x402_addr = x402_listener.local_addr()?;
+        let mut x402_stop = stopped.clone();
+        let x402 = tokio::spawn(serve_x402(x402_listener, ledger.clone(), limits, async move {
+            let _ = x402_stop.wait_for(|stop| *stop).await;
+        }));
         let gateway = tokio::spawn(serve(listener, store, NETWORK, ledger, limits, async move {
             let _ = gateway_stop.wait_for(|stop| *stop).await;
         }));
@@ -191,11 +202,19 @@ impl Context {
         });
 
         let outcome = self
-            .seller_flow(&format!("http://{addr}"), &token, &pinned, &recorded.contract, &owner)
+            .seller_flow(
+                &format!("http://{addr}"),
+                &format!("http://{x402_addr}"),
+                &token,
+                &pinned,
+                &recorded.contract,
+                &owner,
+            )
             .await;
         let _ = stop.send(true);
         let _ = settlement.await;
         let _ = gateway.await;
+        let _ = x402.await;
         let record = outcome?;
         evidence::write(&self.evidence_dir, "api-end-to-end", record)
     }
@@ -203,6 +222,7 @@ impl Context {
     async fn seller_flow(
         &self,
         endpoint: &str,
+        x402_endpoint: &str,
         token: &str,
         pinned: &fermah_pay_stellar_chain::prepaid::PrepaidDeployment,
         contract: &str,
@@ -360,6 +380,12 @@ impl Context {
             "unexpected refusal {conflict:?}"
         );
 
+        // A facilitator's calls through the x402 interface, for a commitment
+        // the buyer signs; settled on-chain with the next batch.
+        let mut facilitator = Facilitator::new(x402_endpoint, token)?;
+        let commitment =
+            facilitator.pay(&buyer, contract, &usdc::contract_strkey(pinned.usdc)).await?;
+
         let mut charges = Vec::new();
         for id in &charge_ids {
             let charge = until(
@@ -383,11 +409,26 @@ impl Context {
             charges.push(charge);
         }
 
+        let x402_settlement = until(
+            "x402 settlement",
+            || facilitator.settlement(&commitment),
+            |s| {
+                s["settlement"]["state"] == "charged"
+                    && s["settlement"]["transactionHash"].is_string()
+            },
+        )
+        .await?;
+        facilitator.log_settlement(&commitment, &x402_settlement);
+        let x402_charge_id = x402_settlement["settlement"]["contractChargeId"]
+            .as_str()
+            .context("settlement without a contract charge id")?
+            .to_owned();
+
         let balance = ledger
             .get_balance(authed(GetBalanceRequest { buyer_id: buyer_id.clone() }, token)?)
             .await?
             .into_inner();
-        let expected = DEPOSIT - CHARGES.iter().sum::<i64>();
+        let expected = DEPOSIT - CHARGES.iter().sum::<i64>() - X402_AMOUNT;
         ensure!(
             (balance.available, balance.pending_charges) == (expected, 0),
             "gateway balance {} pending {}, expected {expected}",
@@ -403,8 +444,12 @@ impl Context {
             .context("no contract account for the buyer")?;
         ensure!(account == i128::from(expected), "contract balance {account}, expected {expected}");
         // Each charge left its record on the contract, holding its outcome.
-        for charge in &charges {
-            let id = parse_charge_id(&charge.contract_charge_id)?;
+        let recorded_ids = charges
+            .iter()
+            .map(|charge| charge.contract_charge_id.clone())
+            .chain(std::iter::once(x402_charge_id));
+        for contract_charge_id in recorded_ids {
+            let id = parse_charge_id(&contract_charge_id)?;
             let recorded = self
                 .rpc
                 .get_ledger_entries(&[pinned.charge_record_key(&buyer.address(), &id)])
@@ -413,8 +458,7 @@ impl Context {
                 .and_then(|record| charge_record(&record.data));
             ensure!(
                 recorded == Some(fermah_pay_stellar_chain::prepaid::Outcome::Charged),
-                "charge {} is recorded as {recorded:?}",
-                charge.contract_charge_id
+                "charge {contract_charge_id} is recorded as {recorded:?}"
             );
         }
         // The contract's own replay protection, independent of the gateway:
@@ -514,6 +558,12 @@ impl Context {
                 "result": "refused before submission as DuplicateCharge (contract error 110)",
                 "account_unchanged": true,
             },
+            "x402": {
+                "commitment": commitment,
+                "amount": X402_AMOUNT,
+                "transaction_hash": x402_settlement["settlement"]["transactionHash"],
+                "exchange": facilitator.log,
+            },
             "observed": {
                 "gateway_available": balance.available,
                 "gateway_pending": balance.pending_charges,
@@ -527,6 +577,137 @@ impl Context {
                 "channel_xlm_stroops_after": channel_after.xlm_stroops,
             },
         }))
+    }
+}
+
+/// Plays a facilitator against the x402 interface, logging every request
+/// and response (the API key is never logged).
+struct Facilitator {
+    http: reqwest::Client,
+    endpoint: String,
+    token: String,
+    log: Vec<Value>,
+}
+
+impl Facilitator {
+    fn new(endpoint: &str, token: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            http: http_client(Duration::from_secs(30))?,
+            endpoint: endpoint.to_owned(),
+            token: token.to_owned(),
+            log: Vec::new(),
+        })
+    }
+
+    async fn call(
+        &mut self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> anyhow::Result<Value> {
+        let url = format!("{}{path}", self.endpoint);
+        let request = match body {
+            Some(body) => self.http.post(&url).json(body),
+            None => self.http.get(&url),
+        };
+        let response = request.bearer_auth(&self.token).send().await?;
+        let status = response.status().as_u16();
+        let reply: Value = response.json().await?;
+        self.log.push(json!({
+            "request": { "method": method, "path": path, "body": body },
+            "response": { "status": status, "body": reply },
+        }));
+        Ok(reply)
+    }
+
+    /// Signs a commitment as the buyer, then verifies, settles, settles again
+    /// and presents it with an altered amount. Returns the commitment.
+    async fn pay(
+        &mut self,
+        buyer: &SecretKey,
+        pay_to: &str,
+        asset: &str,
+    ) -> anyhow::Result<String> {
+        let supported = self.call("GET", "/supported", None).await?;
+        ensure!(
+            supported["kinds"][0]["scheme"] == "batch-settlement"
+                && supported["kinds"][0]["network"] == NETWORK.caip2(),
+            "unexpected /supported {supported}"
+        );
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes)?;
+        let commitment = hex_lower(&bytes);
+        let valid_until = (unix_now() + 120).to_string();
+        let amount = X402_AMOUNT.to_string();
+        let payer = buyer.address();
+        let message = commitment_message(
+            NETWORK.caip2(),
+            asset,
+            pay_to,
+            &amount,
+            payer.as_str(),
+            &commitment,
+            &valid_until,
+        );
+        let signature = sep53::sign(buyer, message.as_bytes());
+        let requirements = |amount: &str| {
+            json!({
+                "scheme": "batch-settlement",
+                "network": NETWORK.caip2(),
+                "amount": amount,
+                "asset": asset,
+                "payTo": pay_to,
+                "maxTimeoutSeconds": 300,
+            })
+        };
+        let request = |amount: &str| {
+            json!({
+                "x402Version": 2,
+                "paymentPayload": {
+                    "x402Version": 2,
+                    "resource": { "url": "https://seller.example/api/answer" },
+                    "accepted": requirements(amount),
+                    "payload": {
+                        "payer": payer.as_str(),
+                        "commitment": commitment,
+                        "validUntil": valid_until,
+                        "signature": base64::engine::general_purpose::STANDARD.encode(signature),
+                    },
+                },
+                "paymentRequirements": requirements(amount),
+            })
+        };
+        let verified = self.call("POST", "/verify", Some(&request(&amount))).await?;
+        ensure!(verified["isValid"] == true, "verify refused: {verified}");
+        let settled = self.call("POST", "/settle", Some(&request(&amount))).await?;
+        ensure!(
+            settled["success"] == true && settled["transaction"] == commitment.as_str(),
+            "settle refused: {settled}"
+        );
+        let again = self.call("POST", "/settle", Some(&request(&amount))).await?;
+        ensure!(
+            again["success"] == true && again["extensions"]["prepaidLedger"]["replayed"] == true,
+            "a retried settlement was not answered with the same charge: {again}"
+        );
+        let altered = (X402_AMOUNT + 1).to_string();
+        let forged = self.call("POST", "/verify", Some(&request(&altered))).await?;
+        ensure!(
+            forged["invalidReason"] == "invalid_batch_settlement_stellar_signature",
+            "an altered amount was not refused: {forged}"
+        );
+        Ok(commitment)
+    }
+
+    async fn settlement(&self, commitment: &str) -> anyhow::Result<Value> {
+        let url = format!("{}/settlements/{commitment}", self.endpoint);
+        Ok(self.http.get(url).bearer_auth(&self.token).send().await?.json().await?)
+    }
+
+    fn log_settlement(&mut self, commitment: &str, reply: &Value) {
+        self.log.push(json!({
+            "request": { "method": "GET", "path": format!("/settlements/{commitment}") },
+            "response": { "status": 200, "body": reply },
+        }));
     }
 }
 

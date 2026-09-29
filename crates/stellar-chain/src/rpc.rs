@@ -766,6 +766,12 @@ fn decode_event_page(raw: RawEventPage) -> Result<EventPage, RpcError> {
     })
 }
 
+/// An HTTP client with the RPC client's TLS setup, for calling other
+/// services (plain `http` included).
+pub fn http_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().tls_backend_preconfigured(tls_config()).timeout(timeout).build()
+}
+
 pub(crate) fn tls_config() -> rustls::ClientConfig {
     let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))

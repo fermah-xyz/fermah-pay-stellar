@@ -245,6 +245,8 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "itoa",
  "matchit",
  "memchr",
@@ -252,7 +254,10 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
+ "serde_json",
+ "serde_path_to_error",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1075,6 +1080,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 name = "fermah-pay-stellar-chain"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "ed25519-dalek 3.0.0",
  "fermah-pay-stellar-domain",
  "getrandom 0.4.3",
@@ -1097,12 +1103,14 @@ name = "fermah-pay-stellar-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "clap",
  "fermah-pay-stellar-chain",
  "fermah-pay-stellar-domain",
  "fermah-pay-stellar-gateway",
  "fermah-pay-stellar-proto",
  "getrandom 0.4.3",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1128,6 +1136,7 @@ name = "fermah-pay-stellar-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.23.1",
  "clap",
  "fermah-pay-stellar-chain",
@@ -1135,6 +1144,7 @@ dependencies = [
  "fermah-pay-stellar-proto",
  "getrandom 0.4.3",
  "http",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
@@ -3041,6 +3051,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
