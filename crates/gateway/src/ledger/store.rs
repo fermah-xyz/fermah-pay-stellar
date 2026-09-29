@@ -48,6 +48,17 @@ pub enum ChargeState {
 }
 
 impl ChargeState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Submitted => "submitted",
+            Self::Charged => "charged",
+            Self::Refused => "refused",
+            Self::Quarantined => "quarantined",
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, StoreError> {
         Ok(match raw {
             "admitted" => Self::Admitted,
@@ -167,6 +178,29 @@ impl Store {
             })
         })
         .transpose()
+    }
+
+    /// The caller's buyer holding `wallet`; a wallet belongs to at most one
+    /// buyer of a deployment.
+    pub async fn buyer_by_wallet(
+        &self,
+        scope: &Scope,
+        wallet: &AccountAddress,
+    ) -> Result<Option<Uuid>, StoreError> {
+        sqlx::query_scalar!(
+            r#"
+            SELECT id FROM pay_stellar.buyers
+            WHERE wallet_address = $1 AND product_id = $2 AND seller_deployment_id = $3
+              AND network = $4
+            "#,
+            wallet.as_str(),
+            scope.product_id(),
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(query("find buyer by wallet"))
     }
 
     pub async fn buyer_wallet(
@@ -445,6 +479,16 @@ impl Store {
     ) -> Result<Option<ChargeRecord>, StoreError> {
         let mut conn = self.pool.acquire().await.map_err(query("acquire connection"))?;
         self.charge_on(&mut conn, scope, Some(id), None).await
+    }
+
+    /// The caller's charge admitted under `key`.
+    pub async fn charge_with_key(
+        &self,
+        scope: &Scope,
+        key: &IdempotencyKey,
+    ) -> Result<Option<ChargeRecord>, StoreError> {
+        let mut conn = self.pool.acquire().await.map_err(query("acquire connection"))?;
+        self.charge_on(&mut conn, scope, None, Some(key)).await
     }
 
     async fn charge_on(

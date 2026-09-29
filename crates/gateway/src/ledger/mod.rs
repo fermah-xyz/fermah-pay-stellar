@@ -71,6 +71,17 @@ pub struct LedgerApi<L> {
     policy: LedgerPolicy,
 }
 
+impl<L> Clone for LedgerApi<L> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            ledger: Arc::clone(&self.ledger),
+            network: self.network,
+            policy: self.policy,
+        }
+    }
+}
+
 impl<L> LedgerApi<L> {
     pub fn new(store: Store, ledger: L, network: Network, policy: LedgerPolicy) -> Self {
         Self { store, ledger: Arc::new(ledger), network, policy }
@@ -241,6 +252,58 @@ fn record_scope(scope: &Scope) {
 }
 
 impl<L: LatestLedger> LedgerApi<L> {
+    /// Admits a charge, or answers a retry of one from its stored row
+    /// whatever the network's state: only a new charge needs the current
+    /// ledger. `true` when this call created the charge.
+    pub(crate) async fn admit(
+        &self,
+        scope: &Scope,
+        buyer_id: Uuid,
+        amount: i64,
+        key: &IdempotencyKey,
+    ) -> Result<(ChargeRecord, bool), Refusal> {
+        let store_failure = |error: StoreError| {
+            tracing::error!(error = %error, source = ?std::error::Error::source(&error), "store failure");
+            Refusal::Internal
+        };
+        let replayed = self
+            .store
+            .replayed_charge(scope, buyer_id, amount, key)
+            .await
+            .map_err(store_failure)?;
+        let admission = match replayed {
+            Some(admission) => admission,
+            None => {
+                let latest = self.ledger.latest_ledger().await.map_err(|error| {
+                    tracing::warn!(error = %error, "reading the latest ledger");
+                    Refusal::NetworkUnavailable
+                })?;
+                let last_ledger = latest
+                    .checked_add(self.policy.charge_validity_ledgers)
+                    .ok_or(Refusal::Internal)?;
+                self.store
+                    .admit_charge(scope, buyer_id, amount, key, last_ledger)
+                    .await
+                    .map_err(store_failure)?
+            }
+        };
+        match admission {
+            Admission::Admitted(record) => Ok((record, true)),
+            Admission::Replayed(record) => Ok((record, false)),
+            Admission::Conflict => Err(Refusal::IdempotencyConflict),
+            Admission::BuyerNotFound => Err(Refusal::BuyerNotFound),
+            Admission::InsufficientBalance => Err(Refusal::InsufficientBalance),
+        }
+    }
+
+    pub(crate) const fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub(crate) const fn network(&self) -> Network {
+        self.network
+    }
+
     /// The existing deposit under `key`, if the request repeats it exactly.
     fn replay_deposit(
         &self,
@@ -428,34 +491,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         let buyer_id = parse_id(&body.buyer_id, Refusal::InvalidBuyerId)?;
         let amount = parse_amount(body.amount)?;
         let key = parse_key(&body.idempotency_key)?;
-        // A retry is answered from the stored row, whatever the network's
-        // state: only a new charge needs the current ledger.
-        let replayed = self
-            .store
-            .replayed_charge(&scope, buyer_id, amount, &key)
-            .await
-            .map_err(|e| internal(&e))?;
-        let admission = match replayed {
-            Some(admission) => admission,
-            None => {
-                let latest =
-                    self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
-                let last_ledger = latest
-                    .checked_add(self.policy.charge_validity_ledgers)
-                    .ok_or(Refusal::Internal)?;
-                self.store
-                    .admit_charge(&scope, buyer_id, amount, &key, last_ledger)
-                    .await
-                    .map_err(|e| internal(&e))?
-            }
-        };
-        let (record, created) = match admission {
-            Admission::Admitted(record) => (record, true),
-            Admission::Replayed(record) => (record, false),
-            Admission::Conflict => return Err(Refusal::IdempotencyConflict.into()),
-            Admission::BuyerNotFound => return Err(Refusal::BuyerNotFound.into()),
-            Admission::InsufficientBalance => return Err(Refusal::InsufficientBalance.into()),
-        };
+        let (record, created) = self.admit(&scope, buyer_id, amount, &key).await?;
         Ok(Response::new(CreateChargeResponse { charge: Some(charge_to_wire(record)?), created }))
     }
 

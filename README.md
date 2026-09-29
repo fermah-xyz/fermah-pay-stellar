@@ -16,6 +16,9 @@ It provides:
   buyer's balance and settled in batches of up to 98, and idempotent retries
   ([reference](docs/api/ledger.md),
   [settlement](docs/architecture/transactions.md#settlement)).
+- **x402 facilitator interface**: `/verify`, `/settle` and `/supported` over
+  the `batch-settlement` scheme, for commitments a buyer signs with its
+  Stellar key against its prepaid balance ([reference](docs/api/x402.md)).
 - **Prepaid ledger contract** (Soroban): buyer credit and seller revenue over
   USDC held in a separate treasury, with per-charge replay protection and
   batches of up to 98 charges in one call
@@ -79,6 +82,7 @@ Continue with the [quickstart](docs/quickstart/local.md).
 - [Architecture](docs/architecture/overview.md)
 - [Buyer API](docs/api/buyer.md)
 - [Ledger API](docs/api/ledger.md)
+- [x402 facilitator interface](docs/api/x402.md)
 - [Local quickstart](docs/quickstart/local.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
 - [Self-hosting: chain observer](docs/self-hosting/observer.md)

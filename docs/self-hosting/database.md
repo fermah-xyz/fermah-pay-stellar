@@ -73,6 +73,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_DATABASE_URL` | URL of the gateway login role |
 | Gateway | `PAY_STELLAR_NETWORK` | `stellar:testnet` or `stellar:pubnet` |
 | Gateway | `PAY_STELLAR_LISTEN_ADDR` | listen address, default `127.0.0.1:50051` |
+| Gateway | `PAY_STELLAR_X402_LISTEN_ADDR` | listen address of the [x402 facilitator interface](../api/x402.md) (HTTP); not served when unset |
 | Gateway | `PAY_STELLAR_DATABASE_MAX_CONNECTIONS` | pool size, default 16, must be at least 1 |
 | Gateway | `PAY_STELLAR_MAX_CONCURRENT_REQUESTS` | requests processed at once across all connections, default 64; the rest wait |
 | Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |

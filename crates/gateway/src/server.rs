@@ -1,4 +1,5 @@
-//! Assembles the gRPC server: health, authentication, buyer and ledger APIs.
+//! Assembles the servers: the gRPC API (health, authentication, buyer and
+//! ledger services) and the x402 facilitator interface over HTTP.
 
 use std::future::Future;
 use std::time::Duration;
@@ -44,4 +45,30 @@ pub async fn serve<L: LatestLedger>(
         .add_service(LedgerServiceServer::new(ledger))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
         .await
+}
+
+/// Largest x402 request body accepted; a facilitator request is a few KB.
+const X402_BODY_LIMIT: usize = 16 * 1024;
+
+/// Serves the x402 facilitator interface until `shutdown` resolves, under
+/// the same concurrency and time bounds as the gRPC API.
+pub async fn serve_x402<L: LatestLedger + 'static>(
+    listener: TcpListener,
+    ledger: LedgerApi<L>,
+    limits: ServerLimits,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let app = crate::x402::router(ledger)
+        .layer(axum::extract::DefaultBodyLimit::max(X402_BODY_LIMIT))
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(|_: tower::BoxError| async {
+                    http::StatusCode::SERVICE_UNAVAILABLE
+                }))
+                .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
+                    limits.max_concurrent_requests,
+                ))
+                .layer(tower::timeout::TimeoutLayer::new(limits.request_timeout)),
+        );
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }
