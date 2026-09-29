@@ -332,6 +332,21 @@ fn describe(record: &ContractEventRecord) -> Described {
             json!({ "role": role.token(), "previous": previous.to_string(),
                     "current": current.to_string() }),
         ),
+        LedgerEvent::PauseChanged { paused } => {
+            ("pause", None, None, None, json!({ "paused": paused }))
+        }
+        LedgerEvent::LimitsChanged { previous, current } => (
+            "limits",
+            None,
+            None,
+            None,
+            json!({
+                "previous": { "min_deposit": previous.min_deposit.to_string(),
+                              "max_charge": previous.max_charge.to_string() },
+                "current": { "min_deposit": current.min_deposit.to_string(),
+                             "max_charge": current.max_charge.to_string() },
+            }),
+        ),
     };
     Described { kind, owner, amount, reference, payload, event: Some(event) }
 }
@@ -706,6 +721,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 }
                 // Recorded for reconciliation; the gateway keeps no record
                 // of withdrawals to match them against.
+                // Only the admin can pause or change limits; each is reported
+                // so an unexpected one is noticed.
+                Some(LedgerEvent::PauseChanged { .. } | LedgerEvent::LimitsChanged { .. }) => {
+                    let verdict = Verdict::Finding(Finding::new(
+                        FindingKind::AdminChange,
+                        Severity::Warning,
+                        described.payload.clone(),
+                    ));
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
                 Some(LedgerEvent::Withdrawn { .. } | LedgerEvent::RevenueWithdrawn { .. }) => {}
             }
         }

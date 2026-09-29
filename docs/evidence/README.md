@@ -55,7 +55,8 @@ lists the outer (fee-bump) and inner transaction hashes.
 
 | Record | Shows |
 |---|---|
-| [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation; the deployed code hash equals the Wasm built in CI from the same source |
+| [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation |
+| [`prepaid-upgrade`](testnet/2026-09-29T143109-prepaid-upgrade.json) | the admin replaces the contract's code in place (Wasm `02d80b2f…` to `78e874a9…`, which announces pauses and limit changes): same contract address, totals unchanged; the running code hash equals the Wasm built in CI from the same source |
 | [`buyers-funded-100`](testnet/2026-09-29T045256-buyers-funded-100.json) | 100 buyers holding 0 XLM with sponsored reserves, each topped up with Circle USDC |
 | [`deposits-1-100`](testnet/2026-09-29T050720-deposits-1-100.json) | 100 deposits: USDC moves from each buyer to the separate treasury and the ledger credits the buyer's account; the buyer only signs its authorization entry, pays no fee and holds 0 XLM before and after |
 | [`charge-batch-98-first`](testnet/2026-09-29T050954-charge-batch-98-first.json) | **one transaction charging 98 distinct buyers**, all `Charged`, each under its own charge identifier |

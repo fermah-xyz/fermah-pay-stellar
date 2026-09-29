@@ -8,9 +8,10 @@
 use fermah_pay_stellar_domain::AccountAddress;
 use stellar_xdr::{
     BytesM, ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody,
-    ContractId, Hash, Int128Parts, InvokeContractArgs, LedgerEntryData, LedgerKey,
-    LedgerKeyContractData, ScAddress, ScBytes, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec,
-    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM, TransactionMeta, VecM,
+    ContractExecutable, ContractId, Hash, Int128Parts, InvokeContractArgs, LedgerEntryData,
+    LedgerKey, LedgerKeyContractData, ScAddress, ScBytes, ScContractInstance, ScMap, ScMapEntry,
+    ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM,
+    TransactionMeta, VecM,
 };
 
 use crate::transaction::account_id;
@@ -210,6 +211,18 @@ impl PrepaidDeployment {
     #[must_use]
     pub fn get_totals_call(&self) -> InvokeContractArgs {
         call(self.contract, "get_totals", vec![])
+    }
+
+    /// Replaces the contract's code with the uploaded Wasm `wasm_hash`.
+    #[must_use]
+    pub fn upgrade_call(&self, wasm_hash: [u8; 32]) -> InvokeContractArgs {
+        call(self.contract, "upgrade", vec![bytes_val(&wasm_hash)])
+    }
+
+    /// What the admin signs for an upgrade.
+    #[must_use]
+    pub fn upgrade_authorization(&self, wasm_hash: [u8; 32]) -> SorobanAuthorizedInvocation {
+        invocation(self.upgrade_call(wasm_hash), vec![])
     }
 
     #[must_use]
@@ -473,6 +486,33 @@ pub enum LedgerEvent {
         previous: ChainAddress,
         current: ChainAddress,
     },
+    /// The admin paused or unpaused the contract; the state after the call.
+    PauseChanged {
+        paused: bool,
+    },
+    /// The admin replaced the deposit and charge limits.
+    LimitsChanged {
+        previous: ContractLimits,
+        current: ContractLimits,
+    },
+}
+
+/// The contract's deposit and charge limits, in USDC base units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContractLimits {
+    pub min_deposit: i128,
+    pub max_charge: i128,
+}
+
+fn limits_of(value: &ScVal) -> Option<ContractLimits> {
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .and_then(|f| i128_of(&f.val))
+    };
+    Some(ContractLimits { min_deposit: field(b"min_deposit")?, max_charge: field(b"max_charge")? })
 }
 
 /// Decodes a contract event from its topics and data; `None` for any shape
@@ -481,6 +521,10 @@ pub enum LedgerEvent {
 #[must_use]
 pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
     let (ScVal::Symbol(name), rest) = topics.split_first()? else { return None };
+    // Published as a single value rather than a vector.
+    if let (b"pause", [], ScVal::Bool(paused)) = (name.0.as_slice(), rest, data) {
+        return Some(LedgerEvent::PauseChanged { paused: *paused });
+    }
     let fields = match data {
         ScVal::Vec(Some(ScVec(fields))) => fields.as_slice(),
         _ => return None,
@@ -541,6 +585,13 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                 role,
                 previous: ChainAddress::from_val(previous)?,
                 current: ChainAddress::from_val(current)?,
+            }
+        }
+        (b"limits", []) => {
+            let [previous, current] = fields else { return None };
+            LedgerEvent::LimitsChanged {
+                previous: limits_of(previous)?,
+                current: limits_of(current)?,
             }
         }
         _ => return None,
@@ -651,6 +702,22 @@ pub struct InstanceState {
 /// Decodes the contract instance entry read at [`PrepaidDeployment::instance_key`];
 /// `None` if it is not this contract's layout. The layout is internal to the
 /// contract and pinned by the contract's tests.
+/// The hash of the Wasm the contract instance runs, from its instance entry.
+#[must_use]
+pub fn instance_wasm(entry: &LedgerEntryData) -> Option<[u8; 32]> {
+    match entry {
+        LedgerEntryData::ContractData(ContractDataEntry {
+            val:
+                ScVal::ContractInstance(ScContractInstance {
+                    executable: ContractExecutable::Wasm(Hash(hash)),
+                    ..
+                }),
+            ..
+        }) => Some(*hash),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub fn instance_state(entry: &LedgerEntryData) -> Option<InstanceState> {
     let LedgerEntryData::ContractData(ContractDataEntry {

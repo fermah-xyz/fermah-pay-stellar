@@ -46,6 +46,12 @@ enum Command {
     /// funded by Friendbot; admin, operator, seller, treasury and USDC reserve
     /// sponsored with zero XLM.
     InitRoles,
+    /// Replace the recorded contract's code with WASM in place, authorized by
+    /// the admin; balances and totals are kept
+    UpgradePrepaid {
+        #[arg(long)]
+        wasm: PathBuf,
+    },
     /// Upload the prepaid ledger Wasm and create an instance pinned to the
     /// profile's roles and Circle testnet USDC.
     DeployPrepaid {
@@ -161,6 +167,11 @@ async fn main() -> anyhow::Result<()> {
     };
     match cli.command {
         Command::InitRoles => context()?.init_roles().await?,
+        Command::UpgradePrepaid { wasm } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            context()?.upgrade_prepaid(&code).await?;
+        }
         Command::DeployPrepaid { wasm, min_deposit, max_charge } => {
             let code =
                 std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;

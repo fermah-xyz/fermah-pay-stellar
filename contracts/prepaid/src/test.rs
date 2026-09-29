@@ -1673,6 +1673,32 @@ fn test_gateway_mirrors_the_contract_limits() {
     );
 }
 
+#[test]
+fn test_pause_and_unpause_are_announced() {
+    let w = world();
+    let announced = |w: &World| w.env.events().all().filter_by_contract(&w.contract);
+    admin_call(&w, &w.admin, "pause", no_args(&w)).unwrap();
+    assert_eq!(announced(&w), [PauseChanged { paused: true }.to_xdr(&w.env, &w.contract)]);
+    admin_call(&w, &w.admin, "unpause", no_args(&w)).unwrap();
+    assert_eq!(announced(&w), [PauseChanged { paused: false }.to_xdr(&w.env, &w.contract)]);
+}
+
+#[test]
+fn test_limit_change_is_announced_with_previous_and_current_limits() {
+    let w = world();
+    let current = Limits { min_deposit: 2 * MIN_DEPOSIT, max_charge: USDC };
+    admin_call(&w, &w.admin, "set_limits", (current.clone(),).into_val(&w.env)).unwrap();
+    let expected = LimitsChanged {
+        previous: Limits { min_deposit: MIN_DEPOSIT, max_charge: MAX_CHARGE },
+        current: current.clone(),
+    };
+    assert_eq!(
+        w.env.events().all().filter_by_contract(&w.contract),
+        [expected.to_xdr(&w.env, &w.contract)]
+    );
+    assert_eq!(w.client().get_config().limits, current);
+}
+
 /// The events of the last invocation, as this contract emitted them, decoded
 /// the way the chain observer decodes what `getEvents` returns.
 fn observed(w: &World) -> std::vec::Vec<fermah_pay_stellar_chain::prepaid::LedgerEvent> {
@@ -1695,7 +1721,7 @@ fn observed(w: &World) -> std::vec::Vec<fermah_pay_stellar_chain::prepaid::Ledge
 #[test]
 fn test_observer_decodes_every_event_the_contract_publishes() {
     use fermah_pay_stellar_chain::prepaid::{
-        ChainAddress, ChargeEntry, LedgerEvent, Outcome as Decoded, Role,
+        ChainAddress, ChargeEntry, ContractLimits, LedgerEvent, Outcome as Decoded, Role,
     };
     let w = world();
     let buyer = w.party(10 * USDC);
@@ -1759,6 +1785,20 @@ fn test_observer_decodes_every_event_the_contract_publishes() {
             destination: ChainAddress::Account(w.seller.key.address()),
             amount: USDC / 4,
             withdrawal_id: id32(9),
+        }]
+    );
+
+    admin_call(&w, &w.admin, "pause", no_args(&w)).unwrap();
+    assert_eq!(observed(&w), [LedgerEvent::PauseChanged { paused: true }]);
+    admin_call(&w, &w.admin, "unpause", no_args(&w)).unwrap();
+    assert_eq!(observed(&w), [LedgerEvent::PauseChanged { paused: false }]);
+    let limits = Limits { min_deposit: 3, max_charge: 4 };
+    admin_call(&w, &w.admin, "set_limits", (limits,).into_val(&w.env)).unwrap();
+    assert_eq!(
+        observed(&w),
+        [LedgerEvent::LimitsChanged {
+            previous: ContractLimits { min_deposit: MIN_DEPOSIT, max_charge: MAX_CHARGE },
+            current: ContractLimits { min_deposit: 3, max_charge: 4 },
         }]
     );
 

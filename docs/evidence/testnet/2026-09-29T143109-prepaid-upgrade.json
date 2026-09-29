@@ -1,0 +1,46 @@
+{
+  "admin": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "prepaid-ledger-upgrade",
+  "expected": "the admin replaces the contract's code in place; the contract address, balances and totals are unchanged",
+  "network": "stellar:testnet",
+  "observed": {
+    "liabilities": "8350000",
+    "revenue": "28500000",
+    "wasm_after": "78e874a9b68b86f2f497856e21be951e430c8a3ef8e75fd053561adb71d3dc52",
+    "wasm_before": "02d80b2f46852ef2e1548d5b90c51edc46d53a768a0cf9015795c17bd751428c"
+  },
+  "recorded_at": "2026-09-29T14:31:09.456230036Z",
+  "upgrade": {
+    "fee_charged_stroops": 146349290,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "9b2f6114d5722d355163adf678f67ded741d5d243db0f6fb879f9fee5916f5d1",
+    "ledger": 4933736,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/8f2e383bb96f746c8d006483d174bc63ec6cbd082245c291222edfab1f4ec1fa",
+    "resources": {
+      "disk_read_bytes": 188,
+      "footprint_read_only": 3,
+      "footprint_read_write": 2,
+      "instructions": 1220373,
+      "write_bytes": 764
+    },
+    "transaction_hash": "8f2e383bb96f746c8d006483d174bc63ec6cbd082245c291222edfab1f4ec1fa"
+  },
+  "upload": {
+    "fee_charged_stroops": 44642680,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "de94bba24454254e82bb6704e22f47e7fdaf768059d8ca4192ea3fcc5046a952",
+    "ledger": 4933735,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/876f8e0fc79184b786edca1f41ce75ac1765d670b73d853574db530c5cf30857",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 0,
+      "footprint_read_write": 1,
+      "instructions": 15474189,
+      "write_bytes": 17192
+    },
+    "transaction_hash": "876f8e0fc79184b786edca1f41ce75ac1765d670b73d853574db530c5cf30857"
+  }
+}

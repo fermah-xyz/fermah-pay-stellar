@@ -73,6 +73,7 @@ member of `pay_stellar_operator` can read both tables.
 | `deposit_outcome_mismatch` | critical | The contract credited a deposit the gateway closed as failed or expired: the buyer's credit is missing from the available balance. | Credit the buyer through the seller; report the case. |
 | `deposit_unsettled` | warning | The contract credited a deposit whose row is still not final after the grace. | Check that the worker runs. |
 | `role_changed` | warning | The admin or seller role was rotated on the contract. | Confirm the rotation was intended; if not, the admin key is compromised. |
+| `admin_change` | warning | The admin paused or unpaused the contract, or changed its deposit and charge limits; `detail` holds the new state. | Confirm the change was intended; if not, the admin key is compromised. |
 | `binding_out_of_date` | warning | The operator or treasury was rotated on the contract but the deployment's binding still names the previous account after the grace. | Run `admin sync-ledger` ([rotation](rotation.md)); if the rotation was not intended, the admin key is compromised. |
 | `treasury_deficit` | critical | The treasury holds less USDC than the contract owes buyers and the seller. | Pause the contract with the admin key and find where the USDC went; top up the treasury. After a treasury rotation, move the previous treasury's USDC. |
 | `treasury_surplus` | info | The treasury holds more USDC than the contract owes. | Expected if it holds other funds; otherwise find the source. |
