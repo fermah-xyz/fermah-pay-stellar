@@ -328,13 +328,11 @@ impl RpcClient {
         })
     }
 
+    /// The latest ledger the node has ingested. Read from `getHealth`:
+    /// `getLatestLedger` also carries the whole ledger's metadata, megabytes
+    /// on pubnet, and is kept for when the header is needed.
     pub async fn get_latest_ledger(&self) -> Result<u32, RpcError> {
-        #[derive(Deserialize)]
-        struct Raw {
-            sequence: u32,
-        }
-        let raw: Raw = self.call("getLatestLedger", serde_json::json!({})).await?;
-        Ok(raw.sequence)
+        Ok(self.get_health().await?.latest_ledger)
     }
 
     /// Entries that exist, in no guaranteed order; absent keys are omitted.

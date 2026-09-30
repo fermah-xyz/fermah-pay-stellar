@@ -1059,9 +1059,10 @@ async fn test_clock_skew_beyond_the_bound_builds_nothing(
     connect: PgConnectOptions,
 ) {
     let h = harness(opts, connect).await;
-    let engine = h.engine();
-    // Local clock ahead of the latest close by 21s, then behind it by 21s.
+    // Local clock ahead of the latest close by 21s, then behind it by 21s,
+    // each measured by an engine of its own.
     for lag in [21, -21] {
+        let engine = h.engine();
         h.chain.with(|n| n.close_lag_secs = lag);
         let now = h.clock.now().unix_timestamp();
         let refused = engine.install(Kind::ChargeBatch, call(), vec![]).await;
@@ -1079,6 +1080,29 @@ async fn test_clock_skew_beyond_the_bound_builds_nothing(
         .await
         .unwrap();
     assert_eq!((rows, h.chain.sent().len()), (0, 0));
+}
+
+/// The clock is measured against the ledger once a minute, since reading the
+/// latest ledger's close time fetches its whole metadata; in between, the
+/// last measurement stands.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_clock_is_measured_again_only_after_a_minute(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let engine = h.engine();
+    h.chain.with(|n| n.close_lag_secs = 21);
+    let skewed =
+        |result: &Result<_, EngineError>| matches!(result, Err(EngineError::ClockSkew { .. }));
+    assert!(skewed(&engine.install(Kind::ChargeBatch, call(), vec![]).await));
+    // Corrected on the node's side, but within the minute: still refused.
+    h.chain.with(|n| n.close_lag_secs = 0);
+    h.clock.advance(Duration::from_secs(59));
+    assert!(skewed(&engine.install(Kind::ChargeBatch, call(), vec![]).await));
+    // A minute on, measured again: built.
+    h.clock.advance(Duration::from_secs(1));
+    h.install_included(&engine).await;
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
