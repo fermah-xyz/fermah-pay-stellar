@@ -59,7 +59,14 @@ tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = "0.14.6"
 tower = { version = "0.5.3", features = ["limit", "timeout"] }
+metrics = "0.24.6"
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
+opentelemetry = { version = "0.33.0", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "rt-tokio"] }
 tracing = "0.1.44"
+tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 uuid = { version = "1.26.1", features = ["v7"] }
 webpki-roots = "1.0.9"

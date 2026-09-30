@@ -10,9 +10,8 @@ use fermah_pay_stellar_chain::rpc::{FeePercentile, RpcClient};
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::submission::{Engine, FeePolicy, Keys, Policy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
-use fermah_pay_stellar_gateway::{shutdown, signing, startup};
+use fermah_pay_stellar_gateway::{shutdown, signing, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "fermah-pay-stellar-worker", version, about)]
@@ -24,6 +23,10 @@ struct Config {
     network: Network,
     #[arg(long, env = "PAY_STELLAR_RPC_URL")]
     rpc_url: String,
+    /// Address to serve Prometheus metrics on (`/metrics`); not served when
+    /// unset.
+    #[arg(long, env = "PAY_STELLAR_METRICS_ADDR")]
+    metrics_addr: Option<std::net::SocketAddr>,
     #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
     rpc_timeout_secs: u64,
     /// Key references, comma-separated, of the accounts that sequence
@@ -75,14 +78,10 @@ struct Config {
     idle_poll_millis: u64,
 }
 
-/// Reads a seed file, refusing one other users can read.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let config = Config::parse();
+    let _telemetry = telemetry::init("fermah-pay-stellar-worker", config.metrics_addr)?;
     if config.max_batch == 0 || config.max_batch > MAX_BATCH {
         bail!("max batch must be between 1 and {MAX_BATCH}");
     }

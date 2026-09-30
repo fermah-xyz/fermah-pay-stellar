@@ -10,10 +10,9 @@ use clap::Parser;
 use fermah_pay_stellar_chain::rpc::{MAX_EVENTS_PER_PAGE, RpcClient};
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::observer::{Observer, Settings, StartPosition};
-use fermah_pay_stellar_gateway::shutdown;
 use fermah_pay_stellar_gateway::submission::SystemClock;
+use fermah_pay_stellar_gateway::{shutdown, telemetry};
 use sqlx::postgres::PgPoolOptions;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "fermah-pay-stellar-observer", version, about)]
@@ -26,6 +25,10 @@ struct Config {
     network: Network,
     #[arg(long, env = "PAY_STELLAR_RPC_URL")]
     rpc_url: String,
+    /// Address to serve Prometheus metrics on (`/metrics`); not served when
+    /// unset.
+    #[arg(long, env = "PAY_STELLAR_METRICS_ADDR")]
+    metrics_addr: Option<std::net::SocketAddr>,
     #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
     rpc_timeout_secs: u64,
     /// Where to start reading a deployment observed for the first time:
@@ -57,11 +60,8 @@ struct Config {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let config = Config::parse();
+    let _telemetry = telemetry::init("fermah-pay-stellar-observer", config.metrics_addr)?;
     if config.page_size == 0 || config.page_size > MAX_EVENTS_PER_PAGE {
         bail!("page size must be between 1 and {MAX_EVENTS_PER_PAGE}");
     }

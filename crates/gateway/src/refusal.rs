@@ -93,6 +93,8 @@ impl Refusal {
 
 impl From<Refusal> for Status {
     fn from(refusal: Refusal) -> Self {
+        metrics::counter!("pay_stellar_api_refusals_total", "reason" => refusal.reason())
+            .increment(1);
         Self::new(refusal.code(), refusal.reason())
     }
 }

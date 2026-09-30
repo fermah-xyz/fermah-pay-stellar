@@ -382,6 +382,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// envelope without touching the database, so a caller can then record it
     /// in the same database transaction that links it to the business rows it
     /// settles. No database lock is held while this talks to the network.
+    #[tracing::instrument(skip_all, fields(kind = kind.as_str()))]
     pub async fn prepare(
         &self,
         kind: Kind,
@@ -530,6 +531,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                 "inclusion bid held at the cap; the envelope may not be included while fees stay this high"
             );
         }
+        metrics::gauge!("pay_stellar_inclusion_bid_stroops").set(f64::from(bid.stroops));
         Ok(bid.stroops)
     }
 
@@ -589,6 +591,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let TransactionEnvelope::Tx(inner) =
             transaction::sign_with(tx, self.network, &[source_key])
                 .await
+                .inspect_err(|_| signing_failed("source"))
                 .map_err(EngineError::Signing)?
         else {
             unreachable!("transaction::sign produces a v1 envelope")
@@ -600,6 +603,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let envelope =
             soroban::sign_fee_bump_with(bump, self.network, self.keys.fee_source.as_ref())
                 .await
+                .inspect_err(|_| signing_failed("fee_source"))
                 .map_err(EngineError::Assembly)?;
         let envelope_xdr = envelope
             .to_xdr_base64(Limits::none())
@@ -621,6 +625,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// Records a prepared envelope as in flight, on `conn`, which may be inside
     /// the caller's transaction. On `SourceBusy` that transaction is aborted
     /// and must be rolled back.
+    #[tracing::instrument(skip_all, fields(submission_id = %prepared.id))]
     pub async fn record(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -679,6 +684,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
 
     /// Sends the installed bytes. The answer is recorded for diagnosis but
     /// never changes the submission's state.
+    #[tracing::instrument(skip(self), fields(submission_id = %id))]
     pub async fn broadcast(&self, id: Uuid) -> Result<Broadcast, EngineError> {
         let row = self.load(id).await?;
         if row.state.is_final() || self.clock.now() > row.valid_until {
@@ -703,6 +709,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     }
 
     /// Establishes the outcome, if the evidence allows, and records it.
+    #[tracing::instrument(skip(self), fields(submission_id = %id))]
     pub async fn resolve(&self, id: Uuid) -> Result<Resolution, EngineError> {
         let row = self.load(id).await?;
         if row.state.is_final() {
@@ -930,21 +937,35 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         state: State,
         reason: Option<&str>,
     ) -> Result<Resolution, EngineError> {
-        sqlx::query!(
+        let closed = sqlx::query!(
             r#"
             UPDATE pay_stellar.submissions
             SET state = $2, last_error = COALESCE($3, last_error), resolved_at = now()
             WHERE id = $1 AND state = 'installed'
+            RETURNING kind, created_at
             "#,
             id,
             state.as_str(),
             reason,
         )
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(store("close submission"))?;
+        // Counted once, by whichever call closed the submission.
+        if let Some(closed) = closed {
+            let labels = [("kind", closed.kind), ("state", state.as_str().to_owned())];
+            metrics::counter!("pay_stellar_submissions_closed_total", &labels).increment(1);
+            let open_for = (OffsetDateTime::now_utc() - closed.created_at).as_seconds_f64();
+            metrics::histogram!("pay_stellar_submission_seconds", &labels).record(open_for);
+        }
         resolution_of(&self.load(id).await?)
     }
+}
+
+/// A signer, local or in a key management service, failed or answered with
+/// a signature that does not verify.
+pub fn signing_failed(role: &'static str) {
+    metrics::counter!("pay_stellar_signing_failures_total", "role" => role).increment(1);
 }
 
 /// [`Engine::authorization_horizon`] of a stored envelope, for readers that
