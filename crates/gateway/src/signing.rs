@@ -68,7 +68,8 @@ fn redact(reference: &str) -> String {
     }
 }
 
-fn read_seed(path: &Path) -> Result<SecretKey, KeyError> {
+/// Reads a seed file that only its owner may read.
+pub fn read_seed(path: &Path) -> Result<SecretKey, KeyError> {
     let unreadable = |source| KeyError::Unreadable { path: path.to_owned(), source };
     #[cfg(unix)]
     {

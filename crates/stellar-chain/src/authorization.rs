@@ -32,6 +32,10 @@ pub enum AuthorizationError {
     Encode(String),
     #[error("signing the entry")]
     Signer(#[source] crate::signer::SignError),
+    #[error("a signature does not verify for its public key")]
+    InvalidSignature,
+    #[error("a public key signs the entry twice")]
+    DuplicateSigner,
 }
 
 /// The 32-byte hash an account signs to authorize `credentials` over
@@ -106,6 +110,35 @@ pub async fn sign_entry_with(
     let signature =
         crate::signer::signature(signer, &payload).await.map_err(AuthorizationError::Signer)?;
     with_signatures(entry, creds, vec![(*account.public_key(), signature)])
+}
+
+/// Returns `entry` carrying `signatures`, each a public key and its
+/// signature of the entry's payload, collected separately from the account's
+/// signers. Each signature is verified here; whether the keys are the
+/// account's signers, and weigh enough, is the ledger's to say (see
+/// [`crate::multisig`]).
+pub fn attach_signatures(
+    entry: &SorobanAuthorizationEntry,
+    network_id: [u8; 32],
+    signatures: Vec<([u8; 32], [u8; 64])>,
+) -> Result<SorobanAuthorizationEntry, AuthorizationError> {
+    if signatures.is_empty() {
+        return Err(AuthorizationError::NoSigner);
+    }
+    let (creds, _) = entry_account(entry)?;
+    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)?;
+    for (i, (public_key, signature)) in signatures.iter().enumerate() {
+        if signatures[..i].iter().any(|(earlier, _)| earlier == public_key) {
+            return Err(AuthorizationError::DuplicateSigner);
+        }
+        let valid = ed25519_dalek::VerifyingKey::from_bytes(public_key).is_ok_and(|key| {
+            key.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(signature)).is_ok()
+        });
+        if !valid {
+            return Err(AuthorizationError::InvalidSignature);
+        }
+    }
+    with_signatures(entry, creds, signatures)
 }
 
 fn entry_account(
@@ -271,6 +304,38 @@ mod tests {
 
     use super::*;
     use crate::transaction::account_id;
+
+    #[test]
+    fn test_co_signers_signatures_are_attached_only_if_each_verifies() {
+        let account = SecretKey::generate().unwrap();
+        let (a, b) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+        let unsigned = entry(&account, true);
+        let payload =
+            signature_payload([1; 32], &unsigned.credentials, &unsigned.root_invocation).unwrap();
+        let sig = |key: &SecretKey| (*key.address().public_key(), key.sign_raw(&payload));
+        // The positive control: two co-signers, attached in public-key order.
+        let signed = attach_signatures(&unsigned, [1; 32], vec![sig(&b), sig(&a)]).unwrap();
+        let mut expected = vec![sig(&a), sig(&b)];
+        expected.sort_by_key(|(public_key, _)| *public_key);
+        assert_eq!(
+            signed,
+            with_signatures(&unsigned, entry_account(&unsigned).unwrap().0, expected).unwrap()
+        );
+        // A signature over another network's payload, a repeated key, none.
+        let foreign = (*a.address().public_key(), a.sign_raw(&[9; 32]));
+        assert_eq!(
+            attach_signatures(&unsigned, [1; 32], vec![foreign]),
+            Err(AuthorizationError::InvalidSignature)
+        );
+        assert_eq!(
+            attach_signatures(&unsigned, [1; 32], vec![sig(&a), sig(&a)]),
+            Err(AuthorizationError::DuplicateSigner)
+        );
+        assert_eq!(
+            attach_signatures(&unsigned, [1; 32], vec![]),
+            Err(AuthorizationError::NoSigner)
+        );
+    }
 
     #[test]
     fn test_signer_backed_entry_matches_local_signing_and_refuses_another_account() {
