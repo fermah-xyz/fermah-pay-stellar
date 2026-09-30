@@ -31,6 +31,20 @@ groups:
           action: "Check the key reference and the key service; nothing was sent with a bad signature"
   - name: pay-stellar-settlement
     rules:
+      - alert: PayStellarFeeAccountLow
+        expr: pay_stellar_fee_source_spendable_stroops < 2 * 100000000
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The fee account has less than twice the default floor (10 XLM) to spend"
+          action: "Fund the fee account before the worker stops building new transactions"
+      - alert: PayStellarFeeAccountAtFloor
+        expr: pay_stellar_fee_source_spendable_stroops < 100000000
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "The fee account is at its floor; no new deposits or batches go out"
+          action: "Fund the fee account; settlement resumes on its own"
       - alert: PayStellarChargesWaiting
         expr: pay_stellar_oldest_waiting_charge_seconds > 600
         for: 5m

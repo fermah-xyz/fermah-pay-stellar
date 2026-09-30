@@ -194,6 +194,8 @@ impl Context {
                 operator_authorization_ledgers: 24,
                 retry_after: Duration::from_secs(10),
                 max_batch: MAX_BATCH,
+                // 10 XLM, the worker's default.
+                fee_floor_stroops: 100_000_000,
             },
         );
         let mut worker_stop = stopped.clone();

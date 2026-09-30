@@ -273,6 +273,7 @@ impl Chain for FakeChain {
                 sequence: NODE_LEDGER,
                 close_time: now.unix_timestamp() - n.close_lag_secs,
                 protocol_version: 28,
+                base_reserve: Some(5_000_000),
             }
         }))
     }

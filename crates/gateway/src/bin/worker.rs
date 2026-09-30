@@ -70,6 +70,10 @@ struct Config {
     /// Charges per batch, at most 98, the contract's limit.
     #[arg(long, env = "PAY_STELLAR_MAX_BATCH", default_value = "98")]
     max_batch: usize,
+    /// Spendable XLM, in stroops, below which the fee account pays only for
+    /// finishing work in flight (10 XLM by default).
+    #[arg(long, env = "PAY_STELLAR_FEE_FLOOR_STROOPS", default_value = "100000000")]
+    fee_floor_stroops: i64,
     #[arg(long, env = "PAY_STELLAR_RETRY_AFTER_SECS", default_value = "30")]
     retry_after_secs: u64,
     #[arg(long, env = "PAY_STELLAR_BUSY_POLL_MILLIS", default_value = "1000")]
@@ -143,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
             operator_authorization_ledgers: config.operator_authorization_ledgers,
             retry_after: Duration::from_secs(config.retry_after_secs),
             max_batch: config.max_batch,
+            fee_floor_stroops: config.fee_floor_stroops,
         },
     );
     worker

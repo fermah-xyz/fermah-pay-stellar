@@ -87,6 +87,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | [key references](keys.md), comma-separated, of the accounts that sequence transactions; each has at most one transaction in flight, so several keep sending while one waits. The accounts may hold no XLM (the fee account pays), and no other process may submit from them |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | [key reference](keys.md) of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | [key reference](keys.md) of the contracts' operator; the worker serves the deployments bound with this operator |
+| Worker | `PAY_STELLAR_FEE_FLOOR_STROOPS` | spendable XLM, in stroops, below which the fee account pays only for finishing work in flight; default `100000000` (10 XLM) |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
 | Worker | `PAY_STELLAR_MAX_CLOCK_SKEW_SECS` | largest difference between the host clock and the latest ledger's close time at which transactions are still built, default 20; must be below the validity |
 | Worker | `PAY_STELLAR_INCLUSION_FEE` | lowest inclusion bid per operation, in stroops, default 10000; at least 100 |
