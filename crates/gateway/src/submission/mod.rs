@@ -810,6 +810,12 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         self.keys.source_count()
     }
 
+    /// The account that pays every fee bump.
+    #[must_use]
+    pub fn fee_source_address(&self) -> AccountAddress {
+        self.keys.fee_source_address()
+    }
+
     /// The last ledger in which any address authorization carried by the
     /// submission's envelope is valid. Until it has passed, a copy of that
     /// authorization taken from the broadcast envelope could still be

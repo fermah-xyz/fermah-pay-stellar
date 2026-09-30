@@ -14,6 +14,7 @@ pub mod multisig;
 pub mod onboarding;
 pub mod payments;
 pub mod prepaid;
+pub mod reserve;
 pub mod rpc;
 pub mod sep53;
 pub mod signer;

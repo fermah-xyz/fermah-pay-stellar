@@ -28,15 +28,16 @@ use fermah_pay_stellar_chain::rpc::{
 use fermah_pay_stellar_chain::signer::LocalSigner;
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
-    ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction, Int128Parts,
-    InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryChanges, LedgerEntryData, LedgerEntryExt,
-    LedgerFootprint, LedgerKey, LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation,
-    OperationBody, OperationMetaV2, Preconditions, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol,
-    ScVal, ScVec, SequenceNumber, SorobanAddressCredentials, SorobanAuthorizationEntry,
-    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources,
-    SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
-    SorobanTransactionMetaV2, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
+    AccountEntry, AccountEntryExt, ContractDataEntry, ContractEvent, ContractEventBody,
+    ContractEventType, ContractEventV0, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx,
+    Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryChanges,
+    LedgerEntryData, LedgerEntryExt, LedgerFootprint, LedgerKey, LedgerKeyAccount,
+    LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation, OperationBody, OperationMetaV2,
+    Preconditions, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SequenceNumber,
+    SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanAuthorizedFunction,
+    SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources, SorobanTransactionData,
+    SorobanTransactionDataExt, SorobanTransactionMetaExt, SorobanTransactionMetaV2, String32,
+    Thresholds, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
     TransactionMetaV4, TransactionResult, TransactionResultExt, TransactionResultResult,
     TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
@@ -67,6 +68,10 @@ use tokio::sync::Barrier;
 const CONTRACT: [u8; 32] = [7; 32];
 const MAX_CHARGE: i128 = 50;
 const START_LEDGER: u32 = 1_000;
+/// The network's base reserve, 0.5 XLM.
+const BASE_RESERVE: u32 = 5_000_000;
+/// The worker's fee floor in these tests: 10 XLM.
+const FEE_FLOOR: i64 = 100_000_000;
 const OPERATOR_LEDGERS: u32 = 12;
 const VALIDITY: Duration = Duration::from_secs(60);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -98,6 +103,8 @@ struct Net {
     drop_sends: usize,
     /// Sources whose envelopes the network never includes.
     stuck: HashSet<AccountAddress>,
+    /// XLM, in stroops, of any classic account read, i.e. the fee account.
+    fee_balance: i64,
     /// The next included transactions fail without effect.
     fail_inclusions: usize,
     /// `charge_batch` returns one outcome fewer than it settled.
@@ -583,6 +590,7 @@ impl Chain for Stellar {
             sequence: n.latest,
             close_time: n.clock.now().unix_timestamp(),
             protocol_version: 28,
+            base_reserve: Some(BASE_RESERVE),
         }))
     }
 
@@ -666,10 +674,34 @@ impl Chain for Stellar {
         for (owner, id) in &state.deposits {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
         }
+        let fee_balance = self.with(|n| n.fee_balance);
+        let account = |key: &LedgerKey| {
+            let LedgerKey::Account(LedgerKeyAccount { account_id }) = key else { return None };
+            Some(LedgerEntryRecord {
+                key: key.clone(),
+                data: LedgerEntryData::Account(AccountEntry {
+                    account_id: account_id.clone(),
+                    balance: fee_balance,
+                    seq_num: SequenceNumber(1),
+                    num_sub_entries: 0,
+                    inflation_dest: None,
+                    flags: 0,
+                    home_domain: String32::default(),
+                    thresholds: Thresholds([1, 0, 0, 0]),
+                    signers: VecM::default(),
+                    ext: AccountEntryExt::V0,
+                }),
+                ext: LedgerEntryExt::V0,
+                last_modified_ledger: 1,
+            })
+        };
         Ok(LedgerEntries {
             entries: keys
                 .iter()
-                .filter_map(|key| existing.get(key).map(|val| contract_data(key, val.clone())))
+                .filter_map(|key| {
+                    account(key)
+                        .or_else(|| existing.get(key).map(|val| contract_data(key, val.clone())))
+                })
                 .collect(),
             latest_ledger: self.with(|n| n.latest - n.entries_behind),
         })
@@ -753,6 +785,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             sent: Vec::new(),
             drop_sends: 0,
             stuck: HashSet::new(),
+            fee_balance: 100_000_000_000,
             fail_inclusions: 0,
             truncate_outcomes: false,
             skip_records: false,
@@ -826,6 +859,7 @@ impl World {
                 operator_authorization_ledgers: OPERATOR_LEDGERS,
                 retry_after: RETRY_AFTER,
                 max_batch,
+                fee_floor_stroops: FEE_FLOOR,
             },
         )
     }
@@ -1778,6 +1812,40 @@ async fn test_a_stuck_source_does_not_hold_back_the_others(
     assert_eq!(w.get_charge(&waiting.charge_id).await.state(), ChargeState::Charged);
     assert_eq!(w.get_charge(&stuck.charge_id).await.state(), ChargeState::Submitted);
     assert_eq!(w.stellar.account(&x.key.address()), Some(80));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_at_the_fee_floor_work_in_flight_finishes_and_nothing_new_is_built(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let worker = w.worker_with(&w.source_seed, 1);
+    // Spendable is the balance less two base reserves.
+    let at_floor = FEE_FLOOR + 2 * i64::from(BASE_RESERVE);
+
+    // A batch goes out and is not yet included.
+    let first = w.charge(&x, 10, "c-1").await;
+    w.stellar.with(|n| n.drop_sends = 1);
+    worker.step().await.unwrap();
+    assert_eq!(w.get_charge(&first.charge_id).await.state(), ChargeState::Submitted);
+
+    // One stroop short of the floor: the batch in flight still settles, and
+    // the next charge waits.
+    w.stellar.with(|n| n.fee_balance = at_floor - 1);
+    let second = w.charge(&x, 20, "c-2").await;
+    let sends = w.stellar.sent().len();
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&first.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.get_charge(&second.charge_id).await.state(), ChargeState::Admitted);
+    assert_eq!(w.stellar.sent().len(), sends + 1, "only the resend of the batch in flight");
+
+    // The positive control: at the floor, the waiting charge goes out.
+    w.stellar.with(|n| n.fee_balance = at_floor);
+    w.settle(&worker).await;
+    assert_eq!(w.get_charge(&second.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(70));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

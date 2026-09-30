@@ -27,10 +27,11 @@ use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, ChargeRequest, DepositIntent, MAX_BATCH, Outcome, PrepaidDeployment,
     batch_outcomes, charge_record,
 };
+use fermah_pay_stellar_chain::reserve::spendable_stroops;
 use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_chain::signer::Signer;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    HostFunction, LedgerEntryData, LedgerKey, Limits, ReadXdr, ScAddress, ScVal,
+    HostFunction, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, ReadXdr, ScAddress, ScVal,
     SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanCredentials,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
@@ -51,6 +52,11 @@ pub struct Settings {
     /// How long work the network refused in simulation is left aside.
     pub retry_after: Duration,
     pub max_batch: usize,
+    /// Spendable XLM, in stroops, the fee account keeps: below it no new
+    /// transaction is built, so what is left pays for finishing the work in
+    /// flight rather than for starting more. Resending an envelope costs
+    /// nothing until it is included.
+    pub fee_floor_stroops: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -230,7 +236,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         self.expire_charges().await?;
         self.record_backlog().await?;
         let mut submitted = Vec::new();
-        while open + submitted.len() < self.engine.capacity() {
+        let funded = self.fee_source_funded().await?;
+        while funded && open + submitted.len() < self.engine.capacity() {
             let next = match self.submit_deposit().await? {
                 Some(id) => Some(id),
                 None => self.submit_charges().await?,
@@ -273,6 +280,36 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 () = tokio::time::sleep(wait) => {}
             }
         }
+    }
+
+    /// Whether the fee account's spendable XLM is above the floor. Its
+    /// reserve is taken from the ledger header's base reserve; a node that
+    /// sends no header is refused as unable to tell.
+    async fn fee_source_funded(&self) -> Result<bool, WorkerError> {
+        let address = self.engine.fee_source_address();
+        let key = LedgerKey::Account(LedgerKeyAccount { account_id: account_id(&address) });
+        let chain = self.engine.chain();
+        let read = chain.ledger_entries(&[key]).await.map_err(WorkerError::Chain)?;
+        let info = chain.latest_ledger_info().await.map_err(WorkerError::Chain)?;
+        let (Some(LedgerEntryData::Account(account)), Some(base_reserve)) =
+            (read.entries.first().map(|entry| &entry.data), info.base_reserve)
+        else {
+            tracing::warn!(fee_source = %address, "the fee account or the base reserve cannot be read; building nothing");
+            return Ok(false);
+        };
+        let spendable = spendable_stroops(account, base_reserve);
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("pay_stellar_fee_source_spendable_stroops").set(spendable as f64);
+        let funded = spendable >= self.settings.fee_floor_stroops;
+        if !funded {
+            tracing::error!(
+                fee_source = %address,
+                spendable,
+                floor = self.settings.fee_floor_stroops,
+                "the fee account is at its floor; only work in flight continues"
+            );
+        }
+        Ok(funded)
     }
 
     /// Charges waiting for a batch on this operator's deployments, and how
