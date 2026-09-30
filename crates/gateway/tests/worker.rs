@@ -3245,3 +3245,280 @@ async fn test_a_charge_past_the_daily_limit_is_refused_and_returned(
     assert_eq!(w.balance(&x).await, (100, 0));
     assert_eq!(w.stellar.account(&x.key.address()), Some(100));
 }
+
+// ---- randomized fault simulation ---------------------------------------------
+//
+// Seeded scenarios: charges, deposits and withdrawals through the API,
+// mixed with lost sends, failed inclusions, a node that trails the network,
+// authorizations included by someone else (also copies of envelopes the
+// worker has already decided on), time passing and worker restarts. After
+// everything drains, the database and the contract must agree to the unit.
+// `DST_SEEDS` runs more seeds (5 by default) from `DST_SEED_START` (1), and
+// `DST_SEED` one seed, to reproduce a failure.
+
+/// xorshift64*: a fixed, dependency-free generator, so a seed replays the
+/// same scenario.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+/// Someone else includes the call and authorizations of `envelope`, if the
+/// contract accepts them now; restores, extensions and sweeps are skipped.
+fn maybe_include_elsewhere(w: &World, envelope: &TransactionEnvelope) {
+    let tx = inner(envelope);
+    let OperationBody::InvokeHostFunction(op) = &tx.operations[0].body else { return };
+    let HostFunction::InvokeContract(call) = &op.host_function else { return };
+    if call.contract_address != ScAddress::Contract(ContractId(Hash(CONTRACT))) {
+        return;
+    }
+    let operator = w.stellar.operator.clone();
+    w.stellar.with(|n| {
+        if let Ok((state, _, event)) = n.execute(call, &op.auth, &operator) {
+            n.state = state;
+            if let Some(data) = event {
+                n.log_charges(data);
+            }
+        }
+    });
+}
+
+async fn simulate(w: &World, seed: u64) {
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let buyers = [w.funded("a", 150).await, w.funded("b", 150).await, w.funded("c", 150).await];
+    // USDC left in each wallet for the deposits to come.
+    for buyer in &buyers {
+        w.stellar.with(|n| n.state.usdc.insert(buyer.key.address(), 1_000));
+    }
+    let mut worker = w.paying_worker();
+    let mut serial = 0_u32;
+    let mut key = |kind: &str| {
+        serial += 1;
+        format!("{kind}-{serial}")
+    };
+    for _ in 0..80 {
+        let buyer = &buyers[usize::try_from(rng.below(3)).unwrap()];
+        match rng.below(12) {
+            0..=3 => {
+                // Up to above the contract's per-charge limit, which the API
+                // does not check.
+                let request = CreateChargeRequest {
+                    buyer_id: buyer.id.clone(),
+                    amount: i64::try_from(1 + rng.below(60)).unwrap(),
+                    idempotency_key: key("c"),
+                };
+                // Refused when the balance is short: part of the scenario.
+                let _ = w.ledger().await.create_charge(authed(request, &w.tenant.token)).await;
+            }
+            4 => {
+                let amount = i64::try_from(10 + rng.below(30)).unwrap();
+                let (deposit, signed) = w.prepared_deposit(buyer, amount, &key("d")).await;
+                let request = SubmitDepositRequest {
+                    deposit_id: deposit.deposit_id,
+                    signed_authorization_entry_xdr: signed,
+                };
+                w.ledger().await.submit_deposit(authed(request, &w.tenant.token)).await.unwrap();
+            }
+            5 => {
+                let amount = i64::try_from(1 + rng.below(15)).unwrap();
+                if let Ok((withdrawal, signed)) =
+                    w.prepared_withdrawal(buyer, amount, &key("w")).await
+                {
+                    let _ = w.submit_withdrawal(&withdrawal, &signed).await;
+                }
+            }
+            6 => match rng.below(5) {
+                0 => w.stellar.with(|n| n.drop_sends = usize::try_from(1 + rng.below(3)).unwrap()),
+                1 => w.stellar.with(|n| n.fail_inclusions = 1),
+                2 => w.stellar.with(|n| n.entries_behind = u32::try_from(rng.below(3)).unwrap()),
+                3 => {
+                    let owner = buyer.key.address();
+                    w.stellar.with(|n| {
+                        if !n.over_daily.remove(&owner) {
+                            n.over_daily.insert(owner);
+                        }
+                    });
+                }
+                _ => w.stellar.with(|n| n.drop_sends = 1),
+            },
+            7..=8 => {
+                w.clock.advance(Duration::from_secs(10 + rng.below(90)));
+                let ledgers = u32::try_from(1 + rng.below(40)).unwrap();
+                w.stellar.set_latest(w.stellar.latest() + ledgers);
+            }
+            // Long enough for charges waiting in the queue to pass their
+            // last ledger and for authorizations to lapse.
+            9 => {
+                w.clock.advance(Duration::from_secs(600));
+                w.stellar.set_latest(w.stellar.latest() + 800);
+            }
+            10 => worker = w.paying_worker(),
+            _ => {}
+        }
+        // Someone else includes a copy of an envelope sent earlier, if its
+        // authorizations still hold: possibly after the worker has already
+        // decided that envelope's outcome.
+        if rng.below(3) == 0 {
+            let sent = w.stellar.sent();
+            if !sent.is_empty() {
+                let pick = usize::try_from(rng.below(sent.len() as u64)).unwrap();
+                maybe_include_elsewhere(w, &sent[pick]);
+            }
+        }
+        // Some rounds pass without the worker, so work queues up.
+        if rng.below(4) != 0 {
+            worker.step().await.unwrap();
+            // A copy of something just sent, included right after the worker
+            // acted on it, while its authorizations are fresh.
+            if rng.below(2) == 0 {
+                let sent = w.stellar.sent();
+                let recent = sent.len().saturating_sub(4);
+                if let Some(pick) = sent.get(recent..).and_then(|tail| {
+                    (!tail.is_empty())
+                        .then(|| recent + usize::try_from(rng.below(tail.len() as u64)).unwrap())
+                }) {
+                    maybe_include_elsewhere(w, &sent[pick]);
+                }
+            }
+        }
+    }
+
+    // Drain: no more faults, and time enough for every authorization and
+    // every charge's last ledger to lapse.
+    w.stellar.with(|n| {
+        n.drop_sends = 0;
+        n.fail_inclusions = 0;
+        n.entries_behind = 0;
+        n.over_daily.clear();
+    });
+    for _ in 0..12 {
+        w.clock.advance(VALIDITY + Duration::from_secs(1));
+        w.stellar.set_latest(w.stellar.latest() + 400);
+        w.settle(&worker).await;
+    }
+}
+
+async fn assert_books_agree(w: &World, seed: u64) {
+    let open: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM pay_stellar.charges WHERE state NOT IN ('charged', 'refused'))
+              + (SELECT count(*) FROM pay_stellar.deposits
+                 WHERE state NOT IN ('confirmed', 'failed', 'expired'))
+              + (SELECT count(*) FROM pay_stellar.withdrawals
+                 WHERE state NOT IN ('confirmed', 'failed', 'expired'))",
+    )
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    assert_eq!(open, 0, "seed {seed}: rows left open or quarantined");
+
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT wallet_address, available FROM pay_stellar.buyers WHERE seller_deployment_id = $1",
+    )
+    .bind(w.tenant.deployment_id)
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    for (wallet, available) in rows {
+        let account = w.stellar.account(&wallet.parse().unwrap()).unwrap_or(0);
+        assert_eq!(i128::from(available), account, "seed {seed}: {wallet} available");
+    }
+
+    // A charge is `charged` exactly when the contract's record says so.
+    let charges: Vec<(String, Vec<u8>, String, i64)> = sqlx::query_as(
+        "SELECT b.wallet_address, c.charge_id, c.state, c.amount FROM pay_stellar.charges c
+         JOIN pay_stellar.buyers b ON b.id = c.buyer_id",
+    )
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    let mut charged = 0_i128;
+    for (wallet, id, state, amount) in charges {
+        let owner: AccountAddress = wallet.parse().unwrap();
+        let id: [u8; 32] = id.try_into().unwrap();
+        let recorded = w.stellar.with(|n| n.state.records.get(&(owner, id)).map(|(code, _)| *code));
+        assert_eq!(state == "charged", recorded == Some(0), "seed {seed}: charge {state}");
+        if state == "charged" {
+            charged += i128::from(amount);
+        }
+    }
+    let (accounts, treasury) =
+        w.stellar.with(|n| (n.state.accounts.values().sum::<i128>(), n.state.treasury_usdc));
+    assert_eq!(treasury, accounts + charged, "seed {seed}: the treasury holds what is owed");
+    let outcomes: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT 'charge', state, count(*) FROM pay_stellar.charges GROUP BY state
+         UNION ALL SELECT 'deposit', state, count(*) FROM pay_stellar.deposits GROUP BY state
+         UNION ALL SELECT 'withdrawal', state, count(*) FROM pay_stellar.withdrawals GROUP BY state
+         UNION ALL SELECT 'submission', state, count(*) FROM pay_stellar.submissions GROUP BY state
+         ORDER BY 1, 2",
+    )
+    .fetch_all(&w.h.owner)
+    .await
+    .unwrap();
+    eprintln!("seed {seed}: {outcomes:?}");
+}
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../db/migrations");
+
+/// A new, migrated database on the same server, so each seed starts from
+/// nothing: one contract binds to one deployment per database.
+async fn fresh_database(connect: &PgConnectOptions, name: &str) -> PgConnectOptions {
+    use sqlx::{Connection as _, Executor as _};
+
+    let mut server = sqlx::PgConnection::connect_with(connect).await.unwrap();
+    server
+        .execute(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")))
+        .await
+        .unwrap();
+    server.execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}"))).await.unwrap();
+    let target = connect.clone().database(name);
+    let pool = PgPoolOptions::new().max_connections(1).connect_with(target.clone()).await.unwrap();
+    MIGRATOR.run(&pool).await.unwrap();
+    pool.close().await;
+    target
+}
+
+async fn drop_database(connect: &PgConnectOptions, name: &str) {
+    use sqlx::{Connection as _, Executor as _};
+
+    let mut server = sqlx::PgConnection::connect_with(connect).await.unwrap();
+    server
+        .execute(sqlx::AssertSqlSafe(format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")))
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_random_faults_leave_the_database_and_the_contract_in_agreement(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let setting = |name: &str, default: u64| {
+        std::env::var(name).ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+    };
+    let seeds: Vec<u64> = match std::env::var("DST_SEED") {
+        Ok(seed) => vec![seed.parse().unwrap()],
+        Err(_) => {
+            let start = setting("DST_SEED_START", 1);
+            (start..start + setting("DST_SEEDS", 5)).collect()
+        }
+    };
+    for seed in seeds {
+        let name = format!("pay_stellar_dst_{}_{seed}", std::process::id());
+        let target = fresh_database(&connect, &name).await;
+        let w = world(opts.clone(), target).await;
+        simulate(&w, seed).await;
+        assert_books_agree(&w, seed).await;
+        drop(w);
+        drop_database(&connect, &name).await;
+    }
+}
