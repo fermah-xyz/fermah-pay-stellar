@@ -91,8 +91,15 @@ fn i128_of(value: &ScVal) -> Option<i128> {
     }
 }
 
-const OUTCOMES: [&str; 6] =
-    ["Charged", "InsufficientBalance", "AboveLimit", "Duplicate", "OutOfOrder", "UnknownAccount"];
+const OUTCOMES: [&str; 7] = [
+    "Charged",
+    "InsufficientBalance",
+    "AboveLimit",
+    "Duplicate",
+    "Expired",
+    "UnknownAccount",
+    "AboveDailyLimit",
+];
 
 fn outcomes_of(value: Option<&ScVal>) -> anyhow::Result<Vec<&'static str>> {
     let Some(ScVal::Vec(Some(items))) = value else { bail!("charge_batch returned {value:?}") };

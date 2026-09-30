@@ -180,9 +180,10 @@ enum ChargeDecision {
 fn settled(outcome: Outcome) -> Option<ChargeDecision> {
     Some(match outcome {
         Outcome::Charged => ChargeDecision::Charged,
-        Outcome::InsufficientBalance | Outcome::AboveLimit | Outcome::Expired => {
-            ChargeDecision::Refused(outcome)
-        }
+        Outcome::InsufficientBalance
+        | Outcome::AboveLimit
+        | Outcome::AboveDailyLimit
+        | Outcome::Expired => ChargeDecision::Refused(outcome),
         // The gateway charges only buyers a confirmed deposit created.
         Outcome::UnknownAccount => ChargeDecision::Quarantine {
             outcome: Some(outcome),

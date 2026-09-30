@@ -94,6 +94,19 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Upload contract Wasm to the network, so an `upgrade` proposal can name
+    /// its hash. Uploading changes no contract and needs no admin signature.
+    Upload {
+        #[command(flatten)]
+        network: NetworkArgs,
+        /// Path of the built `.wasm` file.
+        #[arg(long)]
+        wasm: PathBuf,
+        #[arg(long)]
+        source_key: PathBuf,
+        #[arg(long)]
+        fee_key: PathBuf,
+    },
     /// Print the account a key reference signs for, after checking that it
     /// signs: for instance the `G...` address of a key held in AWS KMS.
     Address {
@@ -160,6 +173,14 @@ enum ActionArgs {
         #[arg(long)]
         holder: AccountAddress,
     },
+    /// Limit what one account, and all accounts together, may be charged in
+    /// a UTC day, in USDC base units.
+    SetDailyLimits {
+        #[arg(long)]
+        per_buyer: i128,
+        #[arg(long)]
+        per_seller: i128,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -216,6 +237,9 @@ fn action(args: ActionArgs) -> anyhow::Result<AdminAction> {
             },
             holder,
         },
+        ActionArgs::SetDailyLimits { per_buyer, per_seller } => {
+            AdminAction::SetDailyLimits { per_buyer, per_seller }
+        }
     })
 }
 
@@ -427,6 +451,22 @@ async fn main() -> anyhow::Result<()> {
                 out: &out,
             };
             propose(&request, usdc::contract_strkey(usdc), &function, &trees).await?;
+        }
+        Command::Upload { network, wasm, source_key, fee_key } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            let rpc = RpcClient::new(&network.rpc_url, Duration::from_secs(30))?;
+            rpc.verify_network(network.network).await?;
+            let (source, fee) = (signing::read_seed(&source_key)?, signing::read_seed(&fee_key)?);
+            let submitter = submitter(&rpc, network.network, &source, &fee, network.inclusion_fee);
+            let upload = fermah_pay_stellar_chain::deploy::upload(&code)?;
+            let auth = submitter.record_source_authorization(&upload).await?;
+            let receipt = submitter.submit(upload, auth).await?;
+            println!(
+                "{}",
+                json!({ "wasm_hash": hex_lower(&fermah_pay_stellar_chain::deploy::wasm_hash(&code)),
+                        "transaction_hash": hex_lower(&receipt.outer_hash) })
+            );
         }
         Command::Address { key } => {
             println!("{}", signing::open(&key).await?.address());

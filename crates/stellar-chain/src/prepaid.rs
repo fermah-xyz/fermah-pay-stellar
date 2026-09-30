@@ -71,6 +71,12 @@ pub enum AdminAction {
         role: Role,
         holder: AccountAddress,
     },
+    /// Limits what one account, and all accounts together, may be charged
+    /// in a UTC day.
+    SetDailyLimits {
+        per_buyer: i128,
+        per_seller: i128,
+    },
 }
 
 impl AdminAction {
@@ -86,6 +92,17 @@ impl AdminAction {
             Self::SetRole { role, holder } => {
                 call(contract, &format!("set_{}", role.token()), vec![account_val(holder)])
             }
+            Self::SetDailyLimits { per_buyer, per_seller } => call(
+                contract,
+                "set_daily_limits",
+                vec![ScVal::Map(Some(ScMap(
+                    VecM::try_from(vec![
+                        ScMapEntry { key: symbol_val("per_buyer"), val: i128_val(*per_buyer) },
+                        ScMapEntry { key: symbol_val("per_seller"), val: i128_val(*per_seller) },
+                    ])
+                    .expect("invariant: two entries fit a map"),
+                )))],
+            ),
         }
     }
 
@@ -421,6 +438,7 @@ pub enum Outcome {
     Duplicate,
     Expired,
     UnknownAccount,
+    AboveDailyLimit,
 }
 
 impl Outcome {
@@ -434,6 +452,7 @@ impl Outcome {
             3 => Self::Duplicate,
             4 => Self::Expired,
             5 => Self::UnknownAccount,
+            6 => Self::AboveDailyLimit,
             _ => return None,
         })
     }
@@ -447,6 +466,7 @@ impl Outcome {
             Self::Duplicate => "duplicate",
             Self::Expired => "expired",
             Self::UnknownAccount => "unknown_account",
+            Self::AboveDailyLimit => "above_daily_limit",
         }
     }
 }
@@ -595,6 +615,31 @@ pub enum LedgerEvent {
         previous: ContractLimits,
         current: ContractLimits,
     },
+    /// The admin set the daily charge limits; `previous` is `None` the first
+    /// time.
+    DailyLimitsChanged {
+        previous: Option<DailyLimits>,
+        current: DailyLimits,
+    },
+}
+
+/// What one account, and all the seller's accounts together, may be charged
+/// in a UTC day, in USDC base units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DailyLimits {
+    pub per_buyer: i128,
+    pub per_seller: i128,
+}
+
+fn daily_limits_of(value: &ScVal) -> Option<DailyLimits> {
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .and_then(|f| i128_of(&f.val))
+    };
+    Some(DailyLimits { per_buyer: field(b"per_buyer")?, per_seller: field(b"per_seller")? })
 }
 
 /// The contract's deposit and charge limits, in USDC base units.
@@ -692,6 +737,16 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
             LedgerEvent::LimitsChanged {
                 previous: limits_of(previous)?,
                 current: limits_of(current)?,
+            }
+        }
+        (b"daily", []) => {
+            let [previous, current] = fields else { return None };
+            LedgerEvent::DailyLimitsChanged {
+                previous: match previous {
+                    ScVal::Void => None,
+                    other => Some(daily_limits_of(other)?),
+                },
+                current: daily_limits_of(current)?,
             }
         }
         _ => return None,
