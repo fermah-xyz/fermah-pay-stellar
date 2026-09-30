@@ -9,6 +9,7 @@
 //! `database_url`, which the run migrates. Nothing is mocked: every
 //! transaction goes to testnet.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail, ensure};
@@ -21,7 +22,7 @@ use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{ChargeRequest, MAX_BATCH, account_balance, charge_record};
 use fermah_pay_stellar_chain::rpc::{FeePercentile, hex_lower, http_client};
 use fermah_pay_stellar_chain::sep53;
-use fermah_pay_stellar_chain::signer::LocalSigner;
+use fermah_pay_stellar_chain::signer::{LocalSigner, Signer};
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
 };
@@ -30,7 +31,7 @@ use fermah_pay_stellar_chain::{transaction, usdc};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve, serve_x402};
-use fermah_pay_stellar_gateway::store::Store;
+use fermah_pay_stellar_gateway::store::{Quotas, Store};
 use fermah_pay_stellar_gateway::submission::{
     Engine, FeePolicy, Keys, Policy as EnginePolicy, SystemClock,
 };
@@ -105,8 +106,68 @@ where
     }
 }
 
+/// The gateway, its x402 interface and the settlement worker running in
+/// this process against testnet, and what a seller needs to call them.
+pub struct Stack {
+    pub endpoint: String,
+    pub x402_endpoint: String,
+    pub token: zeroize::Zeroizing<String>,
+    /// The database owner's pool, for reading what happened.
+    pub records: PgPool,
+    pub contract: String,
+    pub pinned: fermah_pay_stellar_chain::prepaid::PrepaidDeployment,
+    stop: tokio::sync::watch::Sender<bool>,
+    settlement: tokio::task::JoinHandle<()>,
+    gateway: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    x402: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl Stack {
+    /// Stops the worker and both servers and waits for them.
+    pub async fn stop(self) {
+        let _ = self.stop.send(true);
+        let _ = self.settlement.await;
+        let _ = self.gateway.await;
+        let _ = self.x402.await;
+    }
+}
+
 impl Context {
     pub async fn end_to_end(&self, database_url: &str) -> anyhow::Result<()> {
+        // The zero-XLM channel account comes first, so it sends whenever it
+        // is free.
+        let sources = vec![
+            LocalSigner::arc(self.profile.key(CHANNEL)?),
+            LocalSigner::arc(self.profile.key(SUBMITTER)?),
+        ];
+        let stack = self.stack(database_url, "e2e", sources, Quotas::default()).await?;
+        let outcome = self
+            .seller_flow(
+                &stack.endpoint,
+                &stack.x402_endpoint,
+                &stack.token,
+                &stack.pinned,
+                &stack.contract,
+                &stack.records,
+            )
+            .await;
+        stack.stop().await;
+        let record = outcome?;
+        evidence::write(&self.evidence_dir, "api-end-to-end", record)
+    }
+
+    /// Migrates the database at `database_url`, provisions a product, a
+    /// deployment bound to the recorded contract and an API key, and starts
+    /// the gateway, its x402 interface and the settlement worker in this
+    /// process, each on its production database role. The worker sequences
+    /// transactions from `sources`, in order of preference.
+    pub(super) async fn stack(
+        &self,
+        database_url: &str,
+        run: &str,
+        sources: Vec<Arc<dyn Signer>>,
+        quotas: Quotas,
+    ) -> anyhow::Result<Stack> {
         fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, NETWORK).await?;
         let (recorded, pinned) = self.deployment()?;
         let operator = self.profile.key("operator")?;
@@ -123,7 +184,7 @@ impl Context {
         let api = pool_as(&connect, "SET ROLE pay_stellar_api").await?;
         let worker_pool = pool_as(&connect, "SET ROLE pay_stellar_worker").await?;
 
-        let run = format!("e2e-{}", unix_now());
+        let run = format!("{run}-{}", unix_now());
         let product = issuance::create_product(&issuer, &run).await?;
         let deployment =
             issuance::create_seller_deployment(&issuer, product, "testnet", NETWORK).await?;
@@ -144,7 +205,7 @@ impl Context {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let store = Store::new(api);
+        let store = Store::new(api).with_quotas(quotas);
         let ledger = LedgerApi::new(
             store.clone(),
             self.rpc.clone(),
@@ -168,15 +229,7 @@ impl Context {
             self.rpc.clone(),
             SystemClock,
             NETWORK,
-            // The zero-XLM channel account comes first, so it sends whenever
-            // it is free.
-            Keys::new(
-                vec![
-                    LocalSigner::arc(self.profile.key(CHANNEL)?),
-                    LocalSigner::arc(self.profile.key(SUBMITTER)?),
-                ],
-                LocalSigner::arc(self.profile.key(FEE_SOURCE)?),
-            )?,
+            Keys::new(sources, LocalSigner::arc(self.profile.key(FEE_SOURCE)?))?,
             EnginePolicy {
                 // The worker's own defaults: bid from the market, never
                 // below the profile's fee nor above a hundred times it.
@@ -215,23 +268,18 @@ impl Context {
                 })
                 .await;
         });
-
-        let outcome = self
-            .seller_flow(
-                &format!("http://{addr}"),
-                &format!("http://{x402_addr}"),
-                &token,
-                &pinned,
-                &recorded.contract,
-                &owner,
-            )
-            .await;
-        let _ = stop.send(true);
-        let _ = settlement.await;
-        let _ = gateway.await;
-        let _ = x402.await;
-        let record = outcome?;
-        evidence::write(&self.evidence_dir, "api-end-to-end", record)
+        Ok(Stack {
+            endpoint: format!("http://{addr}"),
+            x402_endpoint: format!("http://{x402_addr}"),
+            token,
+            records: owner,
+            contract: recorded.contract,
+            pinned,
+            stop,
+            settlement,
+            gateway,
+            x402,
+        })
     }
 
     async fn seller_flow(

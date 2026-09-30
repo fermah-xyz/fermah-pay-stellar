@@ -11,7 +11,7 @@ use fermah_pay_stellar_chain::onboarding::{ReservePayer, SubmissionPolicy, onboa
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
 use fermah_pay_stellar_chain::sponsored::Policy;
 use fermah_pay_stellar_chain::{friendbot, usdc};
-use fermah_pay_stellar_cli::testnet::prepaid::Context as Testnet;
+use fermah_pay_stellar_cli::testnet::prepaid::{Context as Testnet, LoadShape};
 use fermah_pay_stellar_cli::testnet::profile::Profile;
 use fermah_pay_stellar_domain::Network;
 use time::OffsetDateTime;
@@ -127,6 +127,24 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// Load the recorded deployment through the gateway API: BUYERS new
+    /// zero-XLM buyers deposit once each, then CHARGES_PER_BUYER charges each
+    /// are admitted CONCURRENCY at a time and settled by the worker from
+    /// CHANNELS channel accounts and the submitter. Writes a `load-test`
+    /// evidence record with throughput, latency and fees.
+    LoadTest {
+        /// PostgreSQL URL of the database owner; the run applies migrations.
+        #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+        #[arg(long, default_value = "10")]
+        buyers: u32,
+        #[arg(long, default_value = "100")]
+        charges_per_buyer: u32,
+        #[arg(long, default_value = "4")]
+        channels: u32,
+        #[arg(long, default_value = "32")]
+        concurrency: usize,
+    },
     /// Withdraw AMOUNT of BUYER's credit back to the buyer.
     Withdraw {
         #[arg(long)]
@@ -204,6 +222,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
         Command::Solvency => context()?.solvency().await?,
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
+        Command::LoadTest { database_url, buyers, charges_per_buyer, channels, concurrency } => {
+            let shape = LoadShape { buyers, charges_per_buyer, channels, concurrency };
+            context()?.load_test(&database_url, &shape).await?;
+        }
         Command::OnboardBuyer {
             sponsor_secret_file,
             sponsor_secret_out,
