@@ -145,6 +145,13 @@ enum Command {
         #[arg(long, default_value = "32")]
         concurrency: usize,
     },
+    /// Send a testnet transaction signed through a key reference, such as
+    /// `aws-kms://alias/...`, from the account that key signs for; Friendbot
+    /// funds the account first if it does not exist.
+    KeyCheck {
+        #[arg(long)]
+        key: String,
+    },
     /// Withdraw AMOUNT of BUYER's credit back to the buyer.
     Withdraw {
         #[arg(long)]
@@ -222,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
         Command::Solvency => context()?.solvency().await?,
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
+        Command::KeyCheck { key } => context()?.key_check(&key).await?,
         Command::LoadTest { database_url, buyers, charges_per_buyer, channels, concurrency } => {
             let shape = LoadShape { buyers, charges_per_buyer, channels, concurrency };
             context()?.load_test(&database_url, &shape).await?;
