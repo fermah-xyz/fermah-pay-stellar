@@ -11,11 +11,11 @@ groups:
           summary: "The observer recorded a critical {{ $labels.kind }} finding"
           action: "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md"
       - alert: PayStellarTreasuryShort
-        expr: pay_stellar_treasury_usdc < pay_stellar_contract_liabilities + pay_stellar_contract_revenue
+        expr: pay_stellar_treasury_usdc + pay_stellar_cold_reserve_usdc < pay_stellar_contract_liabilities + pay_stellar_contract_revenue
         for: 10m
         labels: { severity: critical }
         annotations:
-          summary: "Treasury USDC is below what deployment {{ $labels.deployment }} owes"
+          summary: "The treasury and its cold reserve hold less USDC than deployment {{ $labels.deployment }} owes"
           action: "Stop admitting deposits and charges, and find where the USDC went"
       - alert: PayStellarChargeQuarantined
         expr: increase(pay_stellar_charges_settled_total{result="quarantined"}[15m]) > 0
@@ -59,6 +59,13 @@ groups:
         annotations:
           summary: "A charge has waited over ten minutes for a batch"
           action: "Check the worker's logs, its sources' sequence and the fee account's balance"
+      - alert: PayStellarHotTreasuryLow
+        expr: pay_stellar_hot_treasury_usdc < pay_stellar_hot_treasury_floor_usdc
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The treasury is below its floor"
+          action: "Top it up from the cold reserve with a propose-transfer signed by the reserve's signers"
       - alert: PayStellarWithdrawalsWaiting
         expr: pay_stellar_oldest_waiting_withdrawal_seconds > 600
         labels: { severity: warning }

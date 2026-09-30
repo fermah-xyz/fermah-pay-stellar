@@ -204,6 +204,9 @@ pub struct Observer<R, K> {
     clock: K,
     network: Network,
     settings: Settings,
+    /// Each treasury's cold reserve, whose USDC counts towards what the
+    /// treasury owes.
+    reserves: std::collections::HashMap<AccountAddress, AccountAddress>,
 }
 
 fn i64_of(value: u32) -> i64 {
@@ -357,7 +360,18 @@ fn locate(detail: &mut Value, event_id: &str, ledger: i64, transaction_hash: &[u
 
 impl<R: ChainReader, K: Clock> Observer<R, K> {
     pub fn new(pool: PgPool, chain: R, clock: K, network: Network, settings: Settings) -> Self {
-        Self { pool, chain, clock, network, settings }
+        Self { pool, chain, clock, network, settings, reserves: std::collections::HashMap::new() }
+    }
+
+    /// Counts the USDC of each treasury's reserve, keyed by treasury, with
+    /// the treasury's own when checking solvency.
+    #[must_use]
+    pub fn with_reserves(
+        mut self,
+        reserves: std::collections::HashMap<AccountAddress, AccountAddress>,
+    ) -> Self {
+        self.reserves = reserves;
+        self
     }
 
     /// The deployments bound on this observer's network whose binding names

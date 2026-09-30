@@ -378,8 +378,38 @@ impl PrepaidDeployment {
         to: &AccountAddress,
         amount: i128,
     ) -> InvokeContractArgs {
-        call(self.usdc, "transfer", vec![account_val(from), account_val(to), i128_val(amount)])
+        usdc_transfer_call(self.usdc, from, to, amount)
     }
+
+    /// A USDC transfer of `amount` out of the treasury to `to`, outside the
+    /// ledger contract: what moves a surplus to a reserve.
+    #[must_use]
+    pub fn treasury_transfer_call(&self, to: &AccountAddress, amount: i128) -> InvokeContractArgs {
+        self.transfer(&self.treasury, to, amount)
+    }
+
+    /// What the treasury signs for [`Self::treasury_transfer_call`]: that
+    /// transfer and nothing else.
+    #[must_use]
+    pub fn treasury_transfer_authorization(
+        &self,
+        to: &AccountAddress,
+        amount: i128,
+    ) -> SorobanAuthorizedInvocation {
+        invocation(self.treasury_transfer_call(to, amount), vec![])
+    }
+}
+
+/// A plain transfer of `amount` USDC, through the asset contract `usdc`,
+/// from `from` to `to`; `from` authorizes exactly this call.
+#[must_use]
+pub fn usdc_transfer_call(
+    usdc: [u8; 32],
+    from: &AccountAddress,
+    to: &AccountAddress,
+    amount: i128,
+) -> InvokeContractArgs {
+    call(usdc, "transfer", vec![account_val(from), account_val(to), i128_val(amount)])
 }
 
 /// A charge's result as `charge_batch` returns it.

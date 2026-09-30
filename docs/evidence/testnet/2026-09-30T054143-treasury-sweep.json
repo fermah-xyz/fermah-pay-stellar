@@ -1,0 +1,30 @@
+{
+  "amount": "100000",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "treasury-sweep",
+  "expected": "the treasury's key alone moves USDC from the treasury to its cold reserve",
+  "fee_charged_stroops": 23270,
+  "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+  "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+  "inner_transaction_hash": "c00db646d550f2246098062aa33ccd6d2da980f52e3439e0aa8f6c42fd2304e6",
+  "ledger": 4944663,
+  "network": "stellar:testnet",
+  "observed": {
+    "reserve_usdc_after": 100000,
+    "reserve_usdc_before": 0,
+    "treasury_usdc_after": 61450000,
+    "treasury_usdc_before": 61550000
+  },
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/5852fc797760c5eebbd87d7dc119cc5b06af0b6d26ce4c59be65b30633b3ba8e",
+  "recorded_at": "2026-09-30T05:41:43.175276115Z",
+  "reserve": "GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC",
+  "resources": {
+    "disk_read_bytes": 508,
+    "footprint_read_only": 2,
+    "footprint_read_write": 3,
+    "instructions": 750671,
+    "write_bytes": 396
+  },
+  "transaction_hash": "5852fc797760c5eebbd87d7dc119cc5b06af0b6d26ce4c59be65b30633b3ba8e",
+  "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN"
+}

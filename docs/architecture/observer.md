@@ -92,7 +92,7 @@ and takes the database's sums in one repeatable-read transaction.
 
 | Check | Compared | Finding |
 |---|---|---|
-| Solvency | treasury USDC against `liabilities + revenue` | `treasury_deficit` (critical) below, `treasury_surplus` (info) above |
+| Solvency | USDC of the treasury and its configured cold reserve, read at the same ledger, against `liabilities + revenue` | `treasury_deficit` (critical) below, `treasury_surplus` (info) above |
 | Treasury authorization | the trustline's `AUTHORIZED` flag | `treasury_deauthorized` (critical) without it, or without a trustline |
 | Event stream | the contract's totals against the sums of the events through `L`: liabilities = deposits - charged - withdrawn, revenue = charged - revenue withdrawn | `event_totals_mismatch` |
 | Database | the contract's totals against the bounds below | `ledger_totals_mismatch` |

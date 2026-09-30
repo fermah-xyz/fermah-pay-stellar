@@ -41,7 +41,10 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod reserve;
 mod withdrawals;
+
+pub use reserve::{Reserve, ReserveSettingsError};
 
 use crate::events::{ChargeSearch, FoundEntry, search_charge};
 use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
@@ -109,6 +112,10 @@ pub struct Worker<C, K> {
     /// The key of the treasury that pays withdrawals, for the deployments
     /// bound with it; without one, withdrawals wait.
     treasury: Option<Arc<dyn Signer>>,
+    /// Where the treasury's surplus is swept; see [`Reserve`].
+    reserve: Option<Reserve>,
+    /// When the treasury's balance was last read against the reserve.
+    reserve_checked_at: Mutex<Option<OffsetDateTime>>,
     settings: Settings,
     /// Deposits and deployments whose last attempt the network refused in
     /// simulation, and when they may be tried again. In memory: after a
@@ -226,6 +233,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             operator_address: operator.address(),
             operator,
             treasury: None,
+            reserve: None,
+            reserve_checked_at: Mutex::new(None),
             settings,
             set_aside: Mutex::new(HashMap::new()),
             ttl_checked_at: Mutex::new(None),
@@ -238,6 +247,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     #[must_use]
     pub fn with_treasury(mut self, treasury: Arc<dyn Signer>) -> Self {
         self.treasury = Some(treasury);
+        self
+    }
+
+    /// Sweeps the treasury's surplus to `reserve`; needs the treasury's key
+    /// ([`Self::with_treasury`]).
+    #[must_use]
+    pub fn with_reserve(mut self, reserve: Reserve) -> Self {
+        self.reserve = Some(reserve);
         self
     }
 
@@ -273,6 +290,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let funded = self.fee_source_funded().await?;
         if funded {
             for id in self.keep_alive(self.engine.capacity().saturating_sub(open)).await? {
+                self.engine.broadcast(id).await?;
+                self.engine.resolve(id).await?;
+                submitted.push(id);
+            }
+            if open + submitted.len() < self.engine.capacity()
+                && let Some(id) = self.sweep().await?
+            {
                 self.engine.broadcast(id).await?;
                 self.engine.resolve(id).await?;
                 submitted.push(id);

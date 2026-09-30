@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use clap::Parser;
 use fermah_pay_stellar_chain::rpc::{MAX_EVENTS_PER_PAGE, RpcClient};
-use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::lease::{self, Lease};
 use fermah_pay_stellar_gateway::observer::{Observer, Settings, StartPosition};
 use fermah_pay_stellar_gateway::submission::SystemClock;
@@ -64,6 +64,11 @@ struct Config {
     /// it.
     #[arg(long, env = "PAY_STELLAR_LEASE_SECS", default_value = "15")]
     lease_secs: u64,
+    /// Cold reserves, comma-separated `TREASURY:RESERVE` pairs of `G...`
+    /// accounts: the reserve's USDC counts with its treasury's when
+    /// checking that the treasury covers what the contract owes.
+    #[arg(long, env = "PAY_STELLAR_COLD_RESERVES", value_delimiter = ',')]
+    cold_reserves: Vec<String>,
 }
 
 #[tokio::main]
@@ -78,6 +83,16 @@ async fn main() -> anyhow::Result<()> {
     }
     if config.confirmations == 0 || config.poll_secs == 0 || config.reconcile_secs == 0 {
         bail!("confirmations, poll and reconcile intervals must be at least 1");
+    }
+    let mut reserves = std::collections::HashMap::new();
+    for pair in &config.cold_reserves {
+        let (treasury, reserve) =
+            pair.split_once(':').context("a cold reserve is written TREASURY:RESERVE")?;
+        let treasury: AccountAddress = treasury.parse().context("the treasury address")?;
+        let reserve: AccountAddress = reserve.parse().context("the reserve address")?;
+        if reserves.insert(treasury, reserve).is_some() {
+            bail!("a treasury is listed with two cold reserves");
+        }
     }
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
         .context("building RPC client")?;
@@ -105,7 +120,8 @@ async fn main() -> anyhow::Result<()> {
             confirmations: config.confirmations,
             max_pages_per_round: 100,
         },
-    );
+    )
+    .with_reserves(reserves);
     lease::lead(&lease, "observer", shutdown::signal(), |stop| {
         observer.run(
             Duration::from_secs(config.poll_secs),

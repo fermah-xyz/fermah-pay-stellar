@@ -89,6 +89,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | [key reference](keys.md) of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | [key reference](keys.md) of the contracts' operator; the worker serves the deployments bound with this operator |
 | Worker | `PAY_STELLAR_TREASURY_KEY_FILE` | optional [key reference](keys.md) of the treasury; the worker pays the withdrawals of the deployments bound with this treasury. Without it, withdrawals wait until they lapse |
+| Worker | `PAY_STELLAR_COLD_RESERVE`, `PAY_STELLAR_HOT_TREASURY_FLOOR`, `…_TARGET`, `…_CEILING` | optional [cold reserve](treasury.md): the treasury's USDC above the ceiling is swept there, down to the target; below the floor it needs topping up. Needs the treasury key |
 | Worker | `PAY_STELLAR_FEE_FLOOR_STROOPS` | spendable XLM, in stroops, below which the fee account pays only for finishing work in flight; default `100000000` (10 XLM) |
 | Worker | `PAY_STELLAR_TTL_THRESHOLD_LEDGERS`, `PAY_STELLAR_TTL_EXTEND_TO_LEDGERS`, `PAY_STELLAR_TTL_CHECK_SECS` | a served contract's instance and code are extended to `…EXTEND_TO…` ledgers of life (default 518400, about 30 days) once fewer than `…THRESHOLD…` remain (default 120960, about 7 days), checked every `…CHECK_SECS…` (default 600) |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |

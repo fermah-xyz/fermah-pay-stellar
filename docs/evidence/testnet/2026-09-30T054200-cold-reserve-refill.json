@@ -1,0 +1,28 @@
+{
+  "criterion": "cold-reserve-refill",
+  "expected": "USDC moves from the cold reserve back to the treasury only with two of the reserve's three signatures, through the proposal, sign and submit tool; with one signature nothing is sent",
+  "reserve": "GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC",
+  "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN",
+  "one_signature": {
+    "amount": "500000",
+    "result": "refused before sending: GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC needs signatures weighing 2 (its medium threshold); these weigh 1"
+  },
+  "refills": [
+    {
+      "amount": "500000",
+      "fee_charged_stroops": 26760,
+      "ledger": 4944658,
+      "summary": "call transfer on CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA with GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC, GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN, 500000",
+      "transaction_hash": "4c747435e158fe09f63b79ebef6fb5d53749eeebd939135133e5e543dd689e4d",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/4c747435e158fe09f63b79ebef6fb5d53749eeebd939135133e5e543dd689e4d"
+    },
+    {
+      "amount": "100000",
+      "fee_charged_stroops": 26760,
+      "ledger": 4944665,
+      "summary": "call transfer on CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA with GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC, GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN, 100000",
+      "transaction_hash": "7903026c18e63b16b631cd2c612099e2afa565bf6b06c170178fe03d54eca9cb",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/7903026c18e63b16b631cd2c612099e2afa565bf6b06c170178fe03d54eca9cb"
+    }
+  ]
+}

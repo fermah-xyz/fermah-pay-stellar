@@ -40,6 +40,7 @@ cargo run -q -p fermah-pay-stellar-gateway --bin fermah-pay-stellar-observer
 | `PAY_STELLAR_OBSERVER_CONFIRMATIONS` | consecutive reconciliations a discrepancy must persist through before it is recorded, default 3 |
 | `PAY_STELLAR_OBSERVER_PAGE_SIZE` | events per RPC call, 1 to 10000, default 1000 |
 | `PAY_STELLAR_OBSERVER_MAX_BACKOFF_SECS` | longest wait between retries after a failed round, default 300 |
+| `PAY_STELLAR_COLD_RESERVES` | comma-separated `TREASURY:RESERVE` pairs: each [cold reserve](treasury.md)'s USDC counts with its treasury's for solvency |
 | `PAY_STELLAR_LEASE_SECS` | how long an observer's lease lasts without renewal, default 15, at least 3. Several observers may run for one network; the one holding the lease observes and the others take over when it stops |
 
 The start position applies once per deployment; afterwards the observer
@@ -79,7 +80,7 @@ member of `pay_stellar_operator` can read both tables.
 | `role_changed` | warning | The admin or seller role was rotated on the contract. | Confirm the rotation was intended; if not, the admin key is compromised. |
 | `admin_change` | warning | The admin paused or unpaused the contract, or changed its deposit and charge limits; `detail` holds the new state. | Confirm the change was intended; if not, the admin key is compromised. |
 | `binding_out_of_date` | warning | The operator or treasury was rotated on the contract but the deployment's binding still names the previous account after the grace. | Run `admin sync-ledger` ([rotation](rotation.md)); if the rotation was not intended, the admin key is compromised. |
-| `treasury_deficit` | critical | The treasury holds less USDC than the contract owes buyers and the seller. | Pause the contract with the admin key and find where the USDC went; top up the treasury. After a treasury rotation, move the previous treasury's USDC. |
+| `treasury_deficit` | critical | The treasury, with its cold reserve if one is configured, holds less USDC than the contract owes buyers and the seller. | Pause the contract with the admin key and find where the USDC went; top up the treasury. After a treasury rotation, move the previous treasury's USDC. |
 | `treasury_surplus` | info | The treasury holds more USDC than the contract owes. | Expected if it holds other funds; otherwise find the source. |
 | `treasury_deauthorized` | critical | The treasury's USDC trustline is missing or no longer authorized by the USDC issuer. Its balance may still cover what is owed, but every deposit and withdrawal fails. | Contact the issuer; consider rotating to another treasury and moving the USDC. |
 | `event_totals_mismatch` | warning | The contract's totals differ from the sums of the events the observer read (since the last baseline, if any). | If `coverage` shows a gap or a start after deployment, the history is incomplete: check the books by hand, then record a baseline (below). Otherwise events were missed or the contract changed behaviour: investigate. |

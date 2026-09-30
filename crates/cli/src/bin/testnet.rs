@@ -49,6 +49,16 @@ enum Command {
     /// Require two of the admin account's three keys (its own and two
     /// co-signers kept in the profile) for anything it authorizes
     AdminMultisig,
+    /// Create the treasury's cold reserve if missing: a Circle USDC
+    /// trustline, zero XLM, and two of its three keys (its own and two
+    /// co-signers kept in the profile) to move anything.
+    ColdReserve,
+    /// Move AMOUNT of the treasury's USDC to its cold reserve, authorized by
+    /// the treasury alone, as the settlement worker's sweep does.
+    Sweep {
+        #[arg(long)]
+        amount: i128,
+    },
     /// Replace the recorded contract's code with WASM in place, authorized by
     /// the admin; balances and totals are kept
     UpgradePrepaid {
@@ -171,6 +181,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::InitRoles => context()?.init_roles().await?,
         Command::AdminMultisig => context()?.admin_multisig().await?,
+        Command::ColdReserve => context()?.cold_reserve().await?,
+        Command::Sweep { amount } => context()?.sweep(amount).await?,
         Command::UpgradePrepaid { wasm } => {
             let code =
                 std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;

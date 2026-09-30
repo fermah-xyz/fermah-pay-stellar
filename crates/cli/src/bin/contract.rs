@@ -22,15 +22,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 use fermah_pay_stellar_chain::authorization::{attach_signatures, signature_payload};
 use fermah_pay_stellar_chain::multisig::account_signers;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::{AdminAction, Role};
+use fermah_pay_stellar_chain::prepaid::{AdminAction, Role, usdc_transfer_call};
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
-use fermah_pay_stellar_chain::signer;
 use fermah_pay_stellar_chain::sponsored::{Credentials, Policy, Submitter};
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Int128Parts, Limits, ReadXdr, ScAddress, ScVal, SorobanAuthorizationEntry,
-    SorobanCredentials, WriteXdr,
+    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::address_of;
+use fermah_pay_stellar_chain::{signer, usdc};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::signing;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,30 @@ enum Command {
         out: PathBuf,
         #[command(subcommand)]
         action: ActionArgs,
+    },
+    /// Propose a USDC transfer out of an account that needs several
+    /// signatures, such as topping up the treasury from its cold reserve,
+    /// and write a proposal file to be signed.
+    ProposeTransfer {
+        #[command(flatten)]
+        network: NetworkArgs,
+        /// The account the USDC leaves, which authorizes the transfer.
+        #[arg(long)]
+        from: AccountAddress,
+        /// The account that receives it; it needs a USDC trustline.
+        #[arg(long)]
+        to: AccountAddress,
+        /// USDC base units (1 USDC = 10,000,000).
+        #[arg(long)]
+        amount: i128,
+        #[arg(long)]
+        source_key: PathBuf,
+        #[arg(long)]
+        fee_key: PathBuf,
+        #[arg(long, default_value = "17280")]
+        valid_for_ledgers: u32,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Show a proposal and add one signer's signature to it.
     Sign {
@@ -285,6 +309,59 @@ fn submitter<'a>(
     }
 }
 
+struct ProposalRequest<'a> {
+    network: &'a NetworkArgs,
+    source_key: &'a Path,
+    fee_key: &'a Path,
+    valid_for_ledgers: u32,
+    out: &'a Path,
+}
+
+/// Simulates `function` with unsigned authorizations of `trees` and writes
+/// the proposal for the signers.
+async fn propose(
+    request: &ProposalRequest<'_>,
+    contract: String,
+    function: &HostFunction,
+    trees: &[(AccountAddress, SorobanAuthorizedInvocation)],
+) -> anyhow::Result<()> {
+    let network = request.network;
+    let rpc = RpcClient::new(&network.rpc_url, Duration::from_secs(30))?;
+    rpc.verify_network(network.network).await?;
+    let (source, fee) =
+        (signing::read_seed(request.source_key)?, signing::read_seed(request.fee_key)?);
+    let submitter = submitter(&rpc, network.network, &source, &fee, network.inclusion_fee);
+    let prepared = submitter
+        .prepare_authorizations(function, trees, request.valid_for_ledgers, Credentials::AddressV2)
+        .await?;
+    let proposal = Proposal {
+        network: network.network.caip2().to_owned(),
+        contract,
+        summary: describe(function)?,
+        function: function.to_xdr_base64(Limits::none())?,
+        expiration_ledger: prepared.latest_ledger.saturating_add(request.valid_for_ledgers),
+        authorizations: prepared
+            .entries
+            .iter()
+            .map(|entry| {
+                Ok(Authorization {
+                    account: entry_account(entry)?.to_string(),
+                    entry: entry.to_xdr_base64(Limits::none())?,
+                    signatures: Vec::new(),
+                })
+            })
+            .collect::<anyhow::Result<_>>()?,
+    };
+    write_proposal(request.out, &proposal)?;
+    println!(
+        "{}",
+        json!({ "proposal": request.out, "summary": proposal.summary,
+        "expiration_ledger": proposal.expiration_ledger,
+        "accounts": proposal.authorizations.iter().map(|a| &a.account).collect::<Vec<_>>() })
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
@@ -298,46 +375,50 @@ async fn main() -> anyhow::Result<()> {
             out,
             action: args,
         } => {
-            let rpc = RpcClient::new(&network.rpc_url, Duration::from_secs(30))?;
-            rpc.verify_network(network.network).await?;
-            let (source, fee) = (signing::read_seed(&source_key)?, signing::read_seed(&fee_key)?);
-            let submitter = submitter(&rpc, network.network, &source, &fee, network.inclusion_fee);
             let action = action(args)?;
             let contract_id = contract_bytes(&contract)?;
             let function = HostFunction::InvokeContract(action.call(contract_id));
-            let prepared = submitter
-                .prepare_authorizations(
-                    &function,
-                    &action.authorizations(contract_id, &admin),
-                    valid_for_ledgers,
-                    Credentials::AddressV2,
-                )
-                .await?;
-            let proposal = Proposal {
-                network: network.network.caip2().to_owned(),
-                contract,
-                summary: describe(&function)?,
-                function: function.to_xdr_base64(Limits::none())?,
-                expiration_ledger: prepared.latest_ledger.saturating_add(valid_for_ledgers),
-                authorizations: prepared
-                    .entries
-                    .iter()
-                    .map(|entry| {
-                        Ok(Authorization {
-                            account: entry_account(entry)?.to_string(),
-                            entry: entry.to_xdr_base64(Limits::none())?,
-                            signatures: Vec::new(),
-                        })
-                    })
-                    .collect::<anyhow::Result<_>>()?,
+            let trees = action.authorizations(contract_id, &admin);
+            let request = ProposalRequest {
+                network: &network,
+                source_key: &source_key,
+                fee_key: &fee_key,
+                valid_for_ledgers,
+                out: &out,
             };
-            write_proposal(&out, &proposal)?;
-            println!(
-                "{}",
-                json!({ "proposal": out, "summary": proposal.summary,
-                "expiration_ledger": proposal.expiration_ledger,
-                "accounts": proposal.authorizations.iter().map(|a| &a.account).collect::<Vec<_>>() })
-            );
+            propose(&request, contract, &function, &trees).await?;
+        }
+        Command::ProposeTransfer {
+            network,
+            from,
+            to,
+            amount,
+            source_key,
+            fee_key,
+            valid_for_ledgers,
+            out,
+        } => {
+            ensure!(amount > 0, "the amount must be positive");
+            ensure!(from != to, "the transfer must go to another account");
+            let usdc =
+                usdc::asset_contract_id(&usdc::circle_usdc(network.network), network.network);
+            let call = usdc_transfer_call(usdc, &from, &to, amount);
+            let function = HostFunction::InvokeContract(call.clone());
+            let trees = vec![(
+                from,
+                SorobanAuthorizedInvocation {
+                    function: SorobanAuthorizedFunction::ContractFn(call),
+                    sub_invocations: VecM::default(),
+                },
+            )];
+            let request = ProposalRequest {
+                network: &network,
+                source_key: &source_key,
+                fee_key: &fee_key,
+                valid_for_ledgers,
+                out: &out,
+            };
+            propose(&request, usdc::contract_strkey(usdc), &function, &trees).await?;
         }
         Command::Sign { proposal: path, key, account } => {
             let mut proposal = read_proposal(&path)?;

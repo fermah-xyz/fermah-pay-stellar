@@ -1,0 +1,17 @@
+{
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "treasury-solvency",
+  "expected": "the USDC of the treasury and its cold reserve equals buyer liabilities plus unwithdrawn revenue when no USDC left them outside the contract",
+  "network": "stellar:testnet",
+  "observed": {
+    "held": "61550000",
+    "liabilities": "17000000",
+    "owed": "61550000",
+    "reserve_usdc": "0",
+    "revenue": "44550000",
+    "surplus": "0",
+    "treasury_usdc": "61550000"
+  },
+  "recorded_at": "2026-09-30T05:41:55.409911262Z",
+  "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN"
+}
