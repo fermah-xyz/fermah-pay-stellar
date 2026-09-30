@@ -34,6 +34,7 @@ pub const fn token_prefix(network: Network) -> &'static str {
     match network {
         Network::Testnet => "fps_test_",
         Network::Pubnet => "fps_live_",
+        Network::Local => "fps_local_",
     }
 }
 

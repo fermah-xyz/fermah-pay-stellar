@@ -56,6 +56,16 @@ fn preimage(deployer: &AccountAddress, salt: [u8; 32]) -> ContractIdPreimage {
     })
 }
 
+/// The call that deploys the Stellar Asset Contract of a classic `asset`.
+/// Anyone may deploy it, once; its address is derived from the asset.
+#[must_use]
+pub fn asset_contract(asset: stellar_xdr::Asset) -> HostFunction {
+    HostFunction::CreateContract(stellar_xdr::CreateContractArgs {
+        contract_id_preimage: stellar_xdr::ContractIdPreimage::Asset(asset),
+        executable: stellar_xdr::ContractExecutable::StellarAsset,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

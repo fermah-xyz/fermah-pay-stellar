@@ -1,4 +1,5 @@
-//! Circle USDC identity per network.
+//! Circle USDC identity per network. A local standalone network has no
+//! Circle issuer; its USDC is a stand-in issued by [`local_usdc_issuer`].
 //!
 //! Admission code must bind the asset by issuer *and* network and check the
 //! Stellar Asset Contract address by derivation: any contract can advertise
@@ -18,14 +19,27 @@ use crate::transaction::account_id;
 /// USDC has seven decimal places on Stellar: one USDC is 10^7 base units.
 pub const USDC_DECIMALS: u32 = 7;
 
-/// Circle's USDC issuer account on `network`.
+/// Circle's USDC issuer account on `network`; on a local network, the
+/// stand-in issuer.
 #[must_use]
 pub fn circle_issuer(network: Network) -> AccountAddress {
     let issuer = match network {
         Network::Testnet => "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
         Network::Pubnet => "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        Network::Local => return local_usdc_issuer().address(),
     };
     issuer.parse().expect("invariant: Circle issuer constants are canonical G-addresses")
+}
+
+/// The issuer of the stand-in USDC on a local standalone network. Its seed
+/// is derived from a public string, so anyone can issue that asset: it has
+/// no value and exists only so a local network can run the same flows as
+/// testnet.
+#[must_use]
+pub fn local_usdc_issuer() -> crate::keys::SecretKey {
+    crate::keys::SecretKey::from_seed(
+        Sha256::digest(b"fermah-pay-stellar local network USDC issuer").into(),
+    )
 }
 
 #[must_use]

@@ -1,4 +1,5 @@
-//! Stellar testnet tooling. Every command is hard-wired to testnet.
+//! Stellar testnet tooling. Every command runs on testnet, or on a local
+//! standalone network (`--network stellar:local`) for development and CI.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,12 +18,14 @@ use fermah_pay_stellar_domain::Network;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-const NETWORK: Network = Network::Testnet;
-
 #[derive(Parser)]
 #[command(name = "fermah-pay-stellar-testnet", version, about)]
 struct Cli {
-    /// Stellar RPC endpoint serving testnet.
+    /// `stellar:testnet`, or `stellar:local` for a standalone network on this
+    /// machine such as `stellar/quickstart --local`.
+    #[arg(long, env = "PAY_STELLAR_TESTNET_NETWORK", default_value = "stellar:testnet")]
+    network: Network,
+    /// Stellar RPC endpoint serving that network.
     #[arg(
         long,
         env = "STELLAR_TESTNET_RPC_URL",
@@ -33,9 +36,10 @@ struct Cli {
     /// repository.
     #[arg(long, env = "PAY_STELLAR_TESTNET_PROFILE")]
     profile_dir: Option<PathBuf>,
-    /// Where evidence records are written.
-    #[arg(long, default_value = "docs/evidence/testnet")]
-    evidence_dir: PathBuf,
+    /// Where evidence records are written: `docs/evidence/testnet` on
+    /// testnet, `target/local-evidence` on a local network.
+    #[arg(long)]
+    evidence_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -46,6 +50,12 @@ enum Command {
     /// funded by Friendbot; admin, operator, seller, treasury and USDC reserve
     /// sponsored with zero XLM.
     InitRoles,
+    /// On a local network only: deploy the stand-in USDC's asset contract if
+    /// missing and issue AMOUNT base units to the USDC reserve.
+    MintLocalUsdc {
+        #[arg(long)]
+        amount: i64,
+    },
     /// Require two of the admin account's three keys (its own and two
     /// co-signers kept in the profile) for anything it authorizes
     AdminMultisig,
@@ -184,17 +194,30 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let rpc = RpcClient::new(&cli.rpc_url, Duration::from_secs(30))?;
-    let info = rpc.verify_network(NETWORK).await?;
+    let network = cli.network;
+    if network == Network::Pubnet {
+        bail!("this tooling runs on testnet or a local network, never on pubnet");
+    }
+    fermah_pay_stellar_cli::testnet::evidence::set_network(network);
+    let info = rpc.verify_network(network).await?;
+    let local = network == Network::Local;
     let profile_dir = match cli.profile_dir {
         Some(dir) => dir,
-        None => PathBuf::from(std::env::var("HOME").context("HOME is not set")?)
-            .join(".config/fermah-pay-stellar/testnet"),
+        None => PathBuf::from(std::env::var("HOME").context("HOME is not set")?).join(if local {
+            ".config/fermah-pay-stellar/local"
+        } else {
+            ".config/fermah-pay-stellar/testnet"
+        }),
     };
+    let evidence_dir = cli.evidence_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(if local { "target/local-evidence" } else { "docs/evidence/testnet" })
+    });
     let context = || -> anyhow::Result<Testnet> {
         Ok(Testnet {
+            network,
             rpc: rpc.clone(),
             profile: Profile::open(&profile_dir)?,
-            evidence_dir: cli.evidence_dir.clone(),
+            evidence_dir: evidence_dir.clone(),
             policy: Policy {
                 inclusion_fee: 1_000,
                 resource_fee_margin_percent: 15,
@@ -205,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
     };
     match cli.command {
         Command::InitRoles => context()?.init_roles().await?,
+        Command::MintLocalUsdc { amount } => context()?.mint_local_usdc(amount).await?,
         Command::AdminMultisig => context()?.admin_multisig().await?,
         Command::ColdReserve => context()?.cold_reserve().await?,
         Command::Sweep { amount } => context()?.sweep(amount).await?,
@@ -260,13 +284,13 @@ async fn main() -> anyhow::Result<()> {
             let buyer = SecretKey::generate()?;
             write_secret(&buyer_secret_out, &buyer)?;
 
-            let asset = usdc::circle_usdc(NETWORK);
+            let asset = usdc::circle_usdc(network);
             let policy = SubmissionPolicy {
                 fee_stroops,
                 validity: Duration::from_secs(120),
                 poll_interval: Duration::from_secs(2),
             };
-            let receipt = onboard_buyer(&rpc, NETWORK, &sponsor, &buyer, &asset, policy).await?;
+            let receipt = onboard_buyer(&rpc, network, &sponsor, &buyer, &asset, policy).await?;
             let violations = receipt.provenance.violations_for_sponsor(&sponsor.address());
             let payer = |payer: &ReservePayer| match payer {
                 ReservePayer::Buyer => "buyer".to_owned(),
@@ -275,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
             let hash = hex_lower(&receipt.transaction_hash);
             let evidence = serde_json::json!({
                 "criterion": "buyer-onboarding-sponsored-reserves",
-                "network": NETWORK.caip2(),
+                "network": network.caip2(),
                 "recorded_at": OffsetDateTime::now_utc().format(&Rfc3339)?,
                 "transaction_hash": hash,
                 "ledger": receipt.ledger,
@@ -284,8 +308,8 @@ async fn main() -> anyhow::Result<()> {
                 "buyer": receipt.provenance.buyer.to_string(),
                 "asset": {
                     "code": "USDC",
-                    "issuer": usdc::circle_issuer(NETWORK).to_string(),
-                    "contract_id": usdc::contract_strkey(usdc::asset_contract_id(&asset, NETWORK)),
+                    "issuer": usdc::circle_issuer(network).to_string(),
+                    "contract_id": usdc::contract_strkey(usdc::asset_contract_id(&asset, network)),
                 },
                 "expected": "buyer created with 0 XLM; transaction fee, account reserve and USDC trustline reserve paid by fee_source",
                 "observed": {
@@ -294,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
                     "trustline_reserve_paid_by": receipt.provenance.trustline_reserve.as_ref().map(payer),
                     "violations": violations.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 },
-                "public_explorer_url": format!("https://stellar.expert/explorer/testnet/tx/{hash}"),
+                "public_explorer_url": fermah_pay_stellar_cli::testnet::evidence::tx_url(&hash),
             });
             println!("{}", serde_json::to_string_pretty(&evidence)?);
             if !violations.is_empty() {

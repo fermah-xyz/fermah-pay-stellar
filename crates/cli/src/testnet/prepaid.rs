@@ -42,7 +42,6 @@ mod load;
 
 pub use load::LoadShape;
 
-const NETWORK: Network = Network::Testnet;
 const SPONSOR: &str = "operator-sponsor";
 const SUBMITTER: &str = "submitter";
 const FEE_SOURCE: &str = "fee-source";
@@ -64,6 +63,8 @@ fn tagged_charge_id(tag: &str, buyer: u32) -> [u8; 32] {
 }
 
 pub struct Context {
+    /// Testnet, or a local standalone network for development and CI.
+    pub network: Network,
     pub rpc: RpcClient,
     pub profile: Profile,
     pub evidence_dir: PathBuf,
@@ -165,8 +166,16 @@ impl Context {
     /// (sponsor, submitter, fee source), sponsored zero-XLM accounts with a
     /// USDC trustline for the rest.
     pub async fn init_roles(&self) -> anyhow::Result<()> {
-        let info = self.rpc.verify_network(NETWORK).await?;
+        let info = self.rpc.verify_network(self.network).await?;
         let friendbot_url = info.friendbot_url.context("RPC reports no Friendbot")?;
+        // A trustline needs its issuer to exist: on a local network, the
+        // stand-in USDC's issuer comes first.
+        if self.network == Network::Local {
+            let issuer = usdc::local_usdc_issuer().address();
+            if !self.account_exists(&issuer).await? {
+                friendbot::fund(&friendbot_url, &issuer).await?;
+            }
+        }
         for name in [SPONSOR, SUBMITTER, FEE_SOURCE] {
             let key = self.profile.key(name)?;
             if !self.account_exists(&key.address()).await? {
@@ -185,10 +194,10 @@ impl Context {
             let refs: Vec<&SecretKey> = missing.iter().collect();
             let receipt = onboard_buyers(
                 &self.rpc,
-                NETWORK,
+                self.network,
                 &sponsor,
                 &refs,
-                &usdc::circle_usdc(NETWORK),
+                &usdc::circle_usdc(self.network),
                 self.onboarding_policy(),
             )
             .await?;
@@ -210,7 +219,7 @@ impl Context {
     }
 
     fn submitter<'a>(&'a self, source: &'a SecretKey, fee_source: &'a SecretKey) -> Submitter<'a> {
-        Submitter { rpc: &self.rpc, network: NETWORK, source, fee_source, policy: self.policy }
+        Submitter { rpc: &self.rpc, network: self.network, source, fee_source, policy: self.policy }
     }
 
     /// Uploads the Wasm and creates an instance whose constructor pins the
@@ -221,10 +230,10 @@ impl Context {
         min_deposit: i128,
         max_charge: i128,
     ) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let submitter = self.submitter(&source, &fee_source);
-        let usdc_contract = usdc::asset_contract_id(&usdc::circle_usdc(NETWORK), NETWORK);
+        let usdc_contract = usdc::asset_contract_id(&usdc::circle_usdc(self.network), self.network);
         let roles = Roles {
             admin: self.profile.key("admin")?.address(),
             operator: self.profile.key("operator")?.address(),
@@ -239,7 +248,7 @@ impl Context {
         let uploaded = submitter.submit(upload, auth).await?;
 
         let salt: [u8; 32] = random_bytes()?;
-        let expected = deploy::contract_id(NETWORK, &source.address(), salt);
+        let expected = deploy::contract_id(self.network, &source.address(), salt);
         let create = deploy::create(
             &source.address(),
             salt,
@@ -287,7 +296,7 @@ impl Context {
     /// signers' reserves, so the admin still holds no XLM. Running it again
     /// on an account that already has the policy changes nothing.
     pub async fn admin_multisig(&self) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let admin = self.profile.key("admin")?;
         let cosigners = [self.profile.key("admin-signer-1")?, self.profile.key("admin-signer-2")?];
         let (transaction_hash, after, xlm) = self.two_of_three(&admin, &cosigners).await?;
@@ -309,17 +318,17 @@ impl Context {
     /// that needs two of its three keys to move anything. The worker never
     /// holds any of them.
     pub async fn cold_reserve(&self) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let sponsor = self.profile.key(SPONSOR)?;
         let reserve = self.profile.key(COLD_RESERVE)?;
         let mut onboarding = None;
         if !self.account_exists(&reserve.address()).await? {
             let receipt = onboard_buyers(
                 &self.rpc,
-                NETWORK,
+                self.network,
                 &sponsor,
                 &[&reserve],
-                &usdc::circle_usdc(NETWORK),
+                &usdc::circle_usdc(self.network),
                 self.onboarding_policy(),
             )
             .await?;
@@ -333,7 +342,7 @@ impl Context {
         }
         let cosigners = [self.profile.key("cold-signer-1")?, self.profile.key("cold-signer-2")?];
         let (transaction_hash, after, xlm) = self.two_of_three(&reserve, &cosigners).await?;
-        let usdc = balances(&self.rpc, &reserve.address(), &usdc::circle_usdc(NETWORK))
+        let usdc = balances(&self.rpc, &reserve.address(), &usdc::circle_usdc(self.network))
             .await?
             .usdc
             .context("the cold reserve has no USDC trustline")?;
@@ -393,8 +402,8 @@ impl Context {
                 self.policy.inclusion_fee,
                 valid_until,
             );
-            let hash = transaction::transaction_hash(&tx, NETWORK)?;
-            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, account])?;
+            let hash = transaction::transaction_hash(&tx, self.network)?;
+            let envelope = transaction::sign(tx, self.network, &[&sponsor, account])?;
             submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
                 .await?;
             Some(hex_lower(&hash))
@@ -403,8 +412,9 @@ impl Context {
             .await?
             .with_context(|| format!("{} does not exist", account.address()))?;
         ensure!(matches(&after), "the account's policy is not the requested one: {after:?}");
-        let xlm =
-            balances(&self.rpc, &account.address(), &usdc::circle_usdc(NETWORK)).await?.xlm_stroops;
+        let xlm = balances(&self.rpc, &account.address(), &usdc::circle_usdc(self.network))
+            .await?
+            .xlm_stroops;
         ensure!(xlm == Some(0), "{} holds XLM: {xlm:?}", account.address());
         Ok((transaction_hash, after, xlm))
     }
@@ -413,13 +423,13 @@ impl Context {
     /// same call and treasury authorization the settlement worker's sweep
     /// builds.
     pub async fn sweep(&self, amount: i128) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let treasury = self.profile.key("treasury")?;
         let reserve = self.profile.key(COLD_RESERVE)?.address();
         let submitter = self.submitter(&source, &fee_source);
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let hot_before = balances(&self.rpc, &treasury.address(), &asset).await?.usdc;
         let cold_before = balances(&self.rpc, &reserve, &asset).await?.usdc;
         let function =
@@ -460,7 +470,7 @@ impl Context {
     /// admin, and checks on the ledger that the instance now runs it and that
     /// its totals are unchanged.
     pub async fn upgrade_prepaid(&self, wasm: &[u8]) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (mut recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let admin = self.profile.key("admin")?;
@@ -529,7 +539,7 @@ impl Context {
             .await?;
         let entry = prepared.entries.first().context("no authorization prepared")?;
         let payload = fermah_pay_stellar_chain::authorization::signature_payload(
-            network_id(NETWORK),
+            network_id(self.network),
             &entry.credentials,
             &entry.root_invocation,
         )?;
@@ -537,7 +547,7 @@ impl Context {
             keys.iter().map(|key| (*key.address().public_key(), key.sign_raw(&payload))).collect();
         Ok(fermah_pay_stellar_chain::authorization::attach_signatures(
             entry,
-            network_id(NETWORK),
+            network_id(self.network),
             signatures,
         )?)
     }
@@ -565,10 +575,10 @@ impl Context {
     /// Creates buyers `1..=count` (sponsored, zero XLM, USDC trustline) and
     /// tops each up to `usdc_each` base units from the USDC reserve.
     pub async fn onboard_buyers(&self, count: u32, usdc_each: i64) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let sponsor = self.profile.key(SPONSOR)?;
         let reserve = self.profile.key(USDC_RESERVE)?;
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let buyers: Vec<SecretKey> =
             (1..=count).map(|i| self.profile.buyer(i)).collect::<Result<_, _>>()?;
 
@@ -582,7 +592,7 @@ impl Context {
         for chunk in missing.chunks(MAX_BUYERS_PER_TRANSACTION) {
             let receipt = onboard_buyers(
                 &self.rpc,
-                NETWORK,
+                self.network,
                 &sponsor,
                 chunk,
                 &asset,
@@ -620,8 +630,8 @@ impl Context {
                 self.policy.inclusion_fee,
                 valid_until,
             )?;
-            let hash = transaction::transaction_hash(&tx, NETWORK)?;
-            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, &reserve])?;
+            let hash = transaction::transaction_hash(&tx, self.network)?;
+            let envelope = transaction::sign(tx, self.network, &[&sponsor, &reserve])?;
             submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
                 .await?;
             payment_txs.push(hex_lower(&hash));
@@ -684,7 +694,7 @@ impl Context {
                 Credentials::AddressV2,
             )
             .await?;
-        let network = network_id(NETWORK);
+        let network = network_id(self.network);
         prepared
             .entries
             .iter()
@@ -718,11 +728,11 @@ impl Context {
     /// Deposits `amount` for each buyer in `first..=last`; each buyer signs
     /// only its authorization entry and holds no XLM.
     pub async fn deposit(&self, first: u32, last: u32, amount: i128) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let submitter = self.submitter(&source, &fee_source);
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let treasury: AccountAddress = recorded.treasury.parse()?;
         let mut records = Vec::new();
         for index in first..=last {
@@ -790,7 +800,7 @@ impl Context {
         tag: &str,
         amount: i128,
     ) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;
@@ -838,7 +848,7 @@ impl Context {
     /// A single `charge`; a refusal is reported with the simulation error and
     /// nothing is submitted.
     pub async fn charge(&self, buyer: u32, tag: &str, amount: i128) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;
@@ -884,7 +894,7 @@ impl Context {
     /// (buyer liabilities plus unwithdrawn revenue), both read from the
     /// network.
     pub async fn solvency(&self) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let submitter = self.submitter(&source, &fee_source);
@@ -894,14 +904,14 @@ impl Context {
             .context("get_totals returned nothing")?;
         let Totals { liabilities, revenue } =
             contract_totals(&totals).with_context(|| format!("unexpected totals {totals:?}"))?;
-        let hot = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(NETWORK))
+        let hot = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(self.network))
             .await?
             .usdc
             .context("treasury has no USDC trustline")?;
         // Swept to the cold reserve, it is still the treasury's.
         let cold = if self.profile.has_key(COLD_RESERVE) {
             let reserve = self.profile.key(COLD_RESERVE)?.address();
-            balances(&self.rpc, &reserve, &usdc::circle_usdc(NETWORK)).await?.usdc.unwrap_or(0)
+            balances(&self.rpc, &reserve, &usdc::circle_usdc(self.network)).await?.usdc.unwrap_or(0)
         } else {
             0
         };
@@ -931,14 +941,14 @@ impl Context {
     /// Withdraws `amount` of `buyer`'s credit back to the buyer's own
     /// account, authorized by the buyer and by the treasury.
     pub async fn withdraw(&self, buyer: u32, amount: i128) -> anyhow::Result<()> {
-        self.rpc.verify_network(NETWORK).await?;
+        self.rpc.verify_network(self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let treasury = self.profile.key("treasury")?;
         let submitter = self.submitter(&source, &fee_source);
         let buyer_key = self.profile.buyer(buyer)?;
         let owner = buyer_key.address();
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let intent = WithdrawIntent {
             owner: owner.clone(),
             amount,
@@ -1012,7 +1022,7 @@ impl Context {
         };
         use fermah_pay_stellar_chain::transaction::muxed_account;
 
-        let info = self.rpc.verify_network(NETWORK).await?;
+        let info = self.rpc.verify_network(self.network).await?;
         let signer = fermah_pay_stellar_gateway::signing::open(reference).await?;
         let account = signer.address();
         let mut funded = false;
@@ -1038,8 +1048,8 @@ impl Context {
             }])?,
             ext: TransactionExt::V0,
         };
-        let hash = transaction::transaction_hash(&tx, NETWORK)?;
-        let envelope = transaction::sign_with(tx, NETWORK, &[signer.as_ref()]).await?;
+        let hash = transaction::transaction_hash(&tx, self.network)?;
+        let envelope = transaction::sign_with(tx, self.network, &[signer.as_ref()]).await?;
         submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval).await?;
         let after = self.sequence_of(&account).await?;
         ensure!(after == sequence + 1, "the account's sequence is {after}, not {}", sequence + 1);
@@ -1058,5 +1068,50 @@ impl Context {
                 "observed": { "sequence_before": sequence, "sequence_after": after },
             }),
         )
+    }
+}
+
+impl Context {
+    /// On a local network: deploys the stand-in USDC's asset contract if it
+    /// is missing, and issues `amount` base units to the USDC reserve, which
+    /// on testnet is funded from Circle's faucet instead.
+    pub async fn mint_local_usdc(&self, amount: i64) -> anyhow::Result<()> {
+        ensure!(self.network == Network::Local, "stand-in USDC exists only on a local network");
+        self.rpc.verify_network(self.network).await?;
+        let asset = usdc::circle_usdc(self.network);
+        let contract = usdc::asset_contract_id(&asset, self.network);
+        let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
+        let submitter = self.submitter(&source, &fee_source);
+        let instance = PrepaidDeployment { contract, usdc: contract, treasury: source.address() }
+            .instance_key();
+        if self.rpc.get_ledger_entries(&[instance]).await?.is_empty() {
+            let deploy = deploy::asset_contract(asset.clone());
+            let auth = submitter.record_source_authorization(&deploy).await?;
+            submitter.submit(deploy, auth).await?;
+        }
+        let sponsor = self.profile.key(SPONSOR)?;
+        let issuer = usdc::local_usdc_issuer();
+        let reserve = self.profile.key(USDC_RESERVE)?;
+        let sequence = self.sequence_of(&sponsor.address()).await?;
+        let valid_until = unix_now() + self.policy.validity.as_secs();
+        let tx = payments_transaction(
+            &sponsor.address(),
+            sequence + 1,
+            &issuer.address(),
+            &[(reserve.address(), amount)],
+            &asset,
+            self.policy.inclusion_fee,
+            valid_until,
+        )?;
+        let hash = transaction::transaction_hash(&tx, self.network)?;
+        let envelope = transaction::sign(tx, self.network, &[&sponsor, &issuer])?;
+        submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval).await?;
+        let held = balances(&self.rpc, &reserve.address(), &asset).await?.usdc;
+        println!(
+            "{}",
+            json!({ "asset_contract": usdc::contract_strkey(contract),
+                    "reserve": reserve.address().to_string(), "reserve_usdc": held })
+        );
+        Ok(())
     }
 }

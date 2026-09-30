@@ -172,3 +172,29 @@ The `load-test` evidence record reports:
 - every batch transaction.
 
 Use a fresh database for each run.
+
+## On a local network
+
+Every command above also runs against a standalone network on this machine,
+with `--network stellar:local`:
+
+```bash
+docker run -d --name stellar -p 8000:8000 stellar/quickstart:testing --local --enable core,rpc --limits testnet
+local() { testnet --network stellar:local --rpc-url http://localhost:8000/rpc "$@"; }
+local init-roles                    # Friendbot funds the roles and the stand-in USDC issuer
+local mint-local-usdc --amount 1000000000
+local deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
+  --min-deposit 100000 --max-charge 10000000
+local end-to-end --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_local
+```
+
+A local network has no Circle issuer. Its USDC is a stand-in issued by a key
+derived from a public string, so anyone can issue it; `mint-local-usdc`
+deploys its asset contract and funds the USDC reserve. The profile defaults
+to `~/.config/fermah-pay-stellar/local` and evidence to
+`target/local-evidence`. Each record is marked as a local test run: it is not
+evidence of anything on a public network.
+
+The `Local end-to-end` CI job runs exactly this on every change to the code,
+the contract or the schema. The `testnet` workflow remains the check against
+Circle USDC on a public network.
