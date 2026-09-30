@@ -1,7 +1,9 @@
 # Local quickstart
 
 Runs the gateway against a local database, provisions a seller, onboards a
-real buyer account on Stellar testnet, and registers it through the API.
+real buyer account on Stellar testnet, and registers it through the API, one
+step at a time. To run every process at once (gateway, worker and observer)
+in containers, see [the whole system on one machine](dev-stack.md).
 
 Requirements: Rust via rustup, Docker, `just`, and
 [`grpcurl`](https://github.com/fullstorydev/grpcurl) for the API calls.
