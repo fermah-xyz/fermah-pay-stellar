@@ -206,7 +206,9 @@ extended to about 30 days once fewer than about
 archived between uses. An account that is only read is not extended. An
 account idle long enough to be archived is restored by the network inside
 its next deposit or charge, which pays the restoration; see
-[settlement](transactions.md#settlement).
+[settlement](transactions.md#settlement). A contract that goes idle does
+not extend itself, so the settlement worker reads its instance's and code's
+remaining life and extends both before they could be archived.
 
 ## Building
 

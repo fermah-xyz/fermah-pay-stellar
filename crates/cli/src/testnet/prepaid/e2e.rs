@@ -196,6 +196,10 @@ impl Context {
                 max_batch: MAX_BATCH,
                 // 10 XLM, the worker's default.
                 fee_floor_stroops: 100_000_000,
+                // The worker's defaults.
+                ttl_threshold_ledgers: 120_960,
+                ttl_extend_to_ledgers: 518_400,
+                ttl_check_every: Duration::from_secs(600),
             },
         );
         let mut worker_stop = stopped.clone();

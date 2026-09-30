@@ -23,6 +23,7 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_charges_settled_total{result}` | worker | charges settled by result: `charged`, a refusal outcome, `quarantined`, `requeued` |
 | `pay_stellar_deposits_closed_total{state}` | worker | deposits closed: `confirmed`, `expired`, `failed` |
 | `pay_stellar_fee_source_spendable_stroops` | worker | XLM the fee account can spend above its reserve; below the fee floor no new transaction is built |
+| `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
 | `pay_stellar_signing_failures_total{role}` | worker | signatures that failed or did not verify, by key: `operator`, `source`, `fee_source` |
 | `pay_stellar_worker_step_failures_total` | worker | settlement rounds that failed |
 | `pay_stellar_findings_total{kind,severity}` | observer | findings recorded, as listed in [the observer guide](observer.md) |
@@ -44,6 +45,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |
 | `PayStellarFeeAccountLow` | warning | Fund the fee account before it reaches the floor. The rule assumes the default floor of 10 XLM; adjust it if `PAY_STELLAR_FEE_FLOOR_STROOPS` differs |
 | `PayStellarFeeAccountAtFloor` | critical | No new deposits or batches go out, while work in flight finishes. Fund the fee account; settlement resumes on its own |
+| `PayStellarContractLifeShort` | critical | The worker extends a contract below about 7 days of life; at half that it has failed to. Check its logs, its source accounts and the fee account |
 | `PayStellarChargesWaiting` | warning | Batches are not going out. Check the worker's logs, its source accounts and the fee account's balance |
 | `PayStellarSubmissionsNotLanding` | warning | Transactions keep expiring or failing. Check the inclusion bid against network fees and the RPC node's health |
 | `PayStellarWorkerFailing` | warning | Settlement rounds keep failing; read the worker's error logs |

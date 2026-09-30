@@ -274,6 +274,7 @@ impl ChainReader for Chain {
                         data,
                         ext: LedgerEntryExt::V0,
                         last_modified_ledger: net.latest,
+                        live_until_ledger: None,
                     });
                 }
             }
