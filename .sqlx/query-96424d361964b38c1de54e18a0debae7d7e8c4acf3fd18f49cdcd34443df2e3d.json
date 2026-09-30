@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT count(*) AS \"waiting!\",\n                   COALESCE(EXTRACT(EPOCH FROM now() - min(w.signed_at)), 0)::float8 AS \"oldest!\"\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network\n            WHERE w.state = 'signed' AND w.network = $1 AND l.operator_address = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "waiting!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "96424d361964b38c1de54e18a0debae7d7e8c4acf3fd18f49cdcd34443df2e3d"
+}

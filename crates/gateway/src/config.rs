@@ -42,8 +42,8 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
     pub rpc_timeout_secs: u64,
 
-    /// Ledgers a buyer's deposit authorization stays valid (about five
-    /// seconds each; 720 is about an hour).
+    /// Ledgers a buyer's deposit or withdrawal authorization stays valid
+    /// (about five seconds each; 720 is about an hour).
     #[arg(long, env = "PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS", default_value = "720")]
     pub deposit_authorization_ledgers: NonZeroU32,
 

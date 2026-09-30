@@ -1,0 +1,163 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address, w.state,\n                   w.authorization_xdr, w.signed_authorization_xdr, w.expiration_ledger,\n                   w.created_at, s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b\n              ON b.id = w.buyer_id AND b.seller_deployment_id = w.seller_deployment_id\n             AND b.network = w.network\n            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id\n            WHERE w.seller_deployment_id = $1 AND w.network = $2\n              AND (w.id = $3 OR w.idempotency_key = $4)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "buyer_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "buyer_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "destination_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "destination_address"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "authorization_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "signed_authorization_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "expiration_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "expiration_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "outer_hash?",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "outer_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "ledger?",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "01691cba0296b9a7776c531cd7da15e6f79dbb2001e3f2f589c3c688765cdf11"
+}

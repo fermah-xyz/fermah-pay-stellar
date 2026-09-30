@@ -14,17 +14,20 @@
 //! discrepancy is therefore recorded only once it has persisted through
 //! `confirmations` consecutive checks.
 //!
-//! What the database must match, from its state machine, with `W` and `R`
-//! the buyer and revenue withdrawals observed up to `L` (the gateway keeps
-//! no record of withdrawals), and the observed deposits and charges that no
-//! database row explains (`D_out`, `C_out`, each also a finding of its own):
+//! What the database must match, from its state machine, with `R` the
+//! revenue withdrawals observed up to `L` (the gateway keeps no record of
+//! them), and the observed deposits, charges and buyer withdrawals that no
+//! database row explains (`D_out`, `C_out`, `W_out`, each also a finding of
+//! its own):
 //!
 //! - a buyer's `available` is its confirmed deposits minus every charge not
-//!   refused, so the contract's liabilities lie between
-//!   `sum(available) + D_out - C_out - W` and that plus the charges not yet
-//!   final (`admitted`, `submitted`, `quarantined`: each may or may not have
-//!   debited on-chain) plus the deposits not yet final (`awaiting_signature`,
-//!   `signed`, `submitted`: each may already be credited on-chain);
+//!   refused and every withdrawal held and not returned, so the contract's
+//!   liabilities lie between `sum(available) + D_out - C_out - W_out` and
+//!   that plus the charges not yet final (`admitted`, `submitted`,
+//!   `quarantined`: each may or may not have debited on-chain), the deposits
+//!   not yet final (`awaiting_signature`, `signed`, `submitted`: each may
+//!   already be credited on-chain) and the withdrawals held but not yet final
+//!   (`signed`, `submitted`: each may not have left yet);
 //! - the revenue lies between `sum(charged) + C_out - R` and that plus the
 //!   charges not yet final.
 
@@ -77,16 +80,18 @@ struct Books {
     charged: i128,
     pending_charges: i128,
     pending_deposits: i128,
+    pending_withdrawals: i128,
     deposited_on_chain: i128,
     charged_on_chain: i128,
     withdrawn: i128,
     revenue_withdrawn: i128,
     outside_deposits: i128,
     outside_charges: i128,
+    outside_withdrawals: i128,
 }
 
-/// The deployment's available and charged sums, refused while any charge or
-/// deposit is not final.
+/// The deployment's available and charged sums, refused while any charge,
+/// deposit or held withdrawal is not final.
 async fn quiet_books(pool: &PgPool, deployment: Uuid) -> Result<(i128, i128), ObserverError> {
     let row = sqlx::query!(
         r#"
@@ -100,14 +105,17 @@ async fn quiet_books(pool: &PgPool, deployment: Uuid) -> Result<(i128, i128), Ob
                AND state IN ('admitted', 'submitted', 'quarantined')) AS "charges_in_flight!",
             (SELECT count(*) FROM pay_stellar.deposits
              WHERE seller_deployment_id = $1
-               AND state IN ('awaiting_signature', 'signed', 'submitted')) AS "deposits_in_flight!"
+               AND state IN ('awaiting_signature', 'signed', 'submitted')) AS "deposits_in_flight!",
+            (SELECT count(*) FROM pay_stellar.withdrawals
+             WHERE seller_deployment_id = $1
+               AND state IN ('signed', 'submitted')) AS "withdrawals_in_flight!"
         "#,
         deployment,
     )
     .fetch_one(pool)
     .await
     .map_err(store("read books for a baseline"))?;
-    if row.charges_in_flight > 0 || row.deposits_in_flight > 0 {
+    if row.charges_in_flight > 0 || row.deposits_in_flight > 0 || row.withdrawals_in_flight > 0 {
         return Err(ObserverError::NotQuiet);
     }
     Ok((amount(&row.available)?, amount(&row.charged)?))
@@ -243,8 +251,11 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             let liabilities_low =
                 books.available + base.map_or(0, |b| b.liabilities_offset) + books.outside_deposits
                     - books.outside_charges
-                    - books.withdrawn;
-            let liabilities_high = liabilities_low + books.pending_charges + books.pending_deposits;
+                    - books.outside_withdrawals;
+            let liabilities_high = liabilities_low
+                + books.pending_charges
+                + books.pending_deposits
+                + books.pending_withdrawals;
             let revenue_low =
                 books.charged + base.map_or(0, |b| b.revenue_offset) + books.outside_charges
                     - books.revenue_withdrawn;
@@ -265,11 +276,12 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                         "database": { "available": books.available.to_string(),
                                       "charged": books.charged.to_string(),
                                       "pending_charges": books.pending_charges.to_string(),
-                                      "pending_deposits": books.pending_deposits.to_string() },
-                        "events": { "withdrawn": books.withdrawn.to_string(),
-                                    "revenue_withdrawn": books.revenue_withdrawn.to_string(),
+                                      "pending_deposits": books.pending_deposits.to_string(),
+                                      "pending_withdrawals": books.pending_withdrawals.to_string() },
+                        "events": { "revenue_withdrawn": books.revenue_withdrawn.to_string(),
                                     "outside_deposits": books.outside_deposits.to_string(),
-                                    "outside_charges": books.outside_charges.to_string() },
+                                    "outside_charges": books.outside_charges.to_string(),
+                                    "outside_withdrawals": books.outside_withdrawals.to_string() },
                         "coverage": coverage,
                     }),
                 ))));
@@ -426,6 +438,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                  WHERE seller_deployment_id = $1
                    AND state IN ('awaiting_signature', 'signed', 'submitted'))::text
                     AS "pending_deposits!",
+                (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.withdrawals
+                 WHERE seller_deployment_id = $1 AND state IN ('signed', 'submitted'))::text
+                    AS "pending_withdrawals!",
                 (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.chain_events
                  WHERE seller_deployment_id = $1 AND ledger <= $2 AND ledger > $3 AND kind = 'deposit')::text
                     AS "deposited_on_chain!",
@@ -458,7 +473,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                        JOIN pay_stellar.buyers b ON b.id = c.buyer_id
                        WHERE c.seller_deployment_id = e.seller_deployment_id
                          AND b.wallet_address = ce.owner AND c.charge_id = ce.charge_id))::text
-                    AS "outside_charges!"
+                    AS "outside_charges!",
+                (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
+                   AND e.kind = 'withdrawal'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pay_stellar.withdrawals w
+                       JOIN pay_stellar.buyers b ON b.id = w.buyer_id
+                       WHERE w.seller_deployment_id = e.seller_deployment_id
+                         AND b.wallet_address = e.owner AND w.withdrawal_id = e.reference))::text
+                    AS "outside_withdrawals!"
             FROM pay_stellar.observer_cursors o
             WHERE o.seller_deployment_id = $1
             "#,
@@ -503,12 +527,14 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             charged: amount(&row.charged)?,
             pending_charges: amount(&row.pending_charges)?,
             pending_deposits: amount(&row.pending_deposits)?,
+            pending_withdrawals: amount(&row.pending_withdrawals)?,
             deposited_on_chain: amount(&row.deposited_on_chain)?,
             charged_on_chain: amount(&row.charged_on_chain)?,
             withdrawn: amount(&row.withdrawn)?,
             revenue_withdrawn: amount(&row.revenue_withdrawn)?,
             outside_deposits: amount(&row.outside_deposits)?,
             outside_charges: amount(&row.outside_charges)?,
+            outside_withdrawals: amount(&row.outside_withdrawals)?,
         })
     }
 }

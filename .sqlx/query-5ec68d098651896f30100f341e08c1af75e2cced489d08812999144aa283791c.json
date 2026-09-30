@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT b.available, w.amount FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3\n            FOR UPDATE OF b\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "available",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "available"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "amount"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5ec68d098651896f30100f341e08c1af75e2cced489d08812999144aa283791c"
+}

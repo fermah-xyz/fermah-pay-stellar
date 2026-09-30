@@ -46,6 +46,11 @@ struct Config {
     /// exactly the deployments bound with this operator.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_KEY_FILE")]
     operator_key_file: String,
+    /// Key reference of the treasury that pays buyer withdrawals. The worker
+    /// sends the withdrawals of the deployments bound with this treasury;
+    /// without it, withdrawals wait and lapse.
+    #[arg(long, env = "PAY_STELLAR_TREASURY_KEY_FILE")]
+    treasury_key_file: Option<String>,
     /// Lowest inclusion bid per operation, in stroops. An envelope bids more
     /// when recent fees, or the expiry of the previous envelope, call for it.
     #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE", default_value = "10000")]
@@ -127,6 +132,12 @@ async fn main() -> anyhow::Result<()> {
     let keys = Keys::new(sources, fee_source).context("source account settings")?;
     let operator =
         signing::open(&config.operator_key_file).await.context("opening the operator key")?;
+    let treasury = match &config.treasury_key_file {
+        Some(reference) => {
+            Some(signing::open(reference).await.context("opening the treasury key")?)
+        }
+        None => None,
+    };
 
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
         .context("building RPC client")?;
@@ -146,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         sources = ?keys.source_addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
         fee_source = %keys.fee_source_address(),
         operator = %operator.address(),
+        treasury = ?treasury.as_ref().map(|t| t.address().to_string()),
         lease_holder = %lease.holder(),
         inclusion_fee_floor = fees.floor,
         inclusion_fee_cap = fees.cap,
@@ -165,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
             max_clock_skew: Duration::from_secs(config.max_clock_skew_secs),
         },
     );
-    let worker = Worker::new(
+    let mut worker = Worker::new(
         engine,
         pool,
         operator,
@@ -179,6 +191,9 @@ async fn main() -> anyhow::Result<()> {
             ttl_check_every: Duration::from_secs(config.ttl_check_secs),
         },
     );
+    if let Some(treasury) = treasury {
+        worker = worker.with_treasury(treasury);
+    }
     lease::lead(&lease, "worker", shutdown::signal(), |stop| {
         worker.run(
             Duration::from_millis(config.busy_poll_millis),

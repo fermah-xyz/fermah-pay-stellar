@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.withdrawals\n            SET state = 'confirmed', resolved_at = now()\n            WHERE id = $1 AND state IN ('signed', 'submitted')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "672741e18119b191d02eb0064054357ff5d21ec00c051cb838019b0a18840115"
+}

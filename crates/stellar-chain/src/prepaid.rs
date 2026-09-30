@@ -340,6 +340,18 @@ impl PrepaidDeployment {
         ]))
     }
 
+    /// Ledger key of the marker the contract writes when it processes
+    /// `withdrawal_id` for `owner`: present exactly when that withdrawal
+    /// moved USDC.
+    #[must_use]
+    pub fn withdrawal_key(&self, owner: &AccountAddress, withdrawal_id: &[u8; 32]) -> LedgerKey {
+        self.persistent_key(vec_val(vec![
+            symbol_val("Withdrawal"),
+            account_val(owner),
+            bytes_val(withdrawal_id),
+        ]))
+    }
+
     /// Ledger key of the temporary record the contract writes when it
     /// settles `charge_id` for `owner`, holding the outcome. It lives until
     /// shortly after the charge's last ledger.

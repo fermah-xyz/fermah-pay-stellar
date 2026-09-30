@@ -477,6 +477,46 @@ impl World {
         id
     }
 
+    /// A withdrawal to `destination` in `state`, held from `available` once
+    /// signed (the caller sets `available` to match).
+    async fn withdrawal(
+        &self,
+        buyer: Uuid,
+        withdrawal_id: [u8; 32],
+        amount: i64,
+        destination: &AccountAddress,
+        state: &str,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let signed = state != "awaiting_signature";
+        let resolved = matches!(state, "confirmed" | "failed" | "expired");
+        sqlx::query(
+            "INSERT INTO pay_stellar.withdrawals
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount,
+                 destination_address, withdrawal_id, state, authorization_xdr,
+                 signed_authorization_xdr, signed_at, expiration_ledger, submission_id,
+                 resolved_at)
+             VALUES ($1, $2, $3, 'stellar:testnet', $4, $5, $6, $7, $8, 'AAAA',
+                     CASE WHEN $9 THEN 'AAAA' END, CASE WHEN $9 THEN now() END, 1500,
+                     CASE WHEN $8 = 'submitted' THEN $10 END, CASE WHEN $11 THEN now() END)",
+        )
+        .bind(id)
+        .bind(buyer)
+        .bind(self.deployment)
+        .bind(format!("key-{id}"))
+        .bind(amount)
+        .bind(destination.as_str())
+        .bind(withdrawal_id.as_slice())
+        .bind(state)
+        .bind(signed)
+        .bind(self.submission)
+        .bind(resolved)
+        .execute(&self.owner)
+        .await
+        .unwrap();
+        id
+    }
+
     /// (kind, severity) of every finding, in the order recorded.
     async fn findings(&self) -> Vec<(String, String)> {
         sqlx::query_as(
@@ -706,6 +746,45 @@ async fn test_deposit_the_gateway_closed_but_the_contract_credited_is_critical(
     assert_eq!(w.findings().await, [pair("deposit_outcome_mismatch", "critical")]);
 }
 
+// ---- withdrawals ----------------------------------------------------------
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawals_are_matched_by_owner_id_amount_and_destination(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    w.withdrawal(alice, [1; 32], 30, &account(1), "confirmed").await;
+    w.withdrawal(alice, [2; 32], 20, &account(1), "submitted").await;
+    w.withdrawal(alice, [3; 32], 10, &account(1), "expired").await;
+    w.withdrawal(alice, [4; 32], 25, &account(1), "submitted").await;
+    w.withdrawal(alice, [5; 32], 15, &account(2), "submitted").await;
+    // As recorded, final or still in flight: matched.
+    w.chain.emit(1010, withdraw_event(&account(1), 30, [1; 32]));
+    w.chain.emit(1011, withdraw_event(&account(1), 20, [2; 32]));
+    // Returned to the buyer, yet the USDC left.
+    w.chain.emit(1012, withdraw_event(&account(1), 10, [3; 32]));
+    // No such withdrawal for this owner.
+    w.chain.emit(1013, withdraw_event(&account(9), 30, [1; 32]));
+    // Another amount, or another destination, than the one prepared.
+    w.chain.emit(1014, withdraw_event(&account(1), 26, [4; 32]));
+    w.chain.emit(1015, withdraw_event(&account(1), 15, [5; 32]));
+    w.observer().observe().await.unwrap();
+    let mut findings = w.findings().await;
+    findings.sort();
+    assert_eq!(
+        findings,
+        [
+            pair("unknown_withdrawal", "warning"),
+            pair("withdrawal_mismatch", "critical"),
+            pair("withdrawal_mismatch", "critical"),
+            pair("withdrawal_outcome_mismatch", "critical"),
+        ]
+    );
+    assert_eq!(w.finding_detail("unknown_withdrawal").await["owner"], account(9).as_str());
+}
+
 // ---- roles ----------------------------------------------------------------
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -765,7 +844,7 @@ async fn test_restarted_observer_resumes_from_its_cursor_without_repeats_or_skip
     let w = world(opts, connect).await;
     let mut emitted = Vec::new();
     for (ledger, id) in [(1010, 1), (1010, 2), (1020, 3), (1030, 4), (1040, 5)] {
-        emitted.push(w.chain.emit(ledger, withdraw_event(&account(1), 10, [id; 32])).to_string());
+        emitted.push(w.chain.emit(ledger, revenue_event(10, [id; 32])).to_string());
     }
     // Two events per page: the first process stores one page and stops.
     let first = w.observer_with(StartPosition::Oldest, 2);
@@ -787,7 +866,7 @@ async fn test_restarted_observer_resumes_from_its_cursor_without_repeats_or_skip
     second.observe().await.unwrap();
     assert_eq!(w.stored_event_ids().await, emitted);
 
-    emitted.push(w.chain.emit(1200, withdraw_event(&account(1), 10, [6; 32])).to_string());
+    emitted.push(w.chain.emit(1200, revenue_event(10, [6; 32])).to_string());
     second.observe().await.unwrap();
     assert_eq!(w.stored_event_ids().await, emitted);
     assert_eq!(w.findings().await, []);
@@ -800,8 +879,8 @@ async fn test_event_scan_window_is_crossed_without_events(
 ) {
     let w = world(opts, connect).await;
     // Events further apart than one scan window.
-    let near = w.chain.emit(1005, withdraw_event(&account(1), 10, [1; 32]));
-    let far = w.chain.emit(35_000, withdraw_event(&account(1), 10, [2; 32]));
+    let near = w.chain.emit(1005, revenue_event(10, [1; 32]));
+    let far = w.chain.emit(35_000, revenue_event(10, [2; 32]));
     w.observer().observe().await.unwrap();
     assert_eq!(w.stored_event_ids().await, [near.to_string(), far.to_string()]);
 }
@@ -812,7 +891,7 @@ async fn test_start_before_the_retained_range_records_the_gap(
     connect: PgConnectOptions,
 ) {
     let w = world(opts, connect).await;
-    let kept = w.chain.emit(1000, withdraw_event(&account(1), 10, [1; 32]));
+    let kept = w.chain.emit(1000, revenue_event(10, [1; 32]));
     w.observer_with(StartPosition::Ledger(900), 100).observe().await.unwrap();
     assert_eq!(w.findings().await, [pair("event_gap", "warning")]);
     let detail = w.finding_detail("event_gap").await;
@@ -829,7 +908,7 @@ async fn test_start_inside_the_retained_range_records_no_gap(
     connect: PgConnectOptions,
 ) {
     let w = world(opts, connect).await;
-    let kept = w.chain.emit(1000, withdraw_event(&account(1), 10, [1; 32]));
+    let kept = w.chain.emit(1000, revenue_event(10, [1; 32]));
     w.observer_with(StartPosition::Ledger(1000), 100).observe().await.unwrap();
     assert_eq!(w.findings().await, []);
     assert_eq!(w.stored_event_ids().await, [kept.to_string()]);
@@ -841,13 +920,13 @@ async fn test_ledgers_pruned_while_the_observer_was_away_are_a_gap(
     connect: PgConnectOptions,
 ) {
     let w = world(opts, connect).await;
-    let seen = w.chain.emit(1050, withdraw_event(&account(1), 10, [1; 32]));
+    let seen = w.chain.emit(1050, revenue_event(10, [1; 32]));
     let observer = w.observer();
     observer.observe().await.unwrap();
     // Caught up at 1100. While the observer is away the chain moves on and
     // the node prunes everything before 1300, including an event at 1200.
-    w.chain.emit(1200, withdraw_event(&account(1), 10, [2; 32]));
-    let after = w.chain.emit(1400, withdraw_event(&account(1), 10, [3; 32]));
+    w.chain.emit(1200, revenue_event(10, [2; 32]));
+    let after = w.chain.emit(1400, revenue_event(10, [3; 32]));
     w.chain.with(|n| n.oldest = 1300);
     observer.observe().await.unwrap();
     let detail = w.finding_detail("event_gap").await;
@@ -865,7 +944,7 @@ async fn test_event_of_another_layout_is_reported_and_reading_goes_on(
 ) {
     let w = world(opts, connect).await;
     w.chain.emit(1010, earlier_layout_event());
-    let later = w.chain.emit(1011, withdraw_event(&account(1), 10, [1; 32]));
+    let later = w.chain.emit(1011, revenue_event(10, [1; 32]));
     w.observer().observe().await.unwrap();
     assert_eq!(w.findings().await, [pair("unrecognized_event", "warning")]);
     assert_eq!(w.stored_event_ids().await.last(), Some(&later.to_string()));
@@ -874,7 +953,7 @@ async fn test_event_of_another_layout_is_reported_and_reading_goes_on(
             .fetch_all(&w.owner)
             .await
             .unwrap();
-    assert_eq!(kinds, ["unrecognized", "withdrawal"]);
+    assert_eq!(kinds, ["unrecognized", "revenue_withdrawal"]);
 }
 
 /// A failure while a page is stored leaves neither its events nor the moved
@@ -887,7 +966,7 @@ async fn test_failure_while_storing_a_page_stores_nothing_and_moves_nothing(
     let w = world(opts, connect).await;
     let ids: Vec<String> = [(1010, 1), (1011, 2), (1012, 3)]
         .into_iter()
-        .map(|(ledger, id)| w.chain.emit(ledger, withdraw_event(&account(1), 10, [id; 32])))
+        .map(|(ledger, id)| w.chain.emit(ledger, revenue_event(10, [id; 32])))
         .map(|id| id.to_string())
         .collect();
     // The database refuses the second event of the page.
@@ -1070,6 +1149,66 @@ async fn test_charges_in_flight_are_within_the_expected_totals(
     });
     reconcile_times(&w.observer(), CONFIRMATIONS).await;
     assert_eq!(w.findings().await, []);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawals_held_and_made_elsewhere_are_within_the_expected_totals(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = agreeing(&w).await;
+    let set_available = |available: i64| {
+        sqlx::query("UPDATE pay_stellar.buyers SET available = $2 WHERE id = $1")
+            .bind(alice)
+            .bind(available)
+            .execute(&w.owner)
+    };
+    let observer = w.observer();
+
+    // Held (available 70 -> 40) but not yet sent: the contract still owes 70.
+    let held = w.withdrawal(alice, [1; 32], 30, &account(1), "signed").await;
+    set_available(40).await.unwrap();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+
+    // Sent and processed on-chain: the contract owes 40 and the treasury
+    // holds 60.
+    sqlx::query(
+        "UPDATE pay_stellar.withdrawals SET state = 'submitted', submission_id = $2 WHERE id = $1",
+    )
+    .bind(held)
+    .bind(w.submission)
+    .execute(&w.owner)
+    .await
+    .unwrap();
+    w.chain.emit(1110, withdraw_event(&account(1), 30, [1; 32]));
+    w.chain.with(|n| {
+        n.liabilities = 40;
+        n.trustline = Some((60, 1));
+    });
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+    // And confirmed by the worker: nothing is pending any more.
+    sqlx::query(
+        "UPDATE pay_stellar.withdrawals SET state = 'confirmed', resolved_at = now() WHERE id = $1",
+    )
+    .bind(held)
+    .execute(&w.owner)
+    .await
+    .unwrap();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+
+    // A withdrawal the gateway never prepared: its own finding, and counted
+    // so the totals still agree.
+    w.chain.emit(1120, withdraw_event(&account(1), 10, [7; 32]));
+    w.chain.with(|n| {
+        n.liabilities = 30;
+        n.trustline = Some((50, 1));
+    });
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("unknown_withdrawal", "warning")]);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -1269,7 +1408,7 @@ async fn test_observer_cannot_rewrite_observations_or_touch_money(
 #[sqlx::test(migrations = "../../db/migrations")]
 async fn test_observer_position_only_moves_forward(opts: PgPoolOptions, connect: PgConnectOptions) {
     let w = world(opts, connect).await;
-    w.chain.emit(1010, withdraw_event(&account(1), 10, [1; 32]));
+    w.chain.emit(1010, revenue_event(10, [1; 32]));
     w.observer().observe().await.unwrap();
     let (_, cursor) = w.position().await;
     let cursor = EventCursor::parse(&cursor.unwrap()).unwrap();

@@ -7,14 +7,17 @@
 | Operator | the settlement worker | charges to any buyer of the operator's deployments, within each buyer's balance and the per-charge limit |
 | Fee account | the settlement worker | its XLM can be spent |
 | Source (channel) accounts | the settlement worker | their sequence numbers can be consumed; they hold no XLM and authorize nothing |
-| Treasury | not the worker | the deposited USDC can be moved |
+| Treasury | the settlement worker, only if it pays withdrawals (`PAY_STELLAR_TREASURY_KEY_FILE`) | everything the treasury holds can be moved |
 | Admin | not the worker | the contract's code and roles can be replaced |
 
-The worker never needs the treasury's or the admin's key.
-- The treasury signs withdrawals together with the buyer.
-- The admin signs upgrades, limit changes and role rotations.
+The worker never needs the admin's key: the admin signs upgrades, limit
+changes and role rotations. Keep it off the worker's host.
 
-Keep both off the worker's host.
+The treasury signs each withdrawal together with the buyer. A worker given
+the treasury's key pays withdrawals as soon as they are signed; without it,
+withdrawals wait in `SIGNED` until they lapse. A worker holding the key can
+move everything the treasury holds, so on such a host the treasury key is the
+most valuable key.
 
 ## Key references
 

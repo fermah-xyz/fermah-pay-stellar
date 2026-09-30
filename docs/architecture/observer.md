@@ -60,7 +60,8 @@ Pauses, unpauses and limit changes are reported as `admin_change`.
 | `charges` entry | the charge with the same account and charge identifier | same amount, and a final state that agrees with the outcome |
 | `role` (operator, treasury) | the deployment's binding | the binding names the new account, or a later rotation of the same role superseded it |
 | `role` (admin, seller) | nothing: the binding does not name them | always reported |
-| `withdraw`, `revenue` | nothing: the gateway keeps no withdrawals | recorded for reconciliation |
+| `withdraw` | the withdrawal with the same account and withdrawal ID | same amount and destination, and held (`signed`, `submitted` or `confirmed`); the row exists before the worker ever signs for it, so there is nothing to wait for |
+| `revenue` | nothing: the gateway keeps no revenue withdrawals | recorded for reconciliation |
 
 A charge entry's outcome agrees with the charge when both debited
 (`Charged` and `charged`) or both did not (a refusal and `refused` with the
@@ -98,14 +99,15 @@ and takes the database's sums in one repeatable-read transaction.
 
 The database and the contract legitimately disagree while work is in
 flight: a charge admitted, submitted or quarantined may or may not have
-debited on-chain, and a deposit awaiting signature, signed or submitted may
-already be credited. With `W` and `R` the buyer and revenue withdrawals in
-the event stream, and `D_out` and `C_out` the deposits and charges in the
-stream that no database row explains (each also a finding of its own), the
-contract's totals must lie within:
+debited on-chain, a deposit awaiting signature, signed or submitted may
+already be credited, and a withdrawal held (signed or submitted) may not
+have left yet. With `R` the revenue withdrawals in the event stream, and
+`D_out`, `C_out` and `W_out` the deposits, charges and buyer withdrawals in
+the stream that no database row explains (each also a finding of its own),
+the contract's totals must lie within:
 
-- liabilities: from `sum(available) + D_out - C_out - W` to that plus the
-  pending charges and the pending deposits;
+- liabilities: from `sum(available) + D_out - C_out - W_out` to that plus
+  the pending charges, the pending deposits and the held withdrawals;
 - revenue: from `sum(charged) + C_out - R` to that plus the pending charges.
 
 These bounds follow from how `available` is kept: every confirmed deposit

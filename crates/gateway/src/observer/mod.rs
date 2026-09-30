@@ -35,7 +35,10 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use self::matching::{ChargeRow, DepositRow, Verdict, judge_charge, judge_deposit, judge_role};
+use self::matching::{
+    ChargeRow, DepositRow, Verdict, WithdrawalRow, judge_charge, judge_deposit, judge_role,
+    judge_withdrawal,
+};
 pub use self::matching::{Finding, FindingKind, Severity};
 use crate::events::EventLog;
 use crate::submission::Clock;
@@ -715,8 +718,17 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     );
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
                 }
-                // Recorded for reconciliation; the gateway keeps no record
-                // of withdrawals to match them against.
+                Some(LedgerEvent::Withdrawn { owner, destination, amount, withdrawal_id }) => {
+                    let row = withdrawal_row(&mut tx, deployment.id, owner, withdrawal_id).await?;
+                    let verdict = judge_withdrawal(
+                        &owner.to_string(),
+                        &destination.to_string(),
+                        *amount,
+                        withdrawal_id,
+                        row.as_ref(),
+                    );
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
                 // Only the admin can pause or change limits; each is reported
                 // so an unexpected one is noticed.
                 Some(LedgerEvent::PauseChanged { .. } | LedgerEvent::LimitsChanged { .. }) => {
@@ -727,7 +739,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     ));
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
                 }
-                Some(LedgerEvent::Withdrawn { .. } | LedgerEvent::RevenueWithdrawn { .. }) => {}
+                // Recorded for reconciliation; the gateway keeps no record of
+                // the seller's revenue withdrawals to match them against.
+                Some(LedgerEvent::RevenueWithdrawn { .. }) => {}
             }
         }
         tx.commit().await.map_err(store("commit page"))?;
@@ -1075,6 +1089,34 @@ async fn deposit_row(
     .await
     .map_err(store("read deposit"))?;
     Ok(row.map(|r| DepositRow { id: r.id, amount: r.amount, state: r.state }))
+}
+
+async fn withdrawal_row(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    withdrawal_id: &[u8; 32],
+) -> Result<Option<WithdrawalRow>, ObserverError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT w.id, w.amount, w.destination_address, w.state
+        FROM pay_stellar.withdrawals w
+        JOIN pay_stellar.buyers b ON b.id = w.buyer_id
+        WHERE w.seller_deployment_id = $1 AND b.wallet_address = $2 AND w.withdrawal_id = $3
+        "#,
+        deployment,
+        owner.to_string(),
+        withdrawal_id.as_slice(),
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(store("read withdrawal"))?;
+    Ok(row.map(|r| WithdrawalRow {
+        id: r.id,
+        amount: r.amount,
+        destination: r.destination_address,
+        state: r.state,
+    }))
 }
 
 /// The account the binding names for `role`, for the roles it names.

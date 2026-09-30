@@ -2,8 +2,8 @@ syntax = "proto3";
 
 package fermah.pay.stellar.v1;
 
-// Deposits into and charges against buyer balances on the deployment's
-// prepaid ledger contract.
+// Deposits into, charges against and withdrawals from buyer balances on the
+// deployment's prepaid ledger contract.
 //
 // Scope and refusals follow the same rules as `BuyerService`: the API key
 // selects the deployment, a resource of another deployment is reported as
@@ -37,6 +37,21 @@ service LedgerService {
   rpc GetCharge(GetChargeRequest) returns (GetChargeResponse);
 
   rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  // Creates a withdrawal of unused credit to the buyer's wallet, or to
+  // another account the buyer names, and returns the authorization entry the
+  // buyer's wallet must sign. Nothing is held yet. Repeating a request with
+  // the same idempotency key, buyer, amount and destination returns the
+  // existing withdrawal with `created = false`; any other reuse of the key is
+  // refused.
+  rpc PrepareWithdrawal(PrepareWithdrawalRequest) returns (PrepareWithdrawalResponse);
+  // Stores the buyer's signed authorization entry after verifying it, and in
+  // the same step holds the amount from the available balance: refused with
+  // `insufficient_balance` when the available balance does not cover it. The
+  // withdrawal is then submitted asynchronously; poll `GetWithdrawal` for the
+  // outcome. Submitting the same signed entry again is accepted and changes
+  // nothing.
+  rpc SubmitWithdrawal(SubmitWithdrawalRequest) returns (SubmitWithdrawalResponse);
+  rpc GetWithdrawal(GetWithdrawalRequest) returns (GetWithdrawalResponse);
 }
 
 enum DepositState {
@@ -176,4 +191,81 @@ message GetBalanceResponse {
   int64 available = 1;
   // Admitted or submitted charges not yet settled on-chain.
   int64 pending_charges = 2;
+  // Held for signed withdrawals not yet final.
+  int64 pending_withdrawals = 3;
+}
+
+enum WithdrawalState {
+  WITHDRAWAL_STATE_UNSPECIFIED = 0;
+  // Waiting for the buyer's signed authorization entry; nothing is held.
+  WITHDRAWAL_STATE_AWAITING_SIGNATURE = 1;
+  // Signed and verified, and the amount is held; waiting to be submitted.
+  WITHDRAWAL_STATE_SIGNED = 2;
+  // In a transaction sent to the network.
+  WITHDRAWAL_STATE_SUBMITTED = 3;
+  // Processed by the contract: the USDC was sent to the destination.
+  WITHDRAWAL_STATE_CONFIRMED = 4;
+  // Included as failed, and the contract never processed it; the held
+  // amount was returned to the available balance.
+  WITHDRAWAL_STATE_FAILED = 5;
+  // The authorization lapsed and the contract never processed it; any held
+  // amount was returned to the available balance.
+  WITHDRAWAL_STATE_EXPIRED = 6;
+}
+
+message Withdrawal {
+  string withdrawal_id = 1;
+  string buyer_id = 2;
+  int64 amount = 3;
+  // Account that receives the USDC.
+  string destination = 4;
+  WithdrawalState state = 5;
+  // Base64 XDR `SorobanAuthorizationEntry` for the buyer's wallet to sign.
+  // It authorizes exactly this withdrawal (amount, destination and
+  // identifier) and nothing else.
+  string authorization_entry_xdr = 6;
+  // Hex SHA-256 payload the wallet key signs to authorize the entry, for
+  // signers that sign raw payloads rather than entries.
+  string signature_payload = 7;
+  // Last ledger in which the signed entry is valid.
+  uint32 expiration_ledger = 8;
+  // Hex hash of the transaction that carries the withdrawal, once submitted.
+  string transaction_hash = 9;
+  // Ledger that included it, once confirmed or failed on-chain.
+  uint32 ledger = 10;
+  string created_at = 11;
+}
+
+message PrepareWithdrawalRequest {
+  string buyer_id = 1;
+  int64 amount = 2;
+  // `G...` account to receive the USDC; the buyer's wallet when empty. It
+  // must hold a USDC trustline.
+  string destination = 3;
+  // 1-128 characters of [A-Za-z0-9._:@+-], unique within the deployment.
+  string idempotency_key = 4;
+}
+
+message PrepareWithdrawalResponse {
+  Withdrawal withdrawal = 1;
+  bool created = 2;
+}
+
+message SubmitWithdrawalRequest {
+  string withdrawal_id = 1;
+  // Base64 XDR of the entry from `PrepareWithdrawal`, with the wallet's
+  // signature set and every other field unchanged.
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitWithdrawalResponse {
+  Withdrawal withdrawal = 1;
+}
+
+message GetWithdrawalRequest {
+  string withdrawal_id = 1;
+}
+
+message GetWithdrawalResponse {
+  Withdrawal withdrawal = 1;
 }
