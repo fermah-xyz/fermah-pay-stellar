@@ -3172,3 +3172,50 @@ async fn test_a_sweep_from_a_trailing_balance_leaves_the_target(
     });
     assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 50));
 }
+
+/// The API stores a withdrawal's signature with the buyer row locked first
+/// and the withdrawal row second; closing a lapsed withdrawal must take them
+/// in the same order, or the two deadlock.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_closing_a_withdrawal_locks_the_buyer_before_the_withdrawal(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use sqlx::{Connection as _, Executor as _};
+
+    let w = world(opts, connect.clone()).await;
+    let x = w.funded("x", 100).await;
+    let (unsigned, _) = w.prepared_withdrawal(&x, 30, "w-1").await.unwrap();
+    w.stellar.set_latest(unsigned.expiration_ledger + 1);
+
+    // As the API storing a signature: the buyer row is locked.
+    let mut api = sqlx::PgConnection::connect_with(&connect).await.unwrap();
+    api.execute("BEGIN").await.unwrap();
+    sqlx::query("SELECT id FROM pay_stellar.buyers WHERE id = $1::uuid FOR UPDATE")
+        .bind(&x.id)
+        .execute(&mut api)
+        .await
+        .unwrap();
+    let worker = w.worker();
+    let closing = tokio::spawn(async move { worker.step().await });
+    eventually("the worker waiting on a lock", || async {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap();
+        waiting >= 1
+    })
+    .await;
+    // The API then reaches the withdrawal row: the worker must not hold it.
+    sqlx::query("SELECT id FROM pay_stellar.withdrawals WHERE id = $1::uuid FOR UPDATE NOWAIT")
+        .bind(&unsigned.withdrawal_id)
+        .execute(&mut api)
+        .await
+        .expect("the worker holds the withdrawal row while it waits for the buyer");
+    api.execute("ROLLBACK").await.unwrap();
+    closing.await.unwrap().unwrap();
+    assert_eq!(w.get_withdrawal(&unsigned.withdrawal_id).await.state(), WithdrawalState::Expired);
+}
