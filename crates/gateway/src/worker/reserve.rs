@@ -148,22 +148,32 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 return Ok(None);
             }
         }
-        let withdrawing = sqlx::query_scalar!(
+        // What held withdrawals still need, and what withdrawals paid after
+        // the ledger the balance was read at took out of it: that balance
+        // still counts them, although they have left.
+        let withdrawals = sqlx::query!(
             r#"
-            SELECT COALESCE(sum(w.amount), 0)::bigint AS "held!"
+            SELECT
+                COALESCE(sum(w.amount) FILTER (WHERE w.state IN ('signed', 'submitted')), 0)::bigint
+                    AS "held!",
+                COALESCE(sum(w.amount) FILTER (
+                    WHERE w.state = 'confirmed' AND w.resolved_at > now() - interval '1 hour'
+                      AND (s.ledger IS NULL OR s.ledger::bigint > $3)), 0)::bigint
+                    AS "left_since!"
             FROM pay_stellar.withdrawals w
             JOIN pay_stellar.ledger_contracts l
               ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network
+            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id
             WHERE w.network = $1 AND l.treasury_address = $2
-              AND w.state IN ('signed', 'submitted')
             "#,
             self.network().caip2(),
             treasury_address.as_str(),
+            snapshot.ledger,
         )
         .fetch_one(&self.pool)
         .await
         .map_err(store("read held withdrawals"))?;
-        let amount = balance - reserve.target.max(withdrawing);
+        let amount = balance - withdrawals.left_since - reserve.target.max(withdrawals.held);
         if amount <= 0 {
             return Ok(None);
         }
@@ -206,7 +216,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
         match self.engine.record(&mut conn, &prepared).await {
             Ok(_) => {}
-            Err(EngineError::SourceBusy { .. }) => return Ok(None),
+            Err(EngineError::SourceBusy { .. } | EngineError::SweepInFlight) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
         tracing::info!(
@@ -215,7 +225,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             reserve = %reserve.cold,
             amount,
             balance,
-            kept = balance - amount,
+            kept = balance - withdrawals.left_since - amount,
             "sweeping the treasury's surplus to the reserve"
         );
         Ok(Some(prepared.id))

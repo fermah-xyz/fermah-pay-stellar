@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                COALESCE(sum(w.amount) FILTER (WHERE w.state IN ('signed', 'submitted')), 0)::bigint\n                    AS \"held!\",\n                COALESCE(sum(w.amount) FILTER (\n                    WHERE w.state = 'confirmed' AND w.resolved_at > now() - interval '1 hour'\n                      AND (s.ledger IS NULL OR s.ledger::bigint > $3)), 0)::bigint\n                    AS \"left_since!\"\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network\n            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id\n            WHERE w.network = $1 AND l.treasury_address = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "held!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "left_since!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "7d41477624dcf89110c1a60240b5814c3e74c99a324fa80b4e2f8bfd430394d8"
+}

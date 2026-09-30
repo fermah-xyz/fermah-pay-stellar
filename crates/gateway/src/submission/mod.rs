@@ -206,6 +206,8 @@ pub enum EngineError {
     SourceBusy { account: AccountAddress, id: Uuid },
     #[error("every source account has an envelope in flight")]
     NoFreeSource,
+    #[error("another treasury sweep is in flight")]
+    SweepInFlight,
     #[error("source account {0} does not exist")]
     SourceMissing(AccountAddress),
     #[error("simulation refused the transaction: {0}")]
@@ -357,6 +359,7 @@ const IN_FLIGHT_INDEX: &str = "submissions_one_in_flight_per_source";
 /// byte-identical envelopes, which collide on the hash before the in-flight
 /// index; either way, the other install won.
 const OUTER_HASH_KEY: &str = "submissions_outer_hash_key";
+const SWEEP_INDEX: &str = "submissions_one_sweep_in_flight";
 
 impl<C: Chain, K: Clock> Engine<C, K> {
     pub fn new(
@@ -757,6 +760,9 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                 // this insert; its envelope is the one in flight.
                 let id = self.in_flight(source).await?.unwrap_or(id);
                 Err(EngineError::SourceBusy { account: source.clone(), id })
+            }
+            Err(sqlx::Error::Database(db)) if db.constraint() == Some(SWEEP_INDEX) => {
+                Err(EngineError::SweepInFlight)
             }
             Err(source) => Err(EngineError::Store { operation: "install submission", source }),
         }
