@@ -40,6 +40,7 @@ cargo run -q -p fermah-pay-stellar-gateway --bin fermah-pay-stellar-observer
 | `PAY_STELLAR_OBSERVER_CONFIRMATIONS` | consecutive reconciliations a discrepancy must persist through before it is recorded, default 3 |
 | `PAY_STELLAR_OBSERVER_PAGE_SIZE` | events per RPC call, 1 to 10000, default 1000 |
 | `PAY_STELLAR_OBSERVER_MAX_BACKOFF_SECS` | longest wait between retries after a failed round, default 300 |
+| `PAY_STELLAR_LEASE_SECS` | how long an observer's lease lasts without renewal, default 15, at least 3. Several observers may run for one network; the one holding the lease observes and the others take over when it stops |
 
 The start position applies once per deployment; afterwards the observer
 continues from where it stopped. The reconciliation of the contract's totals

@@ -1,7 +1,9 @@
 //! Chain observer: reads each bound deployment's contract events, matches
 //! them against the gateway's records, and reconciles the treasury, the
 //! contract's totals and the database. It holds no key; its database role
-//! can append observations and findings and nothing else.
+//! can append observations and findings and nothing else. Several processes
+//! may run for one network: the one holding the network's lease observes,
+//! and the others take over when it stops.
 
 use std::time::Duration;
 
@@ -9,6 +11,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use fermah_pay_stellar_chain::rpc::{MAX_EVENTS_PER_PAGE, RpcClient};
 use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_gateway::lease::{self, Lease};
 use fermah_pay_stellar_gateway::observer::{Observer, Settings, StartPosition};
 use fermah_pay_stellar_gateway::submission::SystemClock;
 use fermah_pay_stellar_gateway::{shutdown, telemetry};
@@ -56,6 +59,11 @@ struct Config {
     /// Longest wait between retries after a failed round, in seconds.
     #[arg(long, env = "PAY_STELLAR_OBSERVER_MAX_BACKOFF_SECS", default_value = "300")]
     max_backoff_secs: u64,
+    /// Seconds an observer's lease lasts without renewal: how long a
+    /// standby waits to take over from one that stopped without releasing
+    /// it.
+    #[arg(long, env = "PAY_STELLAR_LEASE_SECS", default_value = "15")]
+    lease_secs: u64,
 }
 
 #[tokio::main]
@@ -64,6 +72,9 @@ async fn main() -> anyhow::Result<()> {
     let _telemetry = telemetry::init("fermah-pay-stellar-observer", config.metrics_addr)?;
     if config.page_size == 0 || config.page_size > MAX_EVENTS_PER_PAGE {
         bail!("page size must be between 1 and {MAX_EVENTS_PER_PAGE}");
+    }
+    if config.lease_secs < 3 {
+        bail!("the lease must last at least 3 seconds");
     }
     if config.confirmations == 0 || config.poll_secs == 0 || config.reconcile_secs == 0 {
         bail!("confirmations, poll and reconcile intervals must be at least 1");
@@ -76,7 +87,12 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database_url)
         .await
         .context("connecting to PostgreSQL")?;
-    tracing::info!(network = %config.network, start = ?config.start, "observer starting");
+    let lease = Lease::new(
+        pool.clone(),
+        format!("observer:{}", config.network.caip2()),
+        Duration::from_secs(config.lease_secs),
+    );
+    tracing::info!(network = %config.network, start = ?config.start, lease_holder = %lease.holder(), "observer starting");
     let observer = Observer::new(
         pool,
         rpc,
@@ -90,14 +106,15 @@ async fn main() -> anyhow::Result<()> {
             max_pages_per_round: 100,
         },
     );
-    observer
-        .run(
+    lease::lead(&lease, "observer", shutdown::signal(), |stop| {
+        observer.run(
             Duration::from_secs(config.poll_secs),
             Duration::from_secs(config.reconcile_secs),
             Duration::from_secs(config.max_backoff_secs.max(config.poll_secs)),
-            shutdown::signal(),
+            stop.wait(),
         )
-        .await;
+    })
+    .await;
     tracing::info!("observer stopped");
     Ok(())
 }

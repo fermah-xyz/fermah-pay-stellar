@@ -24,8 +24,8 @@ what their process needs:
 | `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance when admitting a charge |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys; bind a deployment to its ledger contract |
 | `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md). Also read the chain observer's events and findings, and record a reconciliation baseline, which no role can change or delete; for that it reads buyers' available balances and the state and amount of deposits |
-| `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed |
-| `pay_stellar_observer` | the login role of the [chain observer](observer.md) | read ledger bindings, buyer wallets and available balances, and the amount, identifier and state of deposits and charges; append observed events, verdicts and findings, which no role can update or delete; move its read position forward; keep the count of each discrepancy's consecutive checks. No write to any balance, deposit, charge or binding |
+| `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed. Take, renew and release the lease that picks which worker acts |
+| `pay_stellar_observer` | the login role of the [chain observer](observer.md) | read ledger bindings, buyer wallets and available balances, and the amount, identifier and state of deposits and charges; append observed events, verdicts and findings, which no role can update or delete; move its read position forward; keep the count of each discrepancy's consecutive checks; take, renew and release the lease that picks which observer acts. No write to any balance, deposit, charge or binding |
 
 No role can change a buyer's wallet, an amount, a charge's identifier or
 a ledger binding after the row is written, and no role can move a submission,
@@ -84,7 +84,8 @@ must not be able to issue keys.
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
 | Worker | `PAY_STELLAR_WORKER_DATABASE_URL` | URL of the worker login role |
 | Worker | `PAY_STELLAR_NETWORK`, `PAY_STELLAR_RPC_URL` | as for the gateway |
-| Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | [key references](keys.md), comma-separated, of the accounts that sequence transactions; each has at most one transaction in flight, so several keep sending while one waits. The accounts may hold no XLM (the fee account pays), and no other process may submit from them |
+| Worker | `PAY_STELLAR_SOURCE_KEY_FILE` | [key references](keys.md), comma-separated, of the accounts that sequence transactions; each has at most one transaction in flight, so several keep sending while one waits. The accounts may hold no XLM (the fee account pays), and nothing but these workers may submit from them |
+| Worker | `PAY_STELLAR_LEASE_SECS` | how long a worker's lease lasts without renewal, default 15, at least 3: a standby takes over this long after a worker stops without releasing it |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | [key reference](keys.md) of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | [key reference](keys.md) of the contracts' operator; the worker serves the deployments bound with this operator |
 | Worker | `PAY_STELLAR_FEE_FLOOR_STROOPS` | spendable XLM, in stroops, below which the fee account pays only for finishing work in flight; default `100000000` (10 XLM) |
@@ -100,7 +101,18 @@ must not be able to issue keys.
 | Observer | `PAY_STELLAR_OBSERVER_DATABASE_URL` | URL of the observer login role; the other settings are in [chain observer](observer.md#running-it) |
 
 Key files must not be readable by other users; the worker refuses to start
-otherwise. Run one worker per source account.
+otherwise.
+
+Several workers may run with the same settings, on different hosts, for
+availability. They share a lease per network and operator: the one holding
+it settles, renewing it every third of its life, and the others stand by.
+A worker that shuts down releases the lease and a standby takes over at
+once; one that dies is replaced once its lease lapses. The lease only
+decides who does the work. Settlement stays correct if two workers act at
+once, for instance a worker that lost its lease finishing its round: a
+source account still has one transaction in flight, and a deposit or
+charge still moves to its outcome once. The observer uses the same scheme
+with one lease per network.
 
 Both processes refuse to start unless the RPC endpoint serves the configured
 network at protocol 27 or later: authorizations use `AddressV2` credentials.

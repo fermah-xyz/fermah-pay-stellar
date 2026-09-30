@@ -1,5 +1,7 @@
 //! Settlement worker: sends signed deposits and charge batches to Stellar and
-//! applies their outcomes. Run one process per source account.
+//! applies their outcomes. Several processes may run with the same
+//! configuration: the one holding the operator's lease settles, and the
+//! others take over when it stops.
 
 use std::time::Duration;
 
@@ -8,6 +10,7 @@ use clap::Parser;
 use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
 use fermah_pay_stellar_chain::rpc::{FeePercentile, RpcClient};
 use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_gateway::lease::{self, Lease};
 use fermah_pay_stellar_gateway::submission::{Engine, FeePolicy, Keys, Policy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
 use fermah_pay_stellar_gateway::{shutdown, signing, startup, telemetry};
@@ -31,8 +34,8 @@ struct Config {
     rpc_timeout_secs: u64,
     /// Key references, comma-separated, of the accounts that sequence
     /// transactions. Each account has at most one transaction in flight, so
-    /// several keep sending while one waits. No other process may submit
-    /// from these accounts. A key reference is the path of a seed file; see
+    /// several keep sending while one waits. Nothing but these workers may
+    /// submit from these accounts. A key reference is the path of a seed file; see
     /// docs/self-hosting/keys.md.
     #[arg(long, env = "PAY_STELLAR_SOURCE_KEY_FILE", value_delimiter = ',', required = true)]
     source_key_file: Vec<String>,
@@ -90,6 +93,10 @@ struct Config {
     busy_poll_millis: u64,
     #[arg(long, env = "PAY_STELLAR_IDLE_POLL_MILLIS", default_value = "2000")]
     idle_poll_millis: u64,
+    /// Seconds a worker's lease lasts without renewal: how long a standby
+    /// waits to take over from a worker that stopped without releasing it.
+    #[arg(long, env = "PAY_STELLAR_LEASE_SECS", default_value = "15")]
+    lease_secs: u64,
 }
 
 #[tokio::main]
@@ -98,6 +105,9 @@ async fn main() -> anyhow::Result<()> {
     let _telemetry = telemetry::init("fermah-pay-stellar-worker", config.metrics_addr)?;
     if config.max_batch == 0 || config.max_batch > MAX_BATCH {
         bail!("max batch must be between 1 and {MAX_BATCH}");
+    }
+    if config.lease_secs < 3 {
+        bail!("the lease must last at least 3 seconds");
     }
     if config.max_clock_skew_secs >= config.transaction_validity_secs {
         bail!("max clock skew must be below the transaction validity");
@@ -126,11 +136,17 @@ async fn main() -> anyhow::Result<()> {
         .connect(&config.database_url)
         .await
         .context("connecting to PostgreSQL")?;
+    let lease = Lease::new(
+        pool.clone(),
+        format!("worker:{}:{}", config.network.caip2(), operator.address()),
+        Duration::from_secs(config.lease_secs),
+    );
     tracing::info!(
         network = %config.network,
         sources = ?keys.source_addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
         fee_source = %keys.fee_source_address(),
         operator = %operator.address(),
+        lease_holder = %lease.holder(),
         inclusion_fee_floor = fees.floor,
         inclusion_fee_cap = fees.cap,
         inclusion_fee_percentile = %fees.percentile,
@@ -163,13 +179,14 @@ async fn main() -> anyhow::Result<()> {
             ttl_check_every: Duration::from_secs(config.ttl_check_secs),
         },
     );
-    worker
-        .run(
+    lease::lead(&lease, "worker", shutdown::signal(), |stop| {
+        worker.run(
             Duration::from_millis(config.busy_poll_millis),
             Duration::from_millis(config.idle_poll_millis),
-            shutdown::signal(),
+            stop.wait(),
         )
-        .await;
+    })
+    .await;
     tracing::info!("worker stopped");
     Ok(())
 }

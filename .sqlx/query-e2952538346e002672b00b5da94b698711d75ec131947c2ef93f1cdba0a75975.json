@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pay_stellar.leases WHERE name = $1 AND holder = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e2952538346e002672b00b5da94b698711d75ec131947c2ef93f1cdba0a75975"
+}

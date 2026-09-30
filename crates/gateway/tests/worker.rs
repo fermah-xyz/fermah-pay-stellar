@@ -46,6 +46,7 @@ use fermah_pay_stellar_chain::transaction::{account_id, address_of};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::events::EventLog;
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
+use fermah_pay_stellar_gateway::lease::{self, Lease};
 use fermah_pay_stellar_gateway::ledger::LatestLedger;
 use fermah_pay_stellar_gateway::quarantine::{
     self, QuarantineError, QuarantinedCharge, Resolution,
@@ -2386,4 +2387,209 @@ async fn test_only_the_resolution_function_leaves_quarantine(
         let error = sqlx::query(statement).execute(&w.h.owner).await.unwrap_err();
         assert!(error.to_string().contains("append-only"), "{error}");
     }
+}
+
+// ---- leadership -------------------------------------------------------------
+
+async fn lease_holder(w: &World, name: &str) -> Option<uuid::Uuid> {
+    sqlx::query_scalar("SELECT holder FROM pay_stellar.leases WHERE name = $1")
+        .bind(name)
+        .fetch_optional(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+/// Waits until `done` holds, failing the test after ten seconds.
+async fn eventually<F: std::future::Future<Output = bool>>(what: &str, done: impl FnMut() -> F) {
+    within(Duration::from_secs(10), what, done).await;
+}
+
+/// Waits until `done` holds, failing the test after `limit`.
+async fn within<F: std::future::Future<Output = bool>>(
+    limit: Duration,
+    what: &str,
+    mut done: impl FnMut() -> F,
+) {
+    let wait = async {
+        while !done().await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(limit, wait).await.unwrap_or_else(|_| panic!("{what} never happened"));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_lease_is_held_by_one_process_until_it_lapses_or_is_released(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let name = "worker:test";
+    let first = Lease::new(w.worker_pool.clone(), name.to_owned(), Duration::from_secs(30));
+    let second = Lease::new(w.worker_pool.clone(), name.to_owned(), Duration::from_secs(30));
+
+    assert!(first.try_hold().await.unwrap());
+    assert!(!second.try_hold().await.unwrap(), "another process holds it");
+    assert!(first.try_hold().await.unwrap(), "the holder renews it");
+    assert_eq!(lease_holder(&w, name).await, Some(first.holder()));
+
+    // Once it lapses, the other process takes it and the former holder can
+    // no longer renew it.
+    sqlx::query(
+        "UPDATE pay_stellar.leases SET acquired_at = now() - interval '1 hour', \
+         expires_at = now() - interval '1 second'",
+    )
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+    assert!(second.try_hold().await.unwrap());
+    assert!(!first.try_hold().await.unwrap());
+    assert_eq!(lease_holder(&w, name).await, Some(second.holder()));
+
+    // Releasing a lease held by another process changes nothing; the
+    // holder's release frees it at once.
+    first.release().await.unwrap();
+    assert_eq!(lease_holder(&w, name).await, Some(second.holder()));
+    second.release().await.unwrap();
+    assert_eq!(lease_holder(&w, name).await, None);
+    assert!(first.try_hold().await.unwrap());
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_standby_worker_takes_over_when_the_leader_stops(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.buyer("x", 100).await;
+    let name = "worker:test";
+    let first_key = SecretKey::from_strkey(&w.source_seed).unwrap();
+    let second_key = extra_source(&w);
+    let (first_source, second_source) = (first_key.address(), second_key.address());
+    let spawn = |key: SecretKey, shutdown: tokio::sync::oneshot::Receiver<()>| {
+        let worker = w.worker_with_sources(vec![key], 100);
+        let lease = Lease::new(w.worker_pool.clone(), name.to_owned(), Duration::from_secs(1));
+        let holder = lease.holder();
+        let task = tokio::spawn(async move {
+            let shutdown = async {
+                let _ = shutdown.await;
+            };
+            lease::lead(&lease, "worker", shutdown, |stop| {
+                worker.run(Duration::from_millis(20), Duration::from_millis(50), stop.wait())
+            })
+            .await;
+        });
+        (task, holder)
+    };
+    let sent_from = |id: String| {
+        let owner = w.h.owner.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT s.source_address FROM pay_stellar.deposits d \
+                 JOIN pay_stellar.submissions s ON s.id = d.submission_id WHERE d.id = $1::uuid",
+            )
+            .bind(id)
+            .fetch_one(&owner)
+            .await
+            .unwrap()
+        }
+    };
+    let submissions_from = |source: String| {
+        let owner = w.h.owner.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pay_stellar.submissions WHERE source_address = $1",
+            )
+            .bind(source)
+            .fetch_one(&owner)
+            .await
+            .unwrap()
+        }
+    };
+
+    let (_stop_first, first_stopped) = tokio::sync::oneshot::channel();
+    let (first, first_holder) = spawn(first_key, first_stopped);
+    eventually("the first worker leading", || async {
+        lease_holder(&w, name).await == Some(first_holder)
+    })
+    .await;
+    let (stop_second, second_stopped) = tokio::sync::oneshot::channel();
+    let (second, second_holder) = spawn(second_key, second_stopped);
+
+    // The leader settles; the standby sends nothing.
+    let d1 = w.deposit(&x, 40, "d-1").await;
+    eventually("the first deposit confirmed", || async {
+        w.get_deposit(&d1.deposit_id).await.state() == DepositState::Confirmed
+    })
+    .await;
+    assert_eq!(sent_from(d1.deposit_id.clone()).await, first_source.to_string());
+    assert_eq!(submissions_from(second_source.to_string()).await, 0);
+    assert_eq!(lease_holder(&w, name).await, Some(first_holder));
+
+    // The leader dies without releasing its lease: the standby takes over
+    // once it lapses and settles the next deposit.
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let d2 = w.deposit(&x, 50, "d-2").await;
+    eventually("the second deposit confirmed", || async {
+        w.get_deposit(&d2.deposit_id).await.state() == DepositState::Confirmed
+    })
+    .await;
+    assert_eq!(sent_from(d2.deposit_id.clone()).await, second_source.to_string());
+    assert_eq!(lease_holder(&w, name).await, Some(second_holder));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(90));
+
+    // A worker that shuts down releases its lease.
+    stop_second.send(()).unwrap();
+    second.await.unwrap();
+    assert_eq!(lease_holder(&w, name).await, None);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_leader_whose_lease_is_taken_stops_and_resumes_once_it_is_free(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let w = world(opts, connect).await;
+    let name = "observer:test";
+    // Renewed every 3 seconds; it would lapse 9 seconds after the last one.
+    let lease = Lease::new(w.worker_pool.clone(), name.to_owned(), Duration::from_secs(9));
+    let (started, stopped) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+    let task = {
+        let (started, stopped) = (Arc::clone(&started), Arc::clone(&stopped));
+        tokio::spawn(async move {
+            lease::lead(&lease, "observer", std::future::pending(), |stop| {
+                let (started, stopped) = (Arc::clone(&started), Arc::clone(&stopped));
+                async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    stop.wait().await;
+                    stopped.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .await;
+        })
+    };
+    eventually("the work starting", || async { started.load(Ordering::SeqCst) == 1 }).await;
+
+    // Another process holds the lease now: the next renewal is refused and
+    // the work is told to stop, well before the lease would have lapsed.
+    sqlx::query(
+        "UPDATE pay_stellar.leases SET holder = gen_random_uuid(), \
+         expires_at = now() + interval '1 hour'",
+    )
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+    within(Duration::from_secs(5), "the work stopping", || async {
+        stopped.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(started.load(Ordering::SeqCst), 1, "it does not act while another holds the lease");
+
+    // Once that holder releases it, this process takes it back.
+    sqlx::query("DELETE FROM pay_stellar.leases").execute(&w.h.owner).await.unwrap();
+    eventually("the work starting again", || async { started.load(Ordering::SeqCst) == 2 }).await;
+    task.abort();
 }
