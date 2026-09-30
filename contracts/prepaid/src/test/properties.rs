@@ -5,7 +5,8 @@
 //! treasury's USDC must equal the model's, and the contract's liabilities
 //! must equal the sum of its balances.
 //!
-//! `PROPTEST_CASES` raises the number of sequences, e.g. for a nightly run.
+//! `PROPTEST_CASES` raises the number of sequences, as the `Randomized`
+//! workflow does.
 
 use std::collections::HashSet;
 use std::vec::Vec;
