@@ -16,6 +16,8 @@ pub enum SigningError {
     Encode(#[source] stellar_xdr::Error),
     #[error("a transaction carries at most 20 signatures")]
     TooManySignatures,
+    #[error("signing the transaction")]
+    Signer(#[source] crate::signer::SignError),
 }
 
 /// The hash each signer signs and the network identifies the transaction by.
@@ -32,6 +34,26 @@ pub fn sign(
     let hash = transaction_hash(&tx, network)?;
     let signatures: Vec<DecoratedSignature> =
         signers.iter().map(|key| key.sign_payload(&hash)).collect();
+    Ok(TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx,
+        signatures: VecM::try_from(signatures).map_err(|_| SigningError::TooManySignatures)?,
+    }))
+}
+
+/// [`sign`] with signers whose keys may live in a key management service;
+/// each signature is checked before it is attached.
+pub async fn sign_with(
+    tx: Transaction,
+    network: Network,
+    signers: &[&dyn crate::signer::Signer],
+) -> Result<TransactionEnvelope, SigningError> {
+    let hash = transaction_hash(&tx, network)?;
+    let mut signatures = Vec::with_capacity(signers.len());
+    for signer in signers {
+        let signature =
+            crate::signer::signature(*signer, &hash).await.map_err(SigningError::Signer)?;
+        signatures.push(crate::signer::decorated(&signer.address(), signature));
+    }
     Ok(TransactionEnvelope::Tx(TransactionV1Envelope {
         tx,
         signatures: VecM::try_from(signatures).map_err(|_| SigningError::TooManySignatures)?,

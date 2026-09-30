@@ -30,6 +30,8 @@ pub enum AuthorizationError {
     NoSigner,
     #[error("encoding authorization XDR: {0}")]
     Encode(String),
+    #[error("signing the entry")]
+    Signer(#[source] crate::signer::SignError),
 }
 
 /// The 32-byte hash an account signs to authorize `credentials` over
@@ -79,6 +81,36 @@ pub fn sign_entry(
     if signers.is_empty() {
         return Err(AuthorizationError::NoSigner);
     }
+    let (creds, account) = entry_account(entry)?;
+    if signers.iter().any(|key| key.address() != account) {
+        return Err(AuthorizationError::ForeignSigner);
+    }
+    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)?;
+    let signatures =
+        signers.iter().map(|key| (*key.address().public_key(), key.sign_raw(&payload))).collect();
+    with_signatures(entry, creds, signatures)
+}
+
+/// [`sign_entry`] with one signer whose key may live in a key management
+/// service; its signature is checked before it is attached.
+pub async fn sign_entry_with(
+    entry: &SorobanAuthorizationEntry,
+    network_id: [u8; 32],
+    signer: &dyn crate::signer::Signer,
+) -> Result<SorobanAuthorizationEntry, AuthorizationError> {
+    let (creds, account) = entry_account(entry)?;
+    if signer.address() != account {
+        return Err(AuthorizationError::ForeignSigner);
+    }
+    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)?;
+    let signature =
+        crate::signer::signature(signer, &payload).await.map_err(AuthorizationError::Signer)?;
+    with_signatures(entry, creds, vec![(*account.public_key(), signature)])
+}
+
+fn entry_account(
+    entry: &SorobanAuthorizationEntry,
+) -> Result<(&SorobanAddressCredentials, AccountAddress), AuthorizationError> {
     let creds = match &entry.credentials {
         SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds) => creds,
         SorobanCredentials::SourceAccount | SorobanCredentials::AddressWithDelegates(_) => {
@@ -88,15 +120,15 @@ pub fn sign_entry(
     let ScAddress::Account(account) = &creds.address else {
         return Err(AuthorizationError::NotAnAccount);
     };
-    let account = crate::transaction::address_of(account);
-    if signers.iter().any(|key| key.address() != account) {
-        return Err(AuthorizationError::ForeignSigner);
-    }
+    Ok((creds, crate::transaction::address_of(account)))
+}
 
-    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)?;
+fn with_signatures(
+    entry: &SorobanAuthorizationEntry,
+    creds: &SorobanAddressCredentials,
+    mut signatures: Vec<([u8; 32], [u8; 64])>,
+) -> Result<SorobanAuthorizationEntry, AuthorizationError> {
     // The host verifies signatures in strictly increasing public-key order.
-    let mut signatures: Vec<([u8; 32], [u8; 64])> =
-        signers.iter().map(|key| (*key.address().public_key(), key.sign_raw(&payload))).collect();
     signatures.sort_by_key(|(public_key, _)| *public_key);
     let signature = ScVal::Vec(Some(ScVec(
         signatures
@@ -239,6 +271,25 @@ mod tests {
 
     use super::*;
     use crate::transaction::account_id;
+
+    #[test]
+    fn test_signer_backed_entry_matches_local_signing_and_refuses_another_account() {
+        use crate::signer::LocalSigner;
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        for v2 in [false, true] {
+            let key = SecretKey::generate().unwrap();
+            let unsigned = entry(&key, v2);
+            let local = sign_entry(&unsigned, [1; 32], &[&key]).unwrap();
+            let signer = LocalSigner::new(SecretKey::from_strkey(&key.to_strkey()).unwrap());
+            let remote = runtime.block_on(sign_entry_with(&unsigned, [1; 32], &signer)).unwrap();
+            assert_eq!(local, remote);
+            let stranger = LocalSigner::new(SecretKey::generate().unwrap());
+            assert_eq!(
+                runtime.block_on(sign_entry_with(&unsigned, [1; 32], &stranger)),
+                Err(AuthorizationError::ForeignSigner)
+            );
+        }
+    }
 
     fn invocation(function: &str) -> SorobanAuthorizedInvocation {
         SorobanAuthorizedInvocation {

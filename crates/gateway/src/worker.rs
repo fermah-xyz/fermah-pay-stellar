@@ -18,17 +18,17 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry};
-use fermah_pay_stellar_chain::keys::SecretKey;
+use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry_with};
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, ChargeRequest, DepositIntent, MAX_BATCH, Outcome, PrepaidDeployment,
     batch_outcomes, charge_record,
 };
 use fermah_pay_stellar_chain::rpc::RpcError;
+use fermah_pay_stellar_chain::signer::Signer;
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, LedgerEntryData, LedgerKey, Limits, ReadXdr, ScAddress, ScVal,
     SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanCredentials,
@@ -87,7 +87,7 @@ pub enum Step {
 pub struct Worker<C, K> {
     engine: Engine<C, K>,
     pool: PgPool,
-    operator: SecretKey,
+    operator: Arc<dyn Signer>,
     operator_address: AccountAddress,
     settings: Settings,
     /// Deposits and deployments whose last attempt the network refused in
@@ -182,7 +182,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     pub fn new(
         engine: Engine<C, K>,
         pool: PgPool,
-        operator: SecretKey,
+        operator: Arc<dyn Signer>,
         settings: Settings,
     ) -> Self {
         Self {
@@ -1012,7 +1012,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             }),
             root_invocation: deployment.charge_batch_authorization(&requests),
         };
-        let signed = sign_entry(&unsigned, network_id(self.network()), &[&self.operator])
+        let signed = sign_entry_with(&unsigned, network_id(self.network()), self.operator.as_ref())
+            .await
             .map_err(WorkerError::Signing)?;
         let function = HostFunction::InvokeContract(deployment.charge_batch_call(&requests));
         let prepared = match self.engine.prepare(Kind::ChargeBatch, function, vec![signed]).await {

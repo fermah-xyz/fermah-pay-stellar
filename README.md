@@ -86,6 +86,7 @@ Continue with the [quickstart](docs/quickstart/local.md).
 - [Local quickstart](docs/quickstart/local.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
 - [Self-hosting: chain observer](docs/self-hosting/observer.md)
+- [Self-hosting: keys](docs/self-hosting/keys.md)
 - [Evidence](docs/evidence/README.md)
 
 ## License

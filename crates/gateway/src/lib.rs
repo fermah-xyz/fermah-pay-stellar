@@ -14,6 +14,7 @@ pub mod refusal;
 pub mod scope;
 pub mod server;
 pub mod shutdown;
+pub mod signing;
 pub mod startup;
 pub mod store;
 pub mod submission;

@@ -14,6 +14,8 @@ use fermah_pay_stellar_chain::rpc::{
     LatestLedgerInfo, LedgerEntries, NodeView, RpcError, SendOutcome, Simulation,
     SimulationOutcome, TransactionStatus,
 };
+use fermah_pay_stellar_chain::signer::{LocalSigner, SignError, SignFuture, Signer};
+use fermah_pay_stellar_chain::soroban::AssemblyError;
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
     ContractId, FeeBumpTransactionInnerTx, Hash, HostFunction, InvokeContractArgs, LedgerFootprint,
@@ -379,12 +381,36 @@ impl Harness {
             self.clock.clone(),
             Network::Testnet,
             Keys::new(
-                vec![SecretKey::from_strkey(&self.source_seed).unwrap()],
-                SecretKey::from_strkey(&self.fee_seed).unwrap(),
+                vec![LocalSigner::arc(SecretKey::from_strkey(&self.source_seed).unwrap())],
+                LocalSigner::arc(SecretKey::from_strkey(&self.fee_seed).unwrap()),
             )
             .unwrap(),
             Policy {
                 fees,
+                resource_fee_margin_percent: 15,
+                validity: VALIDITY,
+                max_clock_skew: MAX_SKEW,
+            },
+        )
+    }
+
+    /// An engine whose fee key sits behind `fee_signer`.
+    fn engine_signing_fees_with(
+        &self,
+        fee_signer: Arc<dyn Signer>,
+    ) -> Engine<FakeChain, ManualClock> {
+        Engine::new(
+            self.worker.clone(),
+            self.chain.clone(),
+            self.clock.clone(),
+            Network::Testnet,
+            Keys::new(
+                vec![LocalSigner::arc(SecretKey::from_strkey(&self.source_seed).unwrap())],
+                fee_signer,
+            )
+            .unwrap(),
+            Policy {
+                fees: FeePolicy::new(FLOOR, CAP, FeePercentile::P90).unwrap(),
                 resource_fee_margin_percent: 15,
                 validity: VALIDITY,
                 max_clock_skew: MAX_SKEW,
@@ -450,21 +476,92 @@ async fn test_second_install_while_one_is_in_flight_is_refused(
     assert!(matches!(second, Err(EngineError::NoFreeSource)), "{second:?}");
 }
 
+/// A key management service that can be made unavailable, or made to answer
+/// with another key's signature.
+#[derive(Debug)]
+struct Service {
+    key: SecretKey,
+    impostor: SecretKey,
+    mode: std::sync::Mutex<&'static str>,
+}
+
+impl Service {
+    fn set(&self, mode: &'static str) {
+        *self.mode.lock().unwrap() = mode;
+    }
+}
+
+impl Signer for Service {
+    fn address(&self) -> AccountAddress {
+        self.key.address()
+    }
+
+    fn sign<'a>(&'a self, payload: &'a [u8; 32]) -> SignFuture<'a> {
+        let result = match *self.mode.lock().unwrap() {
+            "down" => Err(SignError::Service("unavailable".to_owned())),
+            "wrong key" => Ok(self.impostor.sign_raw(payload)),
+            _ => Ok(self.key.sign_raw(payload)),
+        };
+        Box::pin(async move { result })
+    }
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_failed_or_forged_signature_records_and_sends_nothing(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let service = Arc::new(Service {
+        key: SecretKey::from_strkey(&h.fee_seed).unwrap(),
+        impostor: SecretKey::generate().unwrap(),
+        mode: std::sync::Mutex::new("down"),
+    });
+    let engine = h.engine_signing_fees_with(service.clone());
+    let submissions = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pay_stellar.submissions")
+            .fetch_one(&h.owner)
+            .await
+            .unwrap()
+    };
+
+    let down = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap_err();
+    assert!(
+        matches!(down, EngineError::Assembly(AssemblyError::Signer(SignError::Service(_)))),
+        "{down:?}"
+    );
+    service.set("wrong key");
+    let forged = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap_err();
+    assert!(
+        matches!(forged, EngineError::Assembly(AssemblyError::Signer(SignError::Invalid(_)))),
+        "{forged:?}"
+    );
+    assert_eq!((submissions().await, h.chain.sent().len()), (0, 0));
+
+    // The positive control: the service back, the same call installs.
+    service.set("up");
+    engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    assert_eq!(submissions().await, 1);
+}
+
 #[test]
 fn test_source_accounts_must_be_given_and_distinct() {
-    let fee = || SecretKey::generate().unwrap();
+    let fee = || LocalSigner::arc(SecretKey::generate().unwrap());
+    let signer = |key: SecretKey| LocalSigner::arc(key);
     assert!(matches!(Keys::new(vec![], fee()), Err(KeysError::NoSource)));
     let (a, b) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
     let repeated = a.address();
     let twice = SecretKey::from_strkey(&a.to_strkey()).unwrap();
-    let error = Keys::new(vec![a, b, twice], fee()).err();
+    let error = Keys::new(vec![signer(a), signer(b), signer(twice)], fee()).err();
     assert!(
         matches!(&error, Some(KeysError::Duplicate(address)) if *address == repeated),
         "{error:?}"
     );
     // The positive control: distinct sources are accepted.
-    let keys =
-        Keys::new(vec![SecretKey::generate().unwrap(), SecretKey::generate().unwrap()], fee());
+    let keys = Keys::new(
+        vec![signer(SecretKey::generate().unwrap()), signer(SecretKey::generate().unwrap())],
+        fee(),
+    );
     assert_eq!(keys.map(|k| k.source_count()).ok(), Some(2));
 }
 

@@ -30,12 +30,13 @@
 pub mod chain;
 pub mod fees;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::rpc::{
     RpcError, SendOutcome, SimulationOutcome, TransactionStatus, hex_lower,
 };
+use fermah_pay_stellar_chain::signer::Signer;
 use fermah_pay_stellar_chain::soroban::{self, AssemblyError};
 use fermah_pay_stellar_chain::stellar_xdr::{
     FeeBumpTransactionInnerTx, HostFunction, Limits, OperationBody, ReadXdr, ScVal,
@@ -122,13 +123,14 @@ impl State {
     }
 }
 
-/// The accounts the engine signs with.
+/// The accounts the engine signs with. Their keys may live in this process
+/// or in a key management service.
 pub struct Keys {
     /// Sign and sequence transactions. Each has at most one envelope in
     /// flight, so several let one stuck envelope leave the others sending.
-    sources: Vec<SecretKey>,
+    sources: Vec<Arc<dyn Signer>>,
     /// Signs the fee bump and pays.
-    pub fee_source: SecretKey,
+    fee_source: Arc<dyn Signer>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -142,13 +144,16 @@ pub enum KeysError {
 impl Keys {
     /// No two engines, in this process or another, may share a source: each
     /// assumes it alone sequences the accounts it holds.
-    pub fn new(sources: Vec<SecretKey>, fee_source: SecretKey) -> Result<Self, KeysError> {
+    pub fn new(
+        sources: Vec<Arc<dyn Signer>>,
+        fee_source: Arc<dyn Signer>,
+    ) -> Result<Self, KeysError> {
         if sources.is_empty() {
             return Err(KeysError::NoSource);
         }
-        for (i, key) in sources.iter().enumerate() {
-            if sources[..i].iter().any(|earlier| earlier.address() == key.address()) {
-                return Err(KeysError::Duplicate(key.address()));
+        for (i, signer) in sources.iter().enumerate() {
+            if sources[..i].iter().any(|earlier| earlier.address() == signer.address()) {
+                return Err(KeysError::Duplicate(signer.address()));
             }
         }
         Ok(Self { sources, fee_source })
@@ -161,11 +166,16 @@ impl Keys {
 
     #[must_use]
     pub fn source_addresses(&self) -> Vec<AccountAddress> {
-        self.sources.iter().map(SecretKey::address).collect()
+        self.sources.iter().map(|signer| signer.address()).collect()
     }
 
-    fn source(&self, address: &AccountAddress) -> Option<&SecretKey> {
-        self.sources.iter().find(|key| key.address() == *address)
+    #[must_use]
+    pub fn fee_source_address(&self) -> AccountAddress {
+        self.fee_source.address()
+    }
+
+    fn source(&self, address: &AccountAddress) -> Option<&dyn Signer> {
+        self.sources.iter().find(|signer| signer.address() == *address).map(AsRef::as_ref)
     }
 }
 
@@ -412,7 +422,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             self.policy.resource_fee_margin_percent,
         )
         .map_err(EngineError::Assembly)?;
-        self.seal(kind, slot, tx)
+        self.seal(kind, slot, tx).await
     }
 
     /// Builds the transaction that restores the archived entries a refused
@@ -433,7 +443,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             self.policy.resource_fee_margin_percent,
         )
         .map_err(EngineError::Assembly)?;
-        self.seal(Kind::Restore, slot, tx)
+        self.seal(Kind::Restore, slot, tx).await
     }
 
     async fn next_slot(&self, kind: Kind) -> Result<Slot, EngineError> {
@@ -557,8 +567,8 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// prepare one envelope at a time, and `record` refuses a second envelope
     /// for a source in any case.
     async fn free_source(&self) -> Result<AccountAddress, EngineError> {
-        for key in &self.keys.sources {
-            let source = key.address();
+        for signer in &self.keys.sources {
+            let source = signer.address();
             if self.in_flight(&source).await?.is_none() {
                 return Ok(source);
             }
@@ -566,7 +576,9 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         Err(EngineError::NoFreeSource)
     }
 
-    fn seal(&self, kind: Kind, slot: Slot, tx: Transaction) -> Result<Prepared, EngineError> {
+    /// Signs the envelope for `slot`. Nothing is recorded or sent yet, so a
+    /// signing failure leaves no trace to reconcile.
+    async fn seal(&self, kind: Kind, slot: Slot, tx: Transaction) -> Result<Prepared, EngineError> {
         let inclusion_fee = slot.inclusion_fee;
         let source_key = self
             .keys
@@ -575,7 +587,9 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let inner_hash =
             transaction::transaction_hash(&tx, self.network).map_err(EngineError::Signing)?;
         let TransactionEnvelope::Tx(inner) =
-            transaction::sign(tx, self.network, &[source_key]).map_err(EngineError::Signing)?
+            transaction::sign_with(tx, self.network, &[source_key])
+                .await
+                .map_err(EngineError::Signing)?
         else {
             unreachable!("transaction::sign produces a v1 envelope")
         };
@@ -583,8 +597,10 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             .map_err(EngineError::Assembly)?;
         let outer_hash =
             soroban::fee_bump_hash(&bump, self.network).map_err(EngineError::Assembly)?;
-        let envelope = soroban::sign_fee_bump(bump, self.network, &self.keys.fee_source)
-            .map_err(EngineError::Assembly)?;
+        let envelope =
+            soroban::sign_fee_bump_with(bump, self.network, self.keys.fee_source.as_ref())
+                .await
+                .map_err(EngineError::Assembly)?;
         let envelope_xdr = envelope
             .to_xdr_base64(Limits::none())
             .map_err(|e| EngineError::Assembly(AssemblyError::Encode(e.to_string())))?;
@@ -772,8 +788,8 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// in flight, e.g. after a restart.
     pub async fn recover(&self) -> Result<Vec<(Uuid, Resolution)>, EngineError> {
         let mut resolved = Vec::new();
-        for key in &self.keys.sources {
-            if let Some(id) = self.in_flight(&key.address()).await? {
+        for signer in &self.keys.sources {
+            if let Some(id) = self.in_flight(&signer.address()).await? {
                 self.broadcast(id).await?;
                 resolved.push((id, self.resolve(id).await?));
             }
