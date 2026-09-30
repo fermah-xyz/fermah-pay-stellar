@@ -18,5 +18,6 @@ pub mod signing;
 pub mod startup;
 pub mod store;
 pub mod submission;
+pub mod telemetry;
 pub mod worker;
 pub mod x402;

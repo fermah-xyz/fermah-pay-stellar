@@ -178,6 +178,13 @@ struct DepositRow {
     deployment: PrepaidDeployment,
 }
 
+/// Counts a deposit this call moved to `state`.
+fn deposit_closed(state: &'static str, changed: u64) {
+    if changed > 0 {
+        metrics::counter!("pay_stellar_deposits_closed_total", "state" => state).increment(1);
+    }
+}
+
 impl<C: Chain, K: Clock> Worker<C, K> {
     pub fn new(
         engine: Engine<C, K>,
@@ -208,16 +215,20 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// transactions from every source that is free. Settling does not wait
     /// for open envelopes: it only touches rows whose submission is final, or
     /// that were never sent.
+    #[tracing::instrument(name = "settlement_round", skip_all)]
     pub async fn step(&self) -> Result<Step, WorkerError> {
-        let mut open = 0;
+        let mut open = 0_usize;
         for (_, resolution) in self.engine.recover().await? {
             if !resolution.state.is_final() {
                 open += 1;
             }
         }
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("pay_stellar_submissions_in_flight").set(open as f64);
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
         self.expire_charges().await?;
+        self.record_backlog().await?;
         let mut submitted = Vec::new();
         while open + submitted.len() < self.engine.capacity() {
             let next = match self.submit_deposit().await? {
@@ -252,6 +263,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 Ok(Step::Idle) => idle_poll,
                 Ok(Step::InFlight | Step::Submitted(_)) => busy_poll,
                 Err(error) => {
+                    metrics::counter!("pay_stellar_worker_step_failures_total").increment(1);
                     tracing::error!(error = %error, source = ?std::error::Error::source(&error), "settlement step failed");
                     idle_poll
                 }
@@ -261,6 +273,31 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 () = tokio::time::sleep(wait) => {}
             }
         }
+    }
+
+    /// Charges waiting for a batch on this operator's deployments, and how
+    /// long the oldest has waited: a growing age means batches are not going
+    /// out.
+    async fn record_backlog(&self) -> Result<(), WorkerError> {
+        let backlog = sqlx::query!(
+            r#"
+            SELECT count(*) AS "waiting!",
+                   COALESCE(EXTRACT(EPOCH FROM now() - min(c.created_at)), 0)::float8 AS "oldest!"
+            FROM pay_stellar.charges c
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network
+            WHERE c.state = 'admitted' AND c.network = $1 AND l.operator_address = $2
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store("read charge backlog"))?;
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("pay_stellar_charges_waiting").set(backlog.waiting as f64);
+        metrics::gauge!("pay_stellar_oldest_waiting_charge_seconds").set(backlog.oldest);
+        Ok(())
     }
 
     fn set_aside_ids(&self) -> Vec<Uuid> {
@@ -562,10 +599,12 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         decisions: &[(Uuid, ChargeDecision)],
     ) -> Result<(), WorkerError> {
         let mut tx = self.pool.begin().await.map_err(store("begin charge settlement"))?;
+        // What this call changed, counted once the transaction commits.
+        let mut applied: Vec<&'static str> = Vec::new();
         for (id, decision) in decisions {
-            match decision {
+            let (result, changed) = match decision {
                 ChargeDecision::Charged => {
-                    sqlx::query!(
+                    let changed = sqlx::query!(
                         r#"
                         UPDATE pay_stellar.charges
                         SET state = 'charged', outcome = 'charged', settled_at = now()
@@ -575,12 +614,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     )
                     .execute(&mut *tx)
                     .await
-                    .map_err(store("settle charge"))?;
+                    .map_err(store("settle charge"))?
+                    .rows_affected();
+                    ("charged", changed)
                 }
                 // The refund is part of the same statement as the transition,
                 // so it happens exactly when the charge leaves `submitted`.
                 ChargeDecision::Refused(outcome) => {
-                    sqlx::query!(
+                    let changed = sqlx::query!(
                         r#"
                         WITH refused AS (
                             UPDATE pay_stellar.charges
@@ -597,11 +638,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     )
                     .execute(&mut *tx)
                     .await
-                    .map_err(store("refuse charge"))?;
+                    .map_err(store("refuse charge"))?
+                    .rows_affected();
+                    (outcome.token(), changed)
                 }
                 ChargeDecision::Quarantine { outcome, reason } => {
                     tracing::error!(charge_id = %id, reason, "charge quarantined");
-                    sqlx::query!(
+                    let changed = sqlx::query!(
                         r#"
                         UPDATE pay_stellar.charges
                         SET state = 'quarantined', outcome = $2, last_error = $3, settled_at = now()
@@ -613,10 +656,12 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     )
                     .execute(&mut *tx)
                     .await
-                    .map_err(store("quarantine charge"))?;
+                    .map_err(store("quarantine charge"))?
+                    .rows_affected();
+                    ("quarantined", changed)
                 }
                 ChargeDecision::Requeue(reason) => {
-                    sqlx::query!(
+                    let changed = sqlx::query!(
                         r#"
                         UPDATE pay_stellar.charges
                         SET state = 'admitted', submission_id = NULL, batch_index = NULL,
@@ -628,11 +673,20 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     )
                     .execute(&mut *tx)
                     .await
-                    .map_err(store("requeue charge"))?;
+                    .map_err(store("requeue charge"))?
+                    .rows_affected();
+                    ("requeued", changed)
                 }
+            };
+            if changed > 0 {
+                applied.push(result);
             }
         }
-        tx.commit().await.map_err(store("commit charge settlement"))
+        tx.commit().await.map_err(store("commit charge settlement"))?;
+        for result in applied {
+            metrics::counter!("pay_stellar_charges_settled_total", "result" => result).increment(1);
+        }
+        Ok(())
     }
 
     async fn settle_deposit(
@@ -693,7 +747,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// exists, `closing` if it is absent at a ledger after the buyer's
     /// authorization lapsed. A deposit whose authorization the reading node
     /// has not yet seen lapse stays undecided.
-    async fn conclude(&self, deposits: &[DepositRow], closing: &str) -> Result<(), WorkerError> {
+    async fn conclude(
+        &self,
+        deposits: &[DepositRow],
+        closing: &'static str,
+    ) -> Result<(), WorkerError> {
         let keys =
             deposits.iter().map(|d| d.deployment.deposit_key(&d.owner, &d.deposit_id)).collect();
         let snapshot = self.existing(keys).await?;
@@ -716,7 +774,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// Credits the deposit in the statement that moves it to `confirmed`, so
     /// the credit happens exactly once.
     async fn confirm(&self, id: Uuid) -> Result<(), WorkerError> {
-        sqlx::query!(
+        let confirmed = sqlx::query!(
             r#"
             WITH confirmed AS (
                 UPDATE pay_stellar.deposits
@@ -733,11 +791,17 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .execute(&self.pool)
         .await
         .map_err(store("confirm deposit"))?;
+        deposit_closed("confirmed", confirmed.rows_affected());
         Ok(())
     }
 
-    async fn close_deposit(&self, id: Uuid, state: &str, reason: &str) -> Result<(), WorkerError> {
-        sqlx::query!(
+    async fn close_deposit(
+        &self,
+        id: Uuid,
+        state: &'static str,
+        reason: &str,
+    ) -> Result<(), WorkerError> {
+        let closed = sqlx::query!(
             r#"
             UPDATE pay_stellar.deposits
             SET state = $2, last_error = $3, resolved_at = now()
@@ -750,6 +814,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .execute(&self.pool)
         .await
         .map_err(store("close deposit"))?;
+        deposit_closed(state, closed.rows_affected());
         Ok(())
     }
 
@@ -816,6 +881,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
     // ---- sending -----------------------------------------------------------
 
+    #[tracing::instrument(skip_all, fields(deposit_id, submission_id))]
     async fn submit_deposit(&self) -> Result<Option<Uuid>, WorkerError> {
         let Some(row) = sqlx::query!(
             r#"
@@ -875,6 +941,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        let span = tracing::Span::current();
+        span.record("deposit_id", tracing::field::display(row.id));
+        span.record("submission_id", tracing::field::display(prepared.id));
 
         let mut tx = self.pool.begin().await.map_err(store("begin deposit submission"))?;
         match self.engine.record(&mut tx, &prepared).await {
@@ -934,6 +1003,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(seller_deployment_id, submission_id, charges))]
     async fn submit_charges(&self) -> Result<Option<Uuid>, WorkerError> {
         let latest = self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
         // A charge too close to its last ledger may not be included in time;
@@ -1014,6 +1084,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         };
         let signed = sign_entry_with(&unsigned, network_id(self.network()), self.operator.as_ref())
             .await
+            .inspect_err(|_| crate::submission::signing_failed("operator"))
             .map_err(WorkerError::Signing)?;
         let function = HostFunction::InvokeContract(deployment.charge_batch_call(&requests));
         let prepared = match self.engine.prepare(Kind::ChargeBatch, function, vec![signed]).await {
@@ -1038,6 +1109,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let prepared = prepared.authorized_from(latest);
 
         let ids: Vec<Uuid> = batch.iter().map(|c| c.id).collect();
+        let span = tracing::Span::current();
+        span.record("seller_deployment_id", tracing::field::display(target.seller_deployment_id));
+        span.record("submission_id", tracing::field::display(prepared.id));
+        span.record("charges", ids.len());
+        tracing::info!(charge_ids = ?ids, "charges batched");
         let indexes: Vec<i16> =
             (0..batch.len()).map(|i| i16::try_from(i).unwrap_or(i16::MAX)).collect();
         let mut tx = self.pool.begin().await.map_err(store("begin batch submission"))?;

@@ -1,0 +1,66 @@
+# Prometheus alert rules for the gateway, the settlement worker and the chain
+# observer. Each alert names what to check; docs/self-hosting/monitoring.md
+# explains the metrics and what to do for each alert.
+groups:
+  - name: pay-stellar-money
+    rules:
+      - alert: PayStellarCriticalFinding
+        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="critical"}[15m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The observer recorded a critical {{ $labels.kind }} finding"
+          action: "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md"
+      - alert: PayStellarTreasuryShort
+        expr: pay_stellar_treasury_usdc < pay_stellar_contract_liabilities + pay_stellar_contract_revenue
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Treasury USDC is below what deployment {{ $labels.deployment }} owes"
+          action: "Stop admitting deposits and charges, and find where the USDC went"
+      - alert: PayStellarChargeQuarantined
+        expr: increase(pay_stellar_charges_settled_total{result="quarantined"}[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A charge was quarantined; its amount stays held from the buyer"
+          action: "Resolve it with docs/self-hosting/quarantine.md"
+      - alert: PayStellarSigningFailing
+        expr: sum by (role) (increase(pay_stellar_signing_failures_total[10m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The {{ $labels.role }} key failed to sign or signed for another account"
+          action: "Check the key reference and the key service; nothing was sent with a bad signature"
+  - name: pay-stellar-settlement
+    rules:
+      - alert: PayStellarChargesWaiting
+        expr: pay_stellar_oldest_waiting_charge_seconds > 600
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "A charge has waited over ten minutes for a batch"
+          action: "Check the worker's logs, its sources' sequence and the fee account's balance"
+      - alert: PayStellarSubmissionsNotLanding
+        expr: sum(increase(pay_stellar_submissions_closed_total{state=~"expired|failed|quarantined"}[30m])) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Transactions are expiring, failing or being quarantined"
+          action: "Check the inclusion bid against the network's fees and the RPC node's health"
+      - alert: PayStellarWorkerFailing
+        expr: increase(pay_stellar_worker_step_failures_total[10m]) > 5
+        labels: { severity: warning }
+        annotations:
+          summary: "The settlement worker's rounds keep failing"
+          action: "Read the worker's error logs"
+      - alert: PayStellarObserverLagging
+        expr: pay_stellar_observer_lag_ledgers > 720
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The observer is over an hour of ledgers behind for deployment {{ $labels.deployment }}"
+          action: "Check the observer and its RPC node before events leave the node's retention"
+      - alert: PayStellarProcessDown
+        expr: up{job=~"pay-stellar-.*"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.job }} is not answering"
+          action: "Restart it; the worker and observer resume from the database"

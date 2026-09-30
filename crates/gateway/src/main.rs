@@ -5,18 +5,14 @@ use fermah_pay_stellar_gateway::config::Config;
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve, serve_x402};
 use fermah_pay_stellar_gateway::store::Store;
-use fermah_pay_stellar_gateway::{shutdown, startup};
+use fermah_pay_stellar_gateway::{shutdown, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
-use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
     let config = Config::parse();
+    let _telemetry = telemetry::init("fermah-pay-stellar-gateway", config.metrics_addr)?;
 
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections.get())

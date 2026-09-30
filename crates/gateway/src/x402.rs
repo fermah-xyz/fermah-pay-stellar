@@ -311,7 +311,9 @@ fn decode_commitment(raw: &str) -> Option<[u8; 32]> {
     Some(id)
 }
 
-fn invalid(reason: &str, payer: Option<&str>) -> Reply {
+fn invalid(reason: &'static str, payer: Option<&str>) -> Reply {
+    metrics::counter!("pay_stellar_x402_total", "call" => "verify", "result" => reason)
+        .increment(1);
     let mut body = json!({ "isValid": false, "invalidReason": reason });
     if let Some(payer) = payer {
         body["payer"] = json!(payer);
@@ -352,6 +354,8 @@ async fn verify<L: LatestLedger>(
     }
     match store.balance(&scope, checked.buyer_id).await {
         Ok(Some(balance)) if balance.available >= checked.amount => {
+            metrics::counter!("pay_stellar_x402_total", "call" => "verify", "result" => "valid")
+                .increment(1);
             (StatusCode::OK, Json(json!({ "isValid": true, "payer": checked.payer.as_str() })))
         }
         Ok(_) => invalid(reason::INSUFFICIENT_FUNDS, Some(&payer)),
@@ -362,7 +366,9 @@ async fn verify<L: LatestLedger>(
     }
 }
 
-fn settle_failed(reason: &str, payer: &str, network: Network) -> Reply {
+fn settle_failed(reason: &'static str, payer: &str, network: Network) -> Reply {
+    metrics::counter!("pay_stellar_x402_total", "call" => "settle", "result" => reason)
+        .increment(1);
     (
         StatusCode::OK,
         Json(json!({
@@ -442,6 +448,9 @@ async fn settle<L: LatestLedger>(
             }
             Err(_) => return settle_failed(reason::UNEXPECTED_SETTLE, &payer, network),
         };
+    let result = if created { "settled" } else { "replayed" };
+    metrics::counter!("pay_stellar_x402_total", "call" => "settle", "result" => result)
+        .increment(1);
     (
         StatusCode::OK,
         Json(json!({

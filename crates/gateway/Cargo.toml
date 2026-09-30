@@ -25,6 +25,12 @@ path = "src/bin/observer.rs"
 
 [dependencies]
 axum.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
+tracing-opentelemetry.workspace = true
 serde.workspace = true
 fermah-pay-stellar-chain.workspace = true
 fermah-pay-stellar-domain.workspace = true
@@ -51,4 +57,5 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+metrics-util.workspace = true
 sha2.workspace = true

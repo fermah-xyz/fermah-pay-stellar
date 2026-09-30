@@ -219,12 +219,14 @@ fn u32_of(value: i64) -> Result<u32, ObserverError> {
     u32::try_from(value).map_err(|_| ObserverError::Corrupt("ledger outside u32"))
 }
 
-/// Logs a finding at the level its severity calls for, with structured
-/// fields a log pipeline can alert on.
+/// Logs a stored finding at the level its severity calls for, with
+/// structured fields a log pipeline can alert on, and counts it.
 fn log(recorded: &Recorded) {
     let Recorded { deployment, finding, .. } = recorded;
     let (kind, severity, detail) =
         (finding.kind.as_str(), finding.severity.as_str(), finding.detail.to_string());
+    metrics::counter!("pay_stellar_findings_total", "kind" => kind, "severity" => severity)
+        .increment(1);
     match finding.severity {
         Severity::Critical => {
             tracing::error!(seller_deployment_id = %deployment, kind, severity, detail, "reconciliation finding");
@@ -534,6 +536,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             return Ok(Ingested::Idle);
         }
         let caught_up = page.cursor.ends_ledger() && page.cursor.ledger() >= page.latest_ledger;
+        metrics::gauge!("pay_stellar_observer_lag_ledgers", "deployment" => deployment.id.to_string())
+            .set(f64::from(page.latest_ledger.saturating_sub(page.cursor.ledger())));
         let Some(recorded) = self.store_page(deployment, &position, &next, &page).await? else {
             return Ok(Ingested::Contended);
         };

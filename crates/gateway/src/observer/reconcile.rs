@@ -102,6 +102,17 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let totals = reading.state.totals;
         let owed = totals.liabilities + totals.revenue;
         let held = i128::from(reading.trustline.map_or(0, |(balance, _)| balance));
+        // Base units as floats: exact below 2^53, far above any balance here.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            let id = deployment.id.to_string();
+            metrics::gauge!("pay_stellar_treasury_usdc", "deployment" => id.clone())
+                .set(held as f64);
+            metrics::gauge!("pay_stellar_contract_liabilities", "deployment" => id.clone())
+                .set(totals.liabilities as f64);
+            metrics::gauge!("pay_stellar_contract_revenue", "deployment" => id)
+                .set(totals.revenue as f64);
+        }
         let solvency = json!({
             "ledger": reading.ledger,
             "treasury": reading.treasury.as_str(),
