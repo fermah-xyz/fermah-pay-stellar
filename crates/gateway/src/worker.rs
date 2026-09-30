@@ -111,7 +111,13 @@ pub struct Worker<C, K> {
     set_aside: Mutex<HashMap<Uuid, OffsetDateTime>>,
     /// When the contracts' remaining life was last read.
     ttl_checked_at: Mutex<Option<OffsetDateTime>>,
+    /// The network's base reserve and when it was read. It changes only by
+    /// a network vote, and reading it fetches a whole ledger's metadata.
+    base_reserve: Mutex<Option<(OffsetDateTime, u32)>>,
 }
+
+/// How long a read base reserve is used before it is read again.
+const BASE_RESERVE_READ_EVERY: time::Duration = time::Duration::minutes(10);
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> WorkerError {
     move |source| WorkerError::Store { operation, source }
@@ -217,6 +223,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             settings,
             set_aside: Mutex::new(HashMap::new()),
             ttl_checked_at: Mutex::new(None),
+            base_reserve: Mutex::new(None),
         }
     }
 
@@ -309,9 +316,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let key = LedgerKey::Account(LedgerKeyAccount { account_id: account_id(&address) });
         let chain = self.engine.chain();
         let read = chain.ledger_entries(&[key]).await.map_err(WorkerError::Chain)?;
-        let info = chain.latest_ledger_info().await.map_err(WorkerError::Chain)?;
+        let base_reserve = self.base_reserve().await?;
         let (Some(LedgerEntryData::Account(account)), Some(base_reserve)) =
-            (read.entries.first().map(|entry| &entry.data), info.base_reserve)
+            (read.entries.first().map(|entry| &entry.data), base_reserve)
         else {
             tracing::warn!(fee_source = %address, "the fee account or the base reserve cannot be read; building nothing");
             return Ok(false);
@@ -329,6 +336,24 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             );
         }
         Ok(funded)
+    }
+
+    /// The network's base reserve, read again once [`BASE_RESERVE_READ_EVERY`]
+    /// has passed; `None` while the node sends no ledger header.
+    async fn base_reserve(&self) -> Result<Option<u32>, WorkerError> {
+        let now = self.engine.clock().now();
+        let cached = *self.base_reserve.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, reserve)) = cached
+            && now < at + BASE_RESERVE_READ_EVERY
+        {
+            return Ok(Some(reserve));
+        }
+        let info = self.engine.chain().latest_ledger_info().await.map_err(WorkerError::Chain)?;
+        if let Some(reserve) = info.base_reserve {
+            *self.base_reserve.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((now, reserve));
+        }
+        Ok(info.base_reserve)
     }
 
     /// Extends the life of each served contract whose instance or code has

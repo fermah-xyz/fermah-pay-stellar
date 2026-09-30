@@ -326,6 +326,19 @@ pub struct Engine<C, K = SystemClock> {
     network: Network,
     keys: Keys,
     policy: Policy,
+    /// The last measurement of the local clock against the ledger.
+    clock_check: std::sync::Mutex<Option<ClockCheck>>,
+}
+
+/// How often the local clock is measured against the latest ledger.
+const CLOCK_CHECK_EVERY: time::Duration = time::Duration::seconds(60);
+
+#[derive(Clone, Copy)]
+struct ClockCheck {
+    /// Local time of the measurement.
+    at: OffsetDateTime,
+    ledger: u32,
+    ledger_close: i64,
 }
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> EngineError {
@@ -343,7 +356,7 @@ const IN_FLIGHT_INDEX: &str = "submissions_one_in_flight_per_source";
 const OUTER_HASH_KEY: &str = "submissions_outer_hash_key";
 
 impl<C: Chain, K: Clock> Engine<C, K> {
-    pub const fn new(
+    pub fn new(
         pool: PgPool,
         chain: C,
         clock: K,
@@ -351,7 +364,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         keys: Keys,
         policy: Policy,
     ) -> Self {
-        Self { pool, chain, clock, network, keys, policy }
+        Self { pool, chain, clock, network, keys, policy, clock_check: std::sync::Mutex::new(None) }
     }
 
     pub const fn chain(&self) -> &C {
@@ -528,17 +541,32 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     /// the policy allows. A node lagging behind the network looks the same
     /// as a local clock running ahead; either way nothing is built until the
     /// two agree again.
+    /// Measured against the ledger at most once per [`CLOCK_CHECK_EVERY`]:
+    /// a clock drifts slowly, and reading the latest ledger's close time
+    /// fetches its whole metadata.
     async fn check_clock(&self) -> Result<(), EngineError> {
-        let ledger = self.chain.latest_ledger_info().await.map_err(EngineError::Chain)?;
-        let local = self.clock.now().unix_timestamp();
+        let now = self.clock.now();
+        let cached = *self.clock_check.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (ledger, ledger_close) = match cached {
+            Some(check) if now < check.at + CLOCK_CHECK_EVERY => {
+                // The same offset as measured, carried forward.
+                (check.ledger, check.ledger_close + (now - check.at).whole_seconds())
+            }
+            _ => {
+                let info = self.chain.latest_ledger_info().await.map_err(EngineError::Chain)?;
+                *self.clock_check.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(ClockCheck {
+                        at: now,
+                        ledger: info.sequence,
+                        ledger_close: info.close_time,
+                    });
+                (info.sequence, info.close_time)
+            }
+        };
+        let local = now.unix_timestamp();
         let bound_secs = self.policy.max_clock_skew.as_secs();
-        if local.abs_diff(ledger.close_time) > bound_secs {
-            return Err(EngineError::ClockSkew {
-                local,
-                ledger: ledger.sequence,
-                ledger_close: ledger.close_time,
-                bound_secs,
-            });
+        if local.abs_diff(ledger_close) > bound_secs {
+            return Err(EngineError::ClockSkew { local, ledger, ledger_close, bound_secs });
         }
         Ok(())
     }
