@@ -1,0 +1,57 @@
+name: Nightly
+
+# Longer runs of the randomized suites than every change can afford: the
+# contract's property tests against their reference model, and the
+# settlement worker's seeded fault simulation, with new seeds every night.
+# A failure names its seed; `DST_SEED=<seed>` replays it.
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  randomized:
+    name: Property tests and fault simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: pay_stellar_owner
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: pay_stellar
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U pay_stellar_owner -d pay_stellar"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: "false"
+      - name: Contract property tests
+        env:
+          PROPTEST_CASES: "1000"
+        run: cargo test --locked -p fermah-pay-stellar-prepaid properties
+      - name: Worker fault simulation
+        env:
+          DST_SEEDS: "200"
+          DST_SEED_START: ${{ github.run_number }}000
+        run: >-
+          SQLX_OFFLINE=true cargo test --locked -p fermah-pay-stellar-gateway --test worker
+          random_faults -- --nocapture

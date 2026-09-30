@@ -105,8 +105,8 @@ fn run(ops: &[Op]) {
     for (step, op) in ops.iter().enumerate() {
         match op {
             Op::Deposit { buyer, amount, id } => {
-                let accepted = !model.deposit_ids.contains(&(*buyer, *id))
-                    && model.wallets[*buyer] >= *amount;
+                let accepted =
+                    !model.deposit_ids.contains(&(*buyer, *id)) && model.wallets[*buyer] >= *amount;
                 let result = w.deposit(&buyers[*buyer], label(*buyer), *amount, *id);
                 assert_eq!(result.is_ok(), accepted, "step {step}: {op:?} -> {result:?}");
                 if accepted {
