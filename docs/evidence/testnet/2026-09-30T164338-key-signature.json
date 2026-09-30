@@ -1,0 +1,15 @@
+{
+  "account": "GDFCM5BGBXRW4Q274ABY4PZZWWFJ34YS3WR4Z45UZQFZUWFSJIW3UQA2",
+  "criterion": "key-signature",
+  "expected": "a transaction signed through the key reference is accepted by testnet for the account the key's public key encodes",
+  "funded_by_friendbot": true,
+  "key_service": "aws-kms",
+  "network": "stellar:testnet",
+  "observed": {
+    "sequence_after": 21271276505006081,
+    "sequence_before": 21271276505006080
+  },
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/d37e4e1ca35fc36a7a0b7d2639a26e8c0898dd7139f680377673102de6f0f1a1",
+  "recorded_at": "2026-09-30T16:43:38.140273455Z",
+  "transaction_hash": "d37e4e1ca35fc36a7a0b7d2639a26e8c0898dd7139f680377673102de6f0f1a1"
+}

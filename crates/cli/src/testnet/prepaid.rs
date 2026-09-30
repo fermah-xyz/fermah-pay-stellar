@@ -991,3 +991,65 @@ fn signers_json(policy: &AccountSigners, xlm: Option<i64>, xlm_field: &str) -> s
 fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
+
+impl Context {
+    /// Sends a transaction on testnet signed by the key `reference` names,
+    /// such as a key in AWS KMS: the account is funded by Friendbot if it is
+    /// missing, and the transaction (a sequence bump, which moves nothing)
+    /// is signed through the same path the settlement worker signs source
+    /// accounts with. Writes a `key-signature` evidence record.
+    pub async fn key_check(&self, reference: &str) -> anyhow::Result<()> {
+        use fermah_pay_stellar_chain::stellar_xdr::{
+            BumpSequenceOp, Memo, Operation, OperationBody, Preconditions, SequenceNumber,
+            TimeBounds, TimePoint, Transaction as Tx, TransactionExt, VecM,
+        };
+        use fermah_pay_stellar_chain::transaction::muxed_account;
+
+        let info = self.rpc.verify_network(NETWORK).await?;
+        let signer = fermah_pay_stellar_gateway::signing::open(reference).await?;
+        let account = signer.address();
+        let mut funded = false;
+        if !self.account_exists(&account).await? {
+            let friendbot = info.friendbot_url.context("RPC reports no Friendbot")?;
+            friendbot::fund(&friendbot, &account).await?;
+            funded = true;
+        }
+        let sequence = self.sequence_of(&account).await?;
+        let valid_until = unix_now() + self.policy.validity.as_secs();
+        let tx = Tx {
+            source_account: muxed_account(&account),
+            fee: self.policy.inclusion_fee,
+            seq_num: SequenceNumber(sequence + 1),
+            cond: Preconditions::Time(TimeBounds {
+                min_time: TimePoint(0),
+                max_time: TimePoint(valid_until),
+            }),
+            memo: Memo::None,
+            operations: VecM::try_from(vec![Operation {
+                source_account: None,
+                body: OperationBody::BumpSequence(BumpSequenceOp { bump_to: SequenceNumber(0) }),
+            }])?,
+            ext: TransactionExt::V0,
+        };
+        let hash = transaction::transaction_hash(&tx, NETWORK)?;
+        let envelope = transaction::sign_with(tx, NETWORK, &[signer.as_ref()]).await?;
+        submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval).await?;
+        let after = self.sequence_of(&account).await?;
+        ensure!(after == sequence + 1, "the account's sequence is {after}, not {}", sequence + 1);
+        let transaction_hash = hex_lower(&hash);
+        evidence::write(
+            &self.evidence_dir,
+            "key-signature",
+            json!({
+                "criterion": "key-signature",
+                "expected": "a transaction signed through the key reference is accepted by testnet for the account the key's public key encodes",
+                "key_service": reference.split_once("://").map(|(scheme, _)| scheme),
+                "account": account.to_string(),
+                "funded_by_friendbot": funded,
+                "transaction_hash": transaction_hash,
+                "public_explorer_url": evidence::tx_url(&transaction_hash),
+                "observed": { "sequence_before": sequence, "sequence_after": after },
+            }),
+        )
+    }
+}

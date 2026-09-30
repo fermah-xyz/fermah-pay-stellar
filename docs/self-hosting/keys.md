@@ -45,6 +45,8 @@ aws kms create-key --key-spec ECC_NIST_EDWARDS25519 --key-usage SIGN_VERIFY \
 aws kms create-alias --alias-name alias/pay-stellar-operator --target-key-id <key id>
 # The account this key signs for, to fund or to name in the contract:
 fermah-pay-stellar-contract address --key aws-kms://alias/pay-stellar-operator
+# On testnet, a transaction signed by the key (Friendbot funds the account):
+fermah-pay-stellar-testnet key-check --key aws-kms://alias/pay-stellar-operator
 ```
 
 - **Credentials and region.** They come from the standard AWS sources: environment variables, the shared profile, or the instance or task role. `AWS_REGION` must be the key's region.
