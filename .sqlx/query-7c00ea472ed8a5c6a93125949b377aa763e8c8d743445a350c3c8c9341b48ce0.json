@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.leases (name, holder, acquired_at, expires_at)\n            VALUES ($1, $2, now(), now() + make_interval(secs => $3))\n            ON CONFLICT (name) DO UPDATE\n            SET holder = EXCLUDED.holder,\n                acquired_at = CASE WHEN leases.holder = EXCLUDED.holder\n                                   THEN leases.acquired_at ELSE now() END,\n                expires_at = EXCLUDED.expires_at\n            WHERE leases.holder = EXCLUDED.holder OR leases.expires_at <= now()\n            RETURNING holder\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holder",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.leases",
+            "name": "holder"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c00ea472ed8a5c6a93125949b377aa763e8c8d743445a350c3c8c9341b48ce0"
+}

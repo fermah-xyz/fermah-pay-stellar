@@ -26,6 +26,7 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
 | `pay_stellar_signing_failures_total{role}` | worker | signatures that failed or did not verify, by key: `operator`, `source`, `fee_source` |
 | `pay_stellar_worker_step_failures_total` | worker | settlement rounds that failed |
+| `pay_stellar_lease_held{role}` | worker, observer | 1 while this process holds its lease and acts, 0 while it stands by |
 | `pay_stellar_findings_total{kind,severity}` | observer | findings recorded, as listed in [the observer guide](observer.md) |
 | `pay_stellar_observer_lag_ledgers{deployment}` | observer | ledgers between the observer's position and the node's latest |
 | `pay_stellar_treasury_usdc{deployment}` | observer | the treasury's USDC, in base units |
@@ -50,6 +51,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarSubmissionsNotLanding` | warning | Transactions keep expiring or failing. Check the inclusion bid against network fees and the RPC node's health |
 | `PayStellarWorkerFailing` | warning | Settlement rounds keep failing; read the worker's error logs |
 | `PayStellarObserverLagging` | warning | The observer is more than an hour behind. Fix it before the events it has not read leave the RPC node's retention |
+| `PayStellarNoLeader` | critical | Worker or observer processes are running but none holds the lease, so nothing is settled or observed. Check their logs for database errors |
 | `PayStellarProcessDown` | critical | Restart the process; the worker and the observer resume from the database |
 
 ## Traces

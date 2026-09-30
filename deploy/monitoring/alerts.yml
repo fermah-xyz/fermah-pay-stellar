@@ -78,6 +78,13 @@ groups:
         annotations:
           summary: "The observer is over an hour of ledgers behind for deployment {{ $labels.deployment }}"
           action: "Check the observer and its RPC node before events leave the node's retention"
+      - alert: PayStellarNoLeader
+        expr: max by (role) (pay_stellar_lease_held) < 1
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "No {{ $labels.role }} process holds its lease; none is acting"
+          action: "Check the processes' logs for database errors"
       - alert: PayStellarProcessDown
         expr: up{job=~"pay-stellar-.*"} == 0
         for: 2m
