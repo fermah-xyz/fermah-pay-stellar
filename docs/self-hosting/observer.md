@@ -78,10 +78,28 @@ member of `pay_stellar_operator` can read both tables.
 | `treasury_deficit` | critical | The treasury holds less USDC than the contract owes buyers and the seller. | Pause the contract with the admin key and find where the USDC went; top up the treasury. After a treasury rotation, move the previous treasury's USDC. |
 | `treasury_surplus` | info | The treasury holds more USDC than the contract owes. | Expected if it holds other funds; otherwise find the source. |
 | `treasury_deauthorized` | critical | The treasury's USDC trustline is missing or no longer authorized by the USDC issuer. Its balance may still cover what is owed, but every deposit and withdrawal fails. | Contact the issuer; consider rotating to another treasury and moving the USDC. |
-| `event_totals_mismatch` | warning | The contract's totals differ from the sums of the events the observer read. | If `coverage` shows a gap or a start after deployment, the history is incomplete. Otherwise events were missed or the contract changed behaviour: investigate. |
+| `event_totals_mismatch` | warning | The contract's totals differ from the sums of the events the observer read (since the last baseline, if any). | If `coverage` shows a gap or a start after deployment, the history is incomplete: check the books by hand, then record a baseline (below). Otherwise events were missed or the contract changed behaviour: investigate. |
 | `ledger_totals_mismatch` | warning | The contract's totals fall outside what the database allows for, even counting charges and deposits in flight. | Look for the per-event findings that explain it; otherwise compare buyer balances on-chain with `available`. |
 
 Reconciliation findings (`treasury_*`, `*_totals_mismatch`) are recorded once
 when a discrepancy has persisted through the configured confirmations, and
-again only after it cleared and came back, or after a restart of the
-observer.
+again only after it cleared and came back. Restarting the observer changes
+neither.
+
+## Resuming reconciliation after lost history
+
+When events were lost (an `event_gap`), or the observer began after the
+contract's first events, the event and database checks cannot be
+reconciled from events alone. After checking the books by hand, an operator
+acknowledges them as they stand:
+
+```bash
+admin observer-baseline --deployment-id <DEPLOYMENT_ID> --note "<why>" \
+  --network stellar:testnet --rpc-url https://soroban-testnet.stellar.org
+```
+
+The command runs under the operator role and prints the baseline's ledger.
+From that ledger on, reconciliation compares only what changes, so any later
+discrepancy is still found. It is refused while any charge or deposit is in
+flight; retry once they are final. Baselines are kept in
+`pay_stellar.reconciliation_baselines`, which no role can change or delete.

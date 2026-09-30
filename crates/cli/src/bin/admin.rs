@@ -85,6 +85,22 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_RPC_URL")]
         rpc_url: String,
     },
+    /// Acknowledge a deployment's books as they stand, so the chain
+    /// observer's reconciliation compares only what changes from now on
+    /// (operator role). For after events were lost to the RPC node's
+    /// retention, or observation began late; refused while any charge or
+    /// deposit is in flight.
+    ObserverBaseline {
+        #[arg(long)]
+        deployment_id: Uuid,
+        /// Why the books are acknowledged, kept with the baseline.
+        #[arg(long)]
+        note: String,
+        #[arg(long)]
+        network: Network,
+        #[arg(long, env = "PAY_STELLAR_RPC_URL")]
+        rpc_url: String,
+    },
     /// List quarantined charges (operator role).
     QuarantinedCharges,
     /// Resolve a quarantined charge (operator role). The resolution is read
@@ -145,6 +161,30 @@ async fn main() -> anyhow::Result<()> {
             serde_json::json!({
                 "deployment_id": deployment_id.to_string(),
                 "contract": binding.contract,
+            })
+        }
+        Command::ObserverBaseline { deployment_id, note, network, rpc_url } => {
+            use fermah_pay_stellar_gateway::observer::{Observer, Settings, StartPosition};
+            let rpc = RpcClient::new(&rpc_url, Duration::from_secs(30))?;
+            rpc.verify_network(network).await.context("checking the RPC network")?;
+            // Only the chain reading and the deployment list are used.
+            let observer = Observer::new(
+                pool.clone(),
+                rpc,
+                fermah_pay_stellar_gateway::submission::SystemClock,
+                network,
+                Settings {
+                    start: StartPosition::Latest,
+                    page_size: 100,
+                    settle_within: Duration::from_secs(7200),
+                    confirmations: 3,
+                    max_pages_per_round: 1,
+                },
+            );
+            let ledger = observer.record_baseline(&pool, deployment_id, &note).await?;
+            serde_json::json!({
+                "deployment_id": deployment_id.to_string(),
+                "baseline_ledger": ledger,
             })
         }
         Command::SyncLedger { deployment_id, rpc_url } => {

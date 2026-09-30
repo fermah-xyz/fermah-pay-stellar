@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pay_stellar.reconciliation_streaks SET recorded = true\n                 WHERE seller_deployment_id = $1 AND kind = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b437ec266c57589d4bfce503631a630a897f4fbb377c6c18e7479abc67afe989"
+}

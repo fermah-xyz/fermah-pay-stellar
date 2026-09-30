@@ -29,6 +29,7 @@
 //!   charges not yet final.
 
 use serde_json::json;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use fermah_pay_stellar_chain::prepaid::{InstanceState, PrepaidDeployment, instance_state};
@@ -38,7 +39,7 @@ use fermah_pay_stellar_domain::AccountAddress;
 
 use super::{
     ChainReader, Deployment, Finding, FindingKind, Observer, ObserverError, Position, Recorded,
-    Severity, insert_finding, log, store, u32_of,
+    Severity, log, store, u32_of,
 };
 use crate::submission::Clock;
 
@@ -53,7 +54,21 @@ struct Reading {
 }
 
 /// The database and event-stream side of one check.
+/// What an operator acknowledged at a ledger; see
+/// `pay_stellar.reconciliation_baselines`.
+#[derive(Clone, Copy, Debug)]
+struct Baseline {
+    ledger: i64,
+    liabilities: i128,
+    revenue: i128,
+    liabilities_offset: i128,
+    revenue_offset: i128,
+}
+
 struct Books {
+    /// The latest baseline at or before the reading's ledger; the event
+    /// sums below cover only the events after it.
+    baseline: Option<Baseline>,
     covered: bool,
     observed_from_ledger: i64,
     gaps: i64,
@@ -68,6 +83,34 @@ struct Books {
     revenue_withdrawn: i128,
     outside_deposits: i128,
     outside_charges: i128,
+}
+
+/// The deployment's available and charged sums, refused while any charge or
+/// deposit is not final.
+async fn quiet_books(pool: &PgPool, deployment: Uuid) -> Result<(i128, i128), ObserverError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            (SELECT COALESCE(sum(available), 0) FROM pay_stellar.buyers
+             WHERE seller_deployment_id = $1)::text AS "available!",
+            (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.charges
+             WHERE seller_deployment_id = $1 AND state = 'charged')::text AS "charged!",
+            (SELECT count(*) FROM pay_stellar.charges
+             WHERE seller_deployment_id = $1
+               AND state IN ('admitted', 'submitted', 'quarantined')) AS "charges_in_flight!",
+            (SELECT count(*) FROM pay_stellar.deposits
+             WHERE seller_deployment_id = $1
+               AND state IN ('awaiting_signature', 'signed', 'submitted')) AS "deposits_in_flight!"
+        "#,
+        deployment,
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(store("read books for a baseline"))?;
+    if row.charges_in_flight > 0 || row.deposits_in_flight > 0 {
+        return Err(ObserverError::NotQuiet);
+    }
+    Ok((amount(&row.available)?, amount(&row.charged)?))
 }
 
 fn amount(text: &str) -> Result<i128, ObserverError> {
@@ -97,7 +140,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         // event sums can describe that ledger.
         self.catch_up(deployment).await?;
         let books = self.books(deployment.id, reading.ledger).await?;
-        let mut findings = Vec::new();
+        // Every discrepancy checked, and its finding when present.
+        let mut checks: Vec<(FindingKind, Option<Finding>)> = Vec::new();
 
         let totals = reading.state.totals;
         let owed = totals.liabilities + totals.revenue;
@@ -123,16 +167,17 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             "owed": owed.to_string(),
             "difference": (held - owed).to_string(),
         });
-        if self.persisted(deployment.id, FindingKind::TreasuryDeficit, held < owed) {
-            findings.push(Finding::new(
-                FindingKind::TreasuryDeficit,
-                Severity::Critical,
-                solvency.clone(),
-            ));
-        }
-        if self.persisted(deployment.id, FindingKind::TreasurySurplus, held > owed) {
-            findings.push(Finding::new(FindingKind::TreasurySurplus, Severity::Info, solvency));
-        }
+        checks.push((
+            FindingKind::TreasuryDeficit,
+            (held < owed).then(|| {
+                Finding::new(FindingKind::TreasuryDeficit, Severity::Critical, solvency.clone())
+            }),
+        ));
+        checks.push((
+            FindingKind::TreasurySurplus,
+            (held > owed)
+                .then(|| Finding::new(FindingKind::TreasurySurplus, Severity::Info, solvency)),
+        ));
         // USDC's issuer can revoke a trustline's authorization. The balance
         // then still covers what is owed, but the asset contract refuses
         // every transfer into or out of the treasury: no deposit or
@@ -140,60 +185,73 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let authorized = reading
             .trustline
             .is_some_and(|(_, flags)| flags & TrustLineFlags::AuthorizedFlag as u32 != 0);
-        if self.persisted(deployment.id, FindingKind::TreasuryDeauthorized, !authorized) {
-            findings.push(Finding::new(
-                FindingKind::TreasuryDeauthorized,
-                Severity::Critical,
-                json!({
-                    "ledger": reading.ledger,
-                    "treasury": reading.treasury.as_str(),
-                    "trustline": reading.trustline.is_some(),
-                    "flags": reading.trustline.map(|(_, flags)| flags),
-                }),
-            ));
-        }
+        checks.push((
+            FindingKind::TreasuryDeauthorized,
+            (!authorized).then(|| {
+                Finding::new(
+                    FindingKind::TreasuryDeauthorized,
+                    Severity::Critical,
+                    json!({
+                        "ledger": reading.ledger,
+                        "treasury": reading.treasury.as_str(),
+                        "trustline": reading.trustline.is_some(),
+                        "flags": reading.trustline.map(|(_, flags)| flags),
+                    }),
+                )
+            }),
+        ));
 
         // Without every event up to the reading's ledger, the sums below
         // would describe another ledger; the streaks are left as they are.
         if books.covered {
             let coverage = json!({
+                "baseline_ledger": books.baseline.map(|b| b.ledger),
                 "observed_from_ledger": books.observed_from_ledger,
                 "event_gaps": books.gaps,
                 "unrecognized_events": books.unrecognized,
             });
-            let expected_liabilities =
-                books.deposited_on_chain - books.charged_on_chain - books.withdrawn;
-            let expected_revenue = books.charged_on_chain - books.revenue_withdrawn;
+            let base = books.baseline;
+            let expected_liabilities = base.map_or(0, |b| b.liabilities) + books.deposited_on_chain
+                - books.charged_on_chain
+                - books.withdrawn;
+            let expected_revenue =
+                base.map_or(0, |b| b.revenue) + books.charged_on_chain - books.revenue_withdrawn;
             let events_differ =
                 (expected_liabilities, expected_revenue) != (totals.liabilities, totals.revenue);
-            if self.persisted(deployment.id, FindingKind::EventTotalsMismatch, events_differ) {
-                findings.push(Finding::new(
-                    FindingKind::EventTotalsMismatch,
-                    Severity::Warning,
-                    json!({
-                        "ledger": reading.ledger,
-                        "contract": { "liabilities": totals.liabilities.to_string(),
-                                      "revenue": totals.revenue.to_string() },
-                        "events": { "liabilities": expected_liabilities.to_string(),
-                                    "revenue": expected_revenue.to_string(),
-                                    "deposited": books.deposited_on_chain.to_string(),
-                                    "charged": books.charged_on_chain.to_string(),
-                                    "withdrawn": books.withdrawn.to_string(),
-                                    "revenue_withdrawn": books.revenue_withdrawn.to_string() },
-                        "coverage": coverage,
-                    }),
-                ));
-            }
+            checks.push((
+                FindingKind::EventTotalsMismatch,
+                (events_differ).then(|| {
+                    Finding::new(
+                        FindingKind::EventTotalsMismatch,
+                        Severity::Warning,
+                        json!({
+                            "ledger": reading.ledger,
+                            "contract": { "liabilities": totals.liabilities.to_string(),
+                                          "revenue": totals.revenue.to_string() },
+                            "events": { "liabilities": expected_liabilities.to_string(),
+                                        "revenue": expected_revenue.to_string(),
+                                        "deposited": books.deposited_on_chain.to_string(),
+                                        "charged": books.charged_on_chain.to_string(),
+                                        "withdrawn": books.withdrawn.to_string(),
+                                        "revenue_withdrawn": books.revenue_withdrawn.to_string() },
+                            "coverage": coverage,
+                        }),
+                    )
+                }),
+            ));
 
             let liabilities_low =
-                books.available + books.outside_deposits - books.outside_charges - books.withdrawn;
+                books.available + base.map_or(0, |b| b.liabilities_offset) + books.outside_deposits
+                    - books.outside_charges
+                    - books.withdrawn;
             let liabilities_high = liabilities_low + books.pending_charges + books.pending_deposits;
-            let revenue_low = books.charged + books.outside_charges - books.revenue_withdrawn;
+            let revenue_low =
+                books.charged + base.map_or(0, |b| b.revenue_offset) + books.outside_charges
+                    - books.revenue_withdrawn;
             let revenue_high = revenue_low + books.pending_charges;
             let outside = !(liabilities_low..=liabilities_high).contains(&totals.liabilities)
                 || !(revenue_low..=revenue_high).contains(&totals.revenue);
-            if self.persisted(deployment.id, FindingKind::LedgerTotalsMismatch, outside) {
-                findings.push(Finding::new(
+            checks.push((FindingKind::LedgerTotalsMismatch, (outside).then(|| Finding::new(
                     FindingKind::LedgerTotalsMismatch,
                     Severity::Warning,
                     json!({
@@ -214,25 +272,66 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                                     "outside_charges": books.outside_charges.to_string() },
                         "coverage": coverage,
                     }),
-                ));
-            }
+                ))));
         }
 
-        if findings.is_empty() {
-            return Ok(Vec::new());
-        }
-        let recorded: Vec<Recorded> = findings
-            .into_iter()
-            .map(|finding| Recorded { deployment: deployment.id, event: None, finding })
-            .collect();
-        let mut tx = self.pool.begin().await.map_err(store("begin reconciliation"))?;
-        for finding in &recorded {
-            insert_finding(&mut tx, finding).await?;
-        }
-        tx.commit().await.map_err(store("commit reconciliation"))?;
-        self.mark_recorded(deployment.id, recorded.iter().map(|r| r.finding.kind));
+        let recorded = self.record_checks(deployment.id, checks).await?;
         recorded.iter().for_each(log);
         Ok(recorded)
+    }
+
+    /// Records, as the operator connected through `operator`, that the
+    /// contract's totals at the current ledger and the database's books are
+    /// as they stand, so reconciliation compares only what changes after.
+    /// The books are read before and after the contract, and must be equal
+    /// with no charge or deposit in flight: otherwise the offsets between
+    /// the two could be off by a settlement. Returns the baseline's ledger.
+    pub async fn record_baseline(
+        &self,
+        operator: &PgPool,
+        deployment: Uuid,
+        note: &str,
+    ) -> Result<u32, ObserverError> {
+        let bound = self
+            .deployments()
+            .await?
+            .into_iter()
+            .find(|d| d.id == deployment)
+            .ok_or(ObserverError::UnknownDeployment(deployment))?;
+        let before = quiet_books(operator, deployment).await?;
+        let reading = self.read_chain(&bound).await?;
+        let after = quiet_books(operator, deployment).await?;
+        if before != after {
+            return Err(ObserverError::NotQuiet);
+        }
+        let (available, charged) = after;
+        let totals = reading.state.totals;
+        sqlx::query!(
+            r#"
+            INSERT INTO pay_stellar.reconciliation_baselines
+                (seller_deployment_id, ledger, liabilities, revenue, liabilities_offset,
+                 revenue_offset, note)
+            VALUES ($1, $2, $3::text::numeric, $4::text::numeric, $5::text::numeric,
+                    $6::text::numeric, $7)
+            "#,
+            deployment,
+            i64::from(reading.ledger),
+            totals.liabilities.to_string(),
+            totals.revenue.to_string(),
+            (totals.liabilities - available).to_string(),
+            (totals.revenue - charged).to_string(),
+            note,
+        )
+        .execute(operator)
+        .await
+        .map_err(store("record baseline"))?;
+        tracing::warn!(
+            seller_deployment_id = %deployment,
+            ledger = reading.ledger,
+            note,
+            "reconciliation baseline recorded"
+        );
+        Ok(reading.ledger)
     }
 
     /// Reads the instance entry and the treasury's trustline in one call.
@@ -284,14 +383,36 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             .execute(&mut *tx)
             .await
             .map_err(store("isolate books"))?;
+        let baseline = sqlx::query!(
+            r#"
+            SELECT ledger, recorded_at,
+                   liabilities::text AS "liabilities!", revenue::text AS "revenue!",
+                   liabilities_offset::text AS "liabilities_offset!",
+                   revenue_offset::text AS "revenue_offset!"
+            FROM pay_stellar.reconciliation_baselines
+            WHERE seller_deployment_id = $1 AND ledger <= $2
+            ORDER BY ledger DESC, recorded_at DESC
+            LIMIT 1
+            "#,
+            deployment,
+            i64::from(ledger),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store("read baseline"))?;
+        // Events after the baseline's ledger, and gaps recorded after it.
+        let (after_ledger, gaps_after) = baseline
+            .as_ref()
+            .map_or((0, time::OffsetDateTime::UNIX_EPOCH), |b| (b.ledger, b.recorded_at));
         let row = sqlx::query!(
             r#"
             SELECT
                 o.start_ledger, o.cursor, o.observed_from_ledger,
                 (SELECT count(*) FROM pay_stellar.reconciliation_findings f
-                 WHERE f.seller_deployment_id = $1 AND f.kind = 'event_gap') AS "gaps!",
+                 WHERE f.seller_deployment_id = $1 AND f.kind = 'event_gap'
+                   AND f.observed_at > $4) AS "gaps!",
                 (SELECT count(*) FROM pay_stellar.chain_events e
-                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
                    AND e.kind = 'unrecognized') AS "unrecognized!",
                 (SELECT COALESCE(sum(available), 0) FROM pay_stellar.buyers
                  WHERE seller_deployment_id = $1)::text AS "available!",
@@ -306,21 +427,21 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                    AND state IN ('awaiting_signature', 'signed', 'submitted'))::text
                     AS "pending_deposits!",
                 (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.chain_events
-                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND kind = 'deposit')::text
+                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND ledger > $3 AND kind = 'deposit')::text
                     AS "deposited_on_chain!",
                 (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.chain_events
-                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND kind = 'withdrawal')::text
+                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND ledger > $3 AND kind = 'withdrawal')::text
                     AS "withdrawn!",
                 (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.chain_events
-                 WHERE seller_deployment_id = $1 AND ledger <= $2
+                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND ledger > $3
                    AND kind = 'revenue_withdrawal')::text AS "revenue_withdrawn!",
                 (SELECT COALESCE(sum(ce.amount), 0)
                  FROM pay_stellar.chain_charge_entries ce
                  JOIN pay_stellar.chain_events e ON e.id = ce.chain_event_id
-                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
                    AND ce.outcome = 'charged')::text AS "charged_on_chain!",
                 (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
-                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.kind = 'deposit'
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3 AND e.kind = 'deposit'
                    AND NOT EXISTS (
                        SELECT 1 FROM pay_stellar.deposits d
                        JOIN pay_stellar.buyers b ON b.id = d.buyer_id
@@ -330,7 +451,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 (SELECT COALESCE(sum(ce.amount), 0)
                  FROM pay_stellar.chain_charge_entries ce
                  JOIN pay_stellar.chain_events e ON e.id = ce.chain_event_id
-                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
                    AND ce.outcome = 'charged'
                    AND NOT EXISTS (
                        SELECT 1 FROM pay_stellar.charges c
@@ -343,6 +464,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             "#,
             deployment,
             i64::from(ledger),
+            after_ledger,
+            gaps_after,
         )
         .fetch_one(&mut *tx)
         .await
@@ -359,7 +482,19 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 })
                 .transpose()?,
         };
+        let baseline = baseline
+            .map(|b| {
+                Ok::<_, ObserverError>(Baseline {
+                    ledger: b.ledger,
+                    liabilities: amount(&b.liabilities)?,
+                    revenue: amount(&b.revenue)?,
+                    liabilities_offset: amount(&b.liabilities_offset)?,
+                    revenue_offset: amount(&b.revenue_offset)?,
+                })
+            })
+            .transpose()?;
         Ok(Books {
+            baseline,
             covered: position.covers(ledger),
             observed_from_ledger: row.observed_from_ledger,
             gaps: row.gaps,

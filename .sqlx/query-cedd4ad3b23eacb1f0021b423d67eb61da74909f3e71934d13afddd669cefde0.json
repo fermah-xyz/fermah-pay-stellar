@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pay_stellar.reconciliation_streaks\n                     WHERE seller_deployment_id = $1 AND kind = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cedd4ad3b23eacb1f0021b423d67eb61da74909f3e71934d13afddd669cefde0"
+}
