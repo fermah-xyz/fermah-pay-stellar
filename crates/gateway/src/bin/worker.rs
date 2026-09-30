@@ -1,21 +1,18 @@
 //! Settlement worker: sends signed deposits and charge batches to Stellar and
 //! applies their outcomes. Run one process per source account.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
 use fermah_pay_stellar_chain::rpc::{FeePercentile, RpcClient};
 use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::submission::{Engine, FeePolicy, Keys, Policy, SystemClock};
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
-use fermah_pay_stellar_gateway::{shutdown, startup};
+use fermah_pay_stellar_gateway::{shutdown, signing, startup};
 use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::EnvFilter;
-use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
 #[command(name = "fermah-pay-stellar-worker", version, about)]
@@ -29,19 +26,20 @@ struct Config {
     rpc_url: String,
     #[arg(long, env = "PAY_STELLAR_RPC_TIMEOUT_SECS", default_value = "10")]
     rpc_timeout_secs: u64,
-    /// Files, comma-separated, each holding the `S...` seed of an account
-    /// that sequences transactions. Each account has at most one transaction
-    /// in flight, so several keep sending while one waits. No other process
-    /// may submit from these accounts.
+    /// Key references, comma-separated, of the accounts that sequence
+    /// transactions. Each account has at most one transaction in flight, so
+    /// several keep sending while one waits. No other process may submit
+    /// from these accounts. A key reference is the path of a seed file; see
+    /// docs/self-hosting/keys.md.
     #[arg(long, env = "PAY_STELLAR_SOURCE_KEY_FILE", value_delimiter = ',', required = true)]
-    source_key_file: Vec<PathBuf>,
-    /// File holding the seed of the account that pays fees.
+    source_key_file: Vec<String>,
+    /// Key reference of the account that pays fees.
     #[arg(long, env = "PAY_STELLAR_FEE_SOURCE_KEY_FILE")]
-    fee_source_key_file: PathBuf,
-    /// File holding the seed of the ledger contracts' operator. The worker
-    /// serves exactly the deployments bound with this operator.
+    fee_source_key_file: String,
+    /// Key reference of the ledger contracts' operator. The worker serves
+    /// exactly the deployments bound with this operator.
     #[arg(long, env = "PAY_STELLAR_OPERATOR_KEY_FILE")]
-    operator_key_file: PathBuf,
+    operator_key_file: String,
     /// Lowest inclusion bid per operation, in stroops. An envelope bids more
     /// when recent fees, or the expiry of the previous envelope, call for it.
     #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE", default_value = "10000")]
@@ -78,28 +76,6 @@ struct Config {
 }
 
 /// Reads a seed file, refusing one other users can read.
-fn read_key(path: &Path) -> anyhow::Result<SecretKey> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
-            .with_context(|| format!("reading {}", path.display()))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            bail!(
-                "{} is accessible to other users (mode {:o}); restrict it to 0600",
-                path.display(),
-                mode & 0o777
-            );
-        }
-    }
-    let seed = Zeroizing::new(
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
-    );
-    SecretKey::from_strkey(seed.trim()).with_context(|| format!("parsing {}", path.display()))
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -119,11 +95,15 @@ async fn main() -> anyhow::Result<()> {
         config.inclusion_fee_percentile,
     )
     .context("inclusion fee settings")?;
-    let sources =
-        config.source_key_file.iter().map(|file| read_key(file)).collect::<Result<Vec<_>, _>>()?;
-    let keys = Keys::new(sources, read_key(&config.fee_source_key_file)?)
-        .context("source account settings")?;
-    let operator = read_key(&config.operator_key_file)?;
+    let mut sources = Vec::new();
+    for reference in &config.source_key_file {
+        sources.push(signing::open(reference).await.context("opening a source key")?);
+    }
+    let fee_source =
+        signing::open(&config.fee_source_key_file).await.context("opening the fee key")?;
+    let keys = Keys::new(sources, fee_source).context("source account settings")?;
+    let operator =
+        signing::open(&config.operator_key_file).await.context("opening the operator key")?;
 
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
         .context("building RPC client")?;
@@ -136,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         network = %config.network,
         sources = ?keys.source_addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
-        fee_source = %keys.fee_source.address(),
+        fee_source = %keys.fee_source_address(),
         operator = %operator.address(),
         inclusion_fee_floor = fees.floor,
         inclusion_fee_cap = fees.cap,

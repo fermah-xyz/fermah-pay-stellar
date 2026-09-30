@@ -20,6 +20,7 @@ use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{ChargeRequest, MAX_BATCH, account_balance, charge_record};
 use fermah_pay_stellar_chain::rpc::{FeePercentile, hex_lower, http_client};
 use fermah_pay_stellar_chain::sep53;
+use fermah_pay_stellar_chain::signer::LocalSigner;
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
 };
@@ -166,8 +167,11 @@ impl Context {
             // The zero-XLM channel account comes first, so it sends whenever
             // it is free.
             Keys::new(
-                vec![self.profile.key(CHANNEL)?, self.profile.key(SUBMITTER)?],
-                self.profile.key(FEE_SOURCE)?,
+                vec![
+                    LocalSigner::arc(self.profile.key(CHANNEL)?),
+                    LocalSigner::arc(self.profile.key(SUBMITTER)?),
+                ],
+                LocalSigner::arc(self.profile.key(FEE_SOURCE)?),
             )?,
             EnginePolicy {
                 // The worker's own defaults: bid from the market, never
@@ -185,7 +189,7 @@ impl Context {
         let worker = Worker::new(
             engine,
             worker_pool,
-            operator,
+            LocalSigner::arc(operator),
             Settings {
                 operator_authorization_ledgers: 24,
                 retry_after: Duration::from_secs(10),

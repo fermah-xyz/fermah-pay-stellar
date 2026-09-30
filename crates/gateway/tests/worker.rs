@@ -25,6 +25,7 @@ use fermah_pay_stellar_chain::rpc::{
     LatestLedgerInfo, LedgerEntries, LedgerEntryRecord, NodeView, RpcError, SendOutcome,
     Simulation, SimulationOutcome, TransactionStatus,
 };
+use fermah_pay_stellar_chain::signer::LocalSigner;
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
     ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
@@ -805,7 +806,11 @@ impl World {
             self.stellar.clone(),
             self.clock.clone(),
             Network::Testnet,
-            Keys::new(sources, SecretKey::from_strkey(&self.fee_seed).unwrap()).unwrap(),
+            Keys::new(
+                sources.into_iter().map(LocalSigner::arc).collect(),
+                LocalSigner::arc(SecretKey::from_strkey(&self.fee_seed).unwrap()),
+            )
+            .unwrap(),
             Policy {
                 fees: FeePolicy::new(100, 100_000, FeePercentile::P90).unwrap(),
                 resource_fee_margin_percent: 10,
@@ -816,7 +821,7 @@ impl World {
         Worker::new(
             engine,
             self.worker_pool.clone(),
-            SecretKey::from_strkey(&self.operator_seed).unwrap(),
+            LocalSigner::arc(SecretKey::from_strkey(&self.operator_seed).unwrap()),
             Settings {
                 operator_authorization_ledgers: OPERATOR_LEDGERS,
                 retry_after: RETRY_AFTER,

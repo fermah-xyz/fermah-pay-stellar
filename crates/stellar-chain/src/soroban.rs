@@ -34,6 +34,8 @@ pub enum AssemblyError {
     AlreadyAssembled,
     #[error("encoding transaction XDR: {0}")]
     Encode(String),
+    #[error("signing the fee bump")]
+    Signer(#[source] crate::signer::SignError),
 }
 
 /// An unassembled transaction invoking `function` with `auth`, for
@@ -169,6 +171,26 @@ pub fn fee_bump_inclusion_fee(bump: &FeeBumpTransaction) -> Option<u32> {
     u32::try_from(inclusion / operations).ok()
 }
 
+/// [`sign_fee_bump`] with a fee source whose key may live in a key
+/// management service; its signature is checked before it is attached.
+pub async fn sign_fee_bump_with(
+    tx: FeeBumpTransaction,
+    network: Network,
+    fee_source: &dyn crate::signer::Signer,
+) -> Result<TransactionEnvelope, AssemblyError> {
+    let hash = fee_bump_hash(&tx, network)?;
+    let signature =
+        crate::signer::signature(fee_source, &hash).await.map_err(AssemblyError::Signer)?;
+    Ok(TransactionEnvelope::TxFeeBump(FeeBumpTransactionEnvelope {
+        tx,
+        signatures: VecM::try_from(vec![crate::signer::decorated(
+            &fee_source.address(),
+            signature,
+        )])
+        .expect("invariant: one signature fits the signature limit"),
+    }))
+}
+
 /// The hash the network reports for a fee-bumped submission.
 pub fn fee_bump_hash(tx: &FeeBumpTransaction, network: Network) -> Result<[u8; 32], AssemblyError> {
     let payload = TransactionSignaturePayload {
@@ -288,6 +310,30 @@ mod tests {
         };
         let bump = fee_bump(inner, &sponsor.address(), 100).unwrap();
         assert_eq!((bump.fee, bump.fee_source), (10_200, muxed_account(&sponsor.address())));
+    }
+
+    /// Signing through a [`Signer`](crate::signer::Signer) yields the same
+    /// envelopes as signing with the key in hand.
+    #[test]
+    fn test_signer_backed_signing_matches_local_signing() {
+        use crate::signer::LocalSigner;
+        let (source, sponsor) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+        let copy =
+            |key: &SecretKey| LocalSigner::new(SecretKey::from_strkey(&key.to_strkey()).unwrap());
+        let (source_signer, sponsor_signer) = (copy(&source), copy(&sponsor));
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let tx = assemble(unassembled(&source), resources(0), 10_000, 0).unwrap();
+        let local = transaction::sign(tx.clone(), Network::Testnet, &[&source]).unwrap();
+        let remote = runtime
+            .block_on(transaction::sign_with(tx, Network::Testnet, &[&source_signer]))
+            .unwrap();
+        assert_eq!(local, remote);
+        let TransactionEnvelope::Tx(inner) = local else { panic!("expected a v1 envelope") };
+        let bump = fee_bump(inner, &sponsor.address(), 100).unwrap();
+        let local = sign_fee_bump(bump.clone(), Network::Testnet, &sponsor).unwrap();
+        let remote =
+            runtime.block_on(sign_fee_bump_with(bump, Network::Testnet, &sponsor_signer)).unwrap();
+        assert_eq!(local, remote);
     }
 
     #[test]
