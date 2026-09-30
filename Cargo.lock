@@ -1140,6 +1140,7 @@ dependencies = [
  "tokio",
  "tonic",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -141,3 +141,34 @@ treasury authorization the worker's sweep builds, and `solvency` counts the
 reserve with the treasury. Top the treasury up again with `propose-transfer`,
 two `sign` calls and `submit`, as in
 [the treasury guide](../self-hosting/treasury.md#topping-the-treasury-up).
+
+## 8. Load
+
+```bash
+testnet load-test \
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_load \
+  --buyers 10 --charges-per-buyer 100 --channels 4 --concurrency 32
+```
+
+This starts the same in-process gateway and worker as step 6, with the
+worker sending from `channel-1` to `channel-4` (created sponsored, with 0
+XLM, if missing) and the submitter. Then:
+
+1. `--buyers` new zero-XLM buyers are created, each sent 0.1 USDC from the
+   reserve, registered, and made to deposit once through the API;
+2. `--buyers` × `--charges-per-buyer` charges of 0.0001 USDC are admitted
+   through the API, `--concurrency` requests at a time;
+3. the command waits until every charge has settled and checks that all of
+   them are `charged`.
+
+The `load-test` evidence record reports:
+
+- the admission and settlement rates;
+- settlement latency (p50, p95 and max, from admission to the charge's final
+  state);
+- the number of batches and charges per batch;
+- how many source accounts sent;
+- the fee per charge;
+- every batch transaction.
+
+Use a fresh database for each run.

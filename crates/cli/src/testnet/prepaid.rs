@@ -38,6 +38,9 @@ use super::ledger::balances;
 use super::profile::{Deployment, Profile};
 
 mod e2e;
+mod load;
+
+pub use load::LoadShape;
 
 const NETWORK: Network = Network::Testnet;
 const SPONSOR: &str = "operator-sponsor";

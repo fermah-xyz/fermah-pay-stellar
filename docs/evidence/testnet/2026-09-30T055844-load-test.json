@@ -1,0 +1,80 @@
+{
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "criterion": "load-test",
+  "expected": "through the gateway API on testnet with Circle USDC: every admitted charge settles on-chain as charged, in batches sent from several source accounts at once",
+  "network": "stellar:testnet",
+  "observed": {
+    "admission_seconds": 11.904272898,
+    "admitted_per_second": 84.00345057344971,
+    "batch_transactions": [
+      {
+        "hash": "c4bbe5dd514f2fee87f64ca18a94b90da1d5222f3335ea91e29ef13d87ea03ad",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/c4bbe5dd514f2fee87f64ca18a94b90da1d5222f3335ea91e29ef13d87ea03ad"
+      },
+      {
+        "hash": "067b6308a57604fb4e0ee4e06f89b5f813a39b90f2e92cf1a7c97cb2248b06c9",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/067b6308a57604fb4e0ee4e06f89b5f813a39b90f2e92cf1a7c97cb2248b06c9"
+      },
+      {
+        "hash": "deeabc893d87efa1f479459da97fef422132e5865c1ace00a2b92182fd92900e",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/deeabc893d87efa1f479459da97fef422132e5865c1ace00a2b92182fd92900e"
+      },
+      {
+        "hash": "a84dc0fc4378b019d539f2924b70771a9c5310094fb396b152396cc39497a88c",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/a84dc0fc4378b019d539f2924b70771a9c5310094fb396b152396cc39497a88c"
+      },
+      {
+        "hash": "c684401a0ec9ca1dae64af71a62cc20de96f7770d1daf34a571c35b7283cdeeb",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/c684401a0ec9ca1dae64af71a62cc20de96f7770d1daf34a571c35b7283cdeeb"
+      },
+      {
+        "hash": "336e28160276221a48bc22f1b65bfc58f608e7091b424b6d56565a2158073c6b",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/336e28160276221a48bc22f1b65bfc58f608e7091b424b6d56565a2158073c6b"
+      },
+      {
+        "hash": "930944f1aa31d285c345601dbbf6f1253b2f398f4b34cc949db0e2b1b8a170d4",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/930944f1aa31d285c345601dbbf6f1253b2f398f4b34cc949db0e2b1b8a170d4"
+      },
+      {
+        "hash": "057049aad56c4f04dff41d628f85c2369c108bcbe21fa41bf9597b6f09d408be",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/057049aad56c4f04dff41d628f85c2369c108bcbe21fa41bf9597b6f09d408be"
+      },
+      {
+        "hash": "c23b0a6acf2b073d361e671d56be69d031e3d2c66cc8116614604ca97664df27",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/c23b0a6acf2b073d361e671d56be69d031e3d2c66cc8116614604ca97664df27"
+      },
+      {
+        "hash": "9f9bd70234664123f5767aefa28a079d95febc63a24ab969a8c82ea57c8e6d36",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/9f9bd70234664123f5767aefa28a079d95febc63a24ab969a8c82ea57c8e6d36"
+      },
+      {
+        "hash": "a0e5facc49fdfbe88c2685b0a1f0e1d3132a19239fb3809679682ab1505ffc93",
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/a0e5facc49fdfbe88c2685b0a1f0e1d3132a19239fb3809679682ab1505ffc93"
+      }
+    ],
+    "batches": 11,
+    "charged": 1000,
+    "charges": 1000,
+    "charges_per_batch": 90.9090909090909,
+    "deposits_confirmed": 10,
+    "deposits_seconds": 28.024286341,
+    "fee_stroops_per_charge": 8573,
+    "fee_stroops_total": 8573961,
+    "settled_per_second": 22.75657146392604,
+    "settled_seconds": 43.943350675,
+    "settlement_latency_seconds": {
+      "max": 32.360446,
+      "p50": 24.4193215,
+      "p95": 31.80069485
+    },
+    "sources": 5
+  },
+  "recorded_at": "2026-09-30T05:58:44.888863667Z",
+  "shape": {
+    "buyers": 10,
+    "channels": 4,
+    "charge_amount": 1000,
+    "charges_per_buyer": 100,
+    "concurrency": 32
+  }
+}
