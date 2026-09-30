@@ -29,10 +29,29 @@ The worker takes each of its keys as a key reference:
 | `PAY_STELLAR_OPERATOR_KEY_FILE` | operator |
 | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | fee account |
 | `PAY_STELLAR_SOURCE_KEY_FILE` | source accounts, comma-separated |
+| `PAY_STELLAR_TREASURY_KEY_FILE` | treasury, if the worker pays withdrawals |
 
 A key reference is the path of a seed file on the worker's host. The file holds the account's `S...` seed and nothing else, and must be readable by its owner only (mode `0600`); the worker refuses to start otherwise.
 
-A reference of the form `<service>://<key>` names a key in a key management service, and is refused at startup until that service's backend is added. Each backend keeps the key inside the service: the worker sends the 32-byte hash to sign and never holds the key.
+A reference of the form `<service>://<key>` names a key in a key management service. The key stays inside the service: the worker sends the 32-byte hash to sign and never holds the key. The only service served is AWS KMS (`aws-kms://`, below); a reference to any other service is refused at startup.
+
+### AWS KMS
+
+A key reference `aws-kms://<key>` names the key by key id, key ARN, alias name (`alias/...`) or alias ARN. The key must be asymmetric, of spec `ECC_NIST_EDWARDS25519`, for `SIGN_VERIFY`. KMS then signs with pure Ed25519 (`ED25519_SHA_512` over the raw message), which is what a Stellar signature is. At startup the worker reads the key's public key, refuses any other kind of key, and derives the account from it.
+
+```bash
+aws kms create-key --key-spec ECC_NIST_EDWARDS25519 --key-usage SIGN_VERIFY \
+  --description "pay-stellar operator"
+aws kms create-alias --alias-name alias/pay-stellar-operator --target-key-id <key id>
+# The account this key signs for, to fund or to name in the contract:
+fermah-pay-stellar-contract address --key aws-kms://alias/pay-stellar-operator
+```
+
+- **Credentials and region.** They come from the standard AWS sources: environment variables, the shared profile, or the instance or task role. `AWS_REGION` must be the key's region.
+- **Permissions.** The worker needs only `kms:GetPublicKey` and `kms:Sign` on its keys.
+- **Losing a key.** A KMS key cannot be exported, so its loss or deletion is the account's loss. Keep the treasury and admin behind several signers ([cold reserve](treasury.md), [admin multisig](#an-admin-that-needs-several-signatures)), and rotate a role to a new key before scheduling a key's deletion.
+- **Other tools.** `fermah-pay-stellar-contract sign --key` accepts the same references, so a signer of a multisig proposal can keep their key in KMS too.
+- **Build feature.** Support is the default `aws-kms` feature of the gateway crate. A build without it refuses `aws-kms://` references.
 
 ## Startup check
 

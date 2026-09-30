@@ -1,7 +1,8 @@
 //! Where the worker's keys come from. A key reference is either the path of
 //! a seed file on this host or `<service>://<key>`, naming a key in a key
-//! management service. Only seed files are served by this build; a service
-//! reference is refused at startup rather than ignored.
+//! management service: `aws-kms://<key id, key ARN or alias>` when built
+//! with the `aws-kms` feature (the default). A reference to any other
+//! service is refused at startup rather than ignored.
 //!
 //! Every signer is tested once at startup: it signs a random payload, and the
 //! signature must verify for the address it claims, before any transaction
@@ -13,6 +14,9 @@ use std::sync::Arc;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::signer::{self, LocalSigner, SignError, Signer};
 use zeroize::Zeroizing;
+
+#[cfg(feature = "aws-kms")]
+pub mod aws_kms;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -28,6 +32,9 @@ pub enum KeyError {
     Exposed { path: PathBuf, mode: u32 },
     #[error("key file {path} does not hold a Stellar seed")]
     Invalid { path: PathBuf },
+    #[cfg(feature = "aws-kms")]
+    #[error(transparent)]
+    AwsKms(#[from] aws_kms::KmsError),
     #[error("the signer for {reference} failed its startup test")]
     SelfTest {
         reference: String,
@@ -39,6 +46,8 @@ pub enum KeyError {
 /// Opens the signer `reference` names and tests it.
 pub async fn open(reference: &str) -> Result<Arc<dyn Signer>, KeyError> {
     let signer: Arc<dyn Signer> = match reference.split_once("://") {
+        #[cfg(feature = "aws-kms")]
+        Some(("aws-kms", key)) => Arc::new(aws_kms::AwsKmsSigner::connect(key).await?),
         Some((scheme, _)) => return Err(KeyError::Unsupported(scheme.to_owned())),
         None => Arc::new(LocalSigner::new(read_seed(Path::new(reference))?)),
     };
@@ -126,8 +135,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_a_scheme_this_build_does_not_serve_is_refused() {
-        let error = open("aws-kms://alias/operator").await.err();
-        assert!(matches!(&error, Some(KeyError::Unsupported(scheme)) if scheme == "aws-kms"));
+        let error = open("vault://transit/operator").await.err();
+        assert!(matches!(&error, Some(KeyError::Unsupported(scheme)) if scheme == "vault"));
     }
 
     #[test]

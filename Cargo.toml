@@ -26,6 +26,8 @@ dbg_macro = "deny"
 todo = "deny"
 
 [workspace.dependencies]
+aws-config = { version = "1.12.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client", "credentials-process", "sso"] }
+aws-sdk-kms = { version = "1.122.0", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 fermah-pay-stellar-domain = { path = "crates/domain" }
 fermah-pay-stellar-proto = { path = "crates/proto" }
 fermah-pay-stellar-chain = { path = "crates/stellar-chain" }
