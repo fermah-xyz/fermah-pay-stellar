@@ -136,6 +136,9 @@ struct Net {
     archived: HashSet<AccountAddress>,
     /// Ledger-entry reads trail the latest ledger by this many ledgers.
     entries_behind: u32,
+    /// The treasury's USDC as a trailing read reports it, when it differs
+    /// from what it holds now.
+    stale_treasury: Option<i128>,
     clock: ManualClock,
     /// The contract's events, and the oldest ledger the node retains.
     events: EventStream,
@@ -824,11 +827,12 @@ impl Chain for Stellar {
                 live_until_ledger: None,
             })
         };
+        let stale_treasury = self.with(|n| n.stale_treasury);
         let trustline = |key: &LedgerKey| {
             let LedgerKey::Trustline(line) = key else { return None };
             let holder = address_of(&line.account_id);
             let balance = if holder == treasury() {
-                state.treasury_usdc
+                stale_treasury.unwrap_or(state.treasury_usdc)
             } else if state.lines.contains(&holder) {
                 state.usdc.get(&holder).copied().unwrap_or(0)
             } else {
@@ -958,6 +962,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             simulation_barrier: None,
             archived: HashSet::new(),
             entries_behind: 0,
+            stale_treasury: None,
             clock: clock.clone(),
             events: EventStream::default(),
             oldest: 1,
@@ -3114,4 +3119,56 @@ async fn test_a_sweep_not_included_is_followed_only_once_its_authorization_lapse
     w.settle(&worker).await;
     assert_eq!(sweeps(&w).await, 2);
     assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_two_workers_sweeping_at_once_send_one_sweep(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.funded("x", 100).await;
+    let cold = reserve_account(&w);
+    let sweeper = |key: SecretKey| {
+        w.worker_with_sources(vec![key], 100)
+            .with_treasury(LocalSigner::arc(treasury_key()))
+            .with_reserve(Reserve::new(cold.clone(), 10, 30, 60).unwrap())
+    };
+    // Each from its own source account, as a worker finishing its round
+    // after losing its lease and the one taking over would.
+    let (first, second) = (sweeper(extra_source(&w)), sweeper(extra_source(&w)));
+    w.stellar.with(|n| n.simulation_barrier = Some(Arc::new(Barrier::new(2))));
+    let (a, b) = tokio::join!(first.step(), second.step());
+    w.stellar.with(|n| n.simulation_barrier = None);
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sweeps(&w).await, 1);
+    w.settle(&first).await;
+    w.settle(&second).await;
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_sweep_from_a_trailing_balance_leaves_the_target(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let paid = w.withdraw(&x, 20, "w-1").await;
+    w.settle(&w.paying_worker()).await;
+    assert_eq!(w.get_withdrawal(&paid.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+    assert_eq!(treasury_usdc(&w), 80);
+    // The node serving the balance has not seen the withdrawal's ledger yet.
+    w.stellar.with(|n| {
+        n.entries_behind = 1;
+        n.stale_treasury = Some(100);
+    });
+    let cold = reserve_account(&w);
+    sweeping_worker(&w, &cold).step().await.unwrap();
+    w.stellar.with(|n| {
+        n.entries_behind = 0;
+        n.stale_treasury = None;
+    });
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 50));
 }
