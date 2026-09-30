@@ -23,7 +23,14 @@ path = "src/bin/worker.rs"
 name = "fermah-pay-stellar-observer"
 path = "src/bin/observer.rs"
 
+[features]
+default = ["aws-kms"]
+# Signing with keys held in AWS KMS (`aws-kms://` key references).
+aws-kms = ["dep:aws-config", "dep:aws-sdk-kms"]
+
 [dependencies]
+aws-config = { workspace = true, optional = true }
+aws-sdk-kms = { workspace = true, optional = true }
 axum.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true

@@ -94,6 +94,14 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Print the account a key reference signs for, after checking that it
+    /// signs: for instance the `G...` address of a key held in AWS KMS.
+    Address {
+        /// Key reference: a seed file path, or a key in a key management
+        /// service such as `aws-kms://alias/pay-stellar-operator`.
+        #[arg(long)]
+        key: String,
+    },
     /// Show a proposal and add one signer's signature to it.
     Sign {
         #[arg(long)]
@@ -419,6 +427,9 @@ async fn main() -> anyhow::Result<()> {
                 out: &out,
             };
             propose(&request, usdc::contract_strkey(usdc), &function, &trees).await?;
+        }
+        Command::Address { key } => {
+            println!("{}", signing::open(&key).await?.address());
         }
         Command::Sign { proposal: path, key, account } => {
             let mut proposal = read_proposal(&path)?;
