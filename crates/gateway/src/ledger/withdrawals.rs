@@ -20,7 +20,9 @@ use fermah_pay_stellar_proto::v1::{
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use super::store::{NewWithdrawal, WithdrawalRecord, WithdrawalSigning, WithdrawalState};
+use super::store::{
+    Insertion, NewWithdrawal, WithdrawalRecord, WithdrawalSigning, WithdrawalState,
+};
 use super::{
     LatestLedger, LedgerApi, corrupt, decode_entry, internal, network_unavailable, parse_amount,
     parse_id, parse_key, random, record_scope, signature_refusal, timestamp, unsigned, wire_ledger,
@@ -149,6 +151,9 @@ impl<L: LatestLedger> LedgerApi<L> {
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
         let destination = parse_destination(&body.destination, &wallet)?;
+        if amount < self.store.quotas.min_withdrawal {
+            return Err(Refusal::WithdrawalBelowMinimum.into());
+        }
         // Refused early when it cannot be covered now; the hold when the
         // signed entry is stored is what decides.
         let balance = self
@@ -198,13 +203,17 @@ impl<L: LatestLedger> LedgerApi<L> {
             )
             .await
             .map_err(|e| internal(&e))?;
-        let Some(id) = inserted else {
+        let id = match inserted {
+            Insertion::Created(id) => id,
+            Insertion::QuotaExceeded => return Err(Refusal::WithdrawalQuotaExceeded.into()),
             // A concurrent request with the same key committed first.
-            let existing = self
-                .existing_withdrawal(&scope, None, Some(&key))
-                .await?
-                .ok_or(Refusal::Internal)?;
-            return self.replay_withdrawal(existing, buyer_id, amount, &body.destination);
+            Insertion::KeyTaken => {
+                let existing = self
+                    .existing_withdrawal(&scope, None, Some(&key))
+                    .await?
+                    .ok_or(Refusal::Internal)?;
+                return self.replay_withdrawal(existing, buyer_id, amount, &body.destination);
+            }
         };
         let created =
             self.existing_withdrawal(&scope, Some(id), None).await?.ok_or(Refusal::Internal)?;

@@ -80,6 +80,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup (network passphrase, and protocol 27 or later). Must be `https` unless it points at this host |
 | Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
 | Gateway | `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` | ledgers a charge may wait for settlement before it is refunded, default 720 (about an hour), at most 17280 |
+| Gateway | `PAY_STELLAR_MAX_NEW_BUYERS_PER_DAY`, `PAY_STELLAR_MAX_DEPOSITS_PER_BUYER_PER_DAY`, `PAY_STELLAR_MAX_WITHDRAWALS_PER_BUYER_PER_DAY`, `PAY_STELLAR_MIN_WITHDRAWAL` | [quotas](../api/ledger.md#quotas) against requests that each cost the operator fees: new buyers per deployment (default 1000), deposits (10) and withdrawals (5) per buyer, each per 24 hours, and the smallest withdrawal (100000, 0.01 USDC) |
 | Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit or withdrawal signature stays valid, default 720 (about an hour). A withdrawal the treasury cannot pay stays held this long before its amount is returned |
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
 | Worker | `PAY_STELLAR_WORKER_DATABASE_URL` | URL of the worker login role |

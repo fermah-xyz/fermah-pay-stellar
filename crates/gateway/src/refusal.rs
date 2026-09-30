@@ -33,6 +33,10 @@ pub enum Refusal {
     WithdrawalExpired,
     WithdrawalAlreadySigned,
     InvalidDestination,
+    WithdrawalBelowMinimum,
+    BuyerQuotaExceeded,
+    DepositQuotaExceeded,
+    WithdrawalQuotaExceeded,
     NetworkUnavailable,
     Internal,
 }
@@ -68,6 +72,10 @@ impl Refusal {
             Self::WithdrawalExpired => "withdrawal_expired",
             Self::WithdrawalAlreadySigned => "withdrawal_already_signed",
             Self::InvalidDestination => "invalid_destination",
+            Self::WithdrawalBelowMinimum => "withdrawal_below_minimum",
+            Self::BuyerQuotaExceeded => "buyer_quota_exceeded",
+            Self::DepositQuotaExceeded => "deposit_quota_exceeded",
+            Self::WithdrawalQuotaExceeded => "withdrawal_quota_exceeded",
             Self::NetworkUnavailable => "network_unavailable",
             Self::Internal => "internal",
         }
@@ -90,7 +98,11 @@ impl Refusal {
             | Self::InvalidSignature
             | Self::InvalidChargeId
             | Self::InvalidWithdrawalId
-            | Self::InvalidDestination => Code::InvalidArgument,
+            | Self::InvalidDestination
+            | Self::WithdrawalBelowMinimum => Code::InvalidArgument,
+            Self::BuyerQuotaExceeded
+            | Self::DepositQuotaExceeded
+            | Self::WithdrawalQuotaExceeded => Code::ResourceExhausted,
             Self::BuyerConflict | Self::IdempotencyConflict => Code::AlreadyExists,
             Self::BuyerNotFound
             | Self::DepositNotFound

@@ -74,6 +74,7 @@ impl BuyerService for BuyerApi {
             CreateBuyerOutcome::Created(record) => (record, true),
             CreateBuyerOutcome::Existing(record) => (record, false),
             CreateBuyerOutcome::Conflict => return Err(Refusal::BuyerConflict.into()),
+            CreateBuyerOutcome::QuotaExceeded => return Err(Refusal::BuyerQuotaExceeded.into()),
         };
         Ok(Response::new(CreateBuyerResponse { buyer: Some(to_wire(record)?), created }))
     }

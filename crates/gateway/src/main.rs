@@ -4,7 +4,7 @@ use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_gateway::config::Config;
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve, serve_x402};
-use fermah_pay_stellar_gateway::store::Store;
+use fermah_pay_stellar_gateway::store::{Quotas, Store};
 use fermah_pay_stellar_gateway::{shutdown, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -22,7 +22,12 @@ async fn main() -> anyhow::Result<()> {
     let rpc =
         RpcClient::new(&config.rpc_url, config.rpc_timeout()).context("building RPC client")?;
     startup::verify_rpc(&rpc, config.network).await.context("checking the RPC network")?;
-    let store = Store::new(pool);
+    let store = Store::new(pool).with_quotas(Quotas {
+        buyers_per_deployment: config.max_new_buyers_per_day,
+        deposits_per_buyer: config.max_deposits_per_buyer_per_day,
+        withdrawals_per_buyer: config.max_withdrawals_per_buyer_per_day,
+        min_withdrawal: config.min_withdrawal,
+    });
     let ledger = LedgerApi::new(
         store.clone(),
         rpc,

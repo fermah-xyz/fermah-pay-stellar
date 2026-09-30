@@ -12,6 +12,37 @@ use crate::scope::Scope;
 #[derive(Clone, Debug)]
 pub struct Store {
     pub(crate) pool: PgPool,
+    pub(crate) quotas: Quotas,
+}
+
+/// Admission limits against dust: requests that each cost the operator
+/// fees, or contract state it pays rent for, whatever their amount. Each
+/// count covers the last 24 hours and is checked in the transaction that
+/// creates the row, under a lock, so concurrent requests cannot pass it
+/// together. A repeated request (same idempotency key or buyer) is answered
+/// from its row and counts nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Quotas {
+    /// New buyers per seller deployment. A buyer's first deposit creates
+    /// its account on the contract.
+    pub buyers_per_deployment: u32,
+    /// Deposits prepared per buyer.
+    pub deposits_per_buyer: u32,
+    /// Withdrawals prepared per buyer.
+    pub withdrawals_per_buyer: u32,
+    /// Smallest withdrawal, in USDC base units; the contract has none.
+    pub min_withdrawal: i64,
+}
+
+impl Default for Quotas {
+    fn default() -> Self {
+        Self {
+            buyers_per_deployment: 1_000,
+            deposits_per_buyer: 10,
+            withdrawals_per_buyer: 5,
+            min_withdrawal: 100_000,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +73,8 @@ pub enum CreateBuyerOutcome {
     Existing(BuyerRecord),
     /// The reference or the wallet is already bound differently.
     Conflict,
+    /// The deployment registered its quota of new buyers in the last day.
+    QuotaExceeded,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,8 +89,14 @@ fn parse_network(raw: &str) -> Result<Network, StoreError> {
 
 impl Store {
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool, quotas: Quotas::default() }
+    }
+
+    #[must_use]
+    pub const fn with_quotas(mut self, quotas: Quotas) -> Self {
+        self.quotas = quotas;
+        self
     }
 
     /// The scope of a live key whose deployment is on `network`.
@@ -99,9 +138,48 @@ impl Store {
         external_ref: &ExternalRef,
         wallet: &AccountAddress,
     ) -> Result<CreateBuyerOutcome, StoreError> {
+        let query = |operation| move |source| StoreError::Query { operation, source };
+        let mut tx = self.pool.begin().await.map_err(query("begin buyer registration"))?;
+        // New buyers of one deployment are counted and inserted one at a
+        // time. The key is the deployment's; the first number keeps it apart
+        // from other advisory locks.
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock(1, hashtext($1::text))",
+            scope.seller_deployment_id().to_string(),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(query("lock deployment registrations"))?;
+        let taken = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS (SELECT 1 FROM pay_stellar.buyers
+                           WHERE seller_deployment_id = $1
+                             AND (external_ref = $2 OR wallet_address = $3)) AS "taken!"
+            "#,
+            scope.seller_deployment_id(),
+            external_ref.as_str(),
+            wallet.as_str(),
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(query("check buyer"))?;
+        if !taken {
+            let recent = sqlx::query_scalar!(
+                r#"
+                SELECT count(*) AS "recent!" FROM pay_stellar.buyers
+                WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day'
+                "#,
+                scope.seller_deployment_id(),
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(query("count new buyers"))?;
+            if recent >= i64::from(self.quotas.buyers_per_deployment) {
+                return Ok(CreateBuyerOutcome::QuotaExceeded);
+            }
+        }
         // ON CONFLICT without a target covers both the reference and the
-        // wallet uniqueness constraints; a concurrent identical insert waits
-        // for the first and then reads its committed row below.
+        // wallet uniqueness constraints; the existing row is read below.
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.buyers
@@ -117,9 +195,10 @@ impl Store {
             external_ref.as_str(),
             wallet.as_str(),
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(|source| StoreError::Query { operation: "insert buyer", source })?;
+        .map_err(query("insert buyer"))?;
+        tx.commit().await.map_err(query("commit buyer registration"))?;
 
         if let Some(row) = inserted {
             return Ok(CreateBuyerOutcome::Created(BuyerRecord {

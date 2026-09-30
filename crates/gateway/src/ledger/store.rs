@@ -161,6 +161,16 @@ pub struct NewWithdrawal<'a> {
     pub expiration_ledger: u32,
 }
 
+/// What inserting a deposit or withdrawal did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Insertion {
+    Created(Uuid),
+    /// Another row holds the idempotency key.
+    KeyTaken,
+    /// The buyer reached its quota for the day; nothing was inserted.
+    QuotaExceeded,
+}
+
 /// What storing a withdrawal's signed entry did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WithdrawalSigning {
@@ -289,14 +299,28 @@ impl Store {
         wallet.as_deref().map(address).transpose()
     }
 
-    /// Inserts a prepared deposit. `None` means the idempotency key is taken,
-    /// possibly by a concurrent request; the caller reads that deposit.
+    /// Inserts a prepared deposit, unless the buyer prepared its quota of
+    /// deposits in the last day. `KeyTaken` means the idempotency key is
+    /// taken, possibly by a concurrent request; the caller reads that deposit.
     pub async fn insert_deposit(
         &self,
         scope: &Scope,
         deposit: &NewDeposit<'_>,
-    ) -> Result<Option<Uuid>, StoreError> {
+    ) -> Result<Insertion, StoreError> {
         let id = Uuid::now_v7();
+        let mut tx = self.pool.begin().await.map_err(query("begin deposit"))?;
+        if !self
+            .within_quota(
+                &mut tx,
+                scope,
+                deposit.buyer_id,
+                "deposits",
+                self.quotas.deposits_per_buyer,
+            )
+            .await?
+        {
+            return Ok(Insertion::QuotaExceeded);
+        }
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.deposits
@@ -314,13 +338,69 @@ impl Store {
             deposit.authorization_xdr,
             i64::from(deposit.expiration_ledger),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match inserted {
-            Ok(_) => Ok(Some(id)),
-            Err(error) if is_violation_of(&error, DEPOSIT_KEY) => Ok(None),
-            Err(source) => Err(StoreError::Query { operation: "insert deposit", source }),
+            Ok(_) => {}
+            Err(error) if is_violation_of(&error, DEPOSIT_KEY) => return Ok(Insertion::KeyTaken),
+            Err(source) => return Err(StoreError::Query { operation: "insert deposit", source }),
         }
+        tx.commit().await.map_err(query("commit deposit"))?;
+        Ok(Insertion::Created(id))
+    }
+
+    /// Locks the buyer row, as charge admission does, and tells whether the
+    /// buyer created fewer than `quota` rows of `table` in the last day. The
+    /// lock makes the count and the insert that follows one step for the
+    /// buyer.
+    async fn within_quota(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        scope: &Scope,
+        buyer_id: Uuid,
+        table: &'static str,
+        quota: u32,
+    ) -> Result<bool, StoreError> {
+        sqlx::query!(
+            r#"
+            SELECT id FROM pay_stellar.buyers
+            WHERE id = $1 AND seller_deployment_id = $2 AND network = $3
+            FOR UPDATE
+            "#,
+            buyer_id,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(query("lock buyer"))?;
+        let recent = match table {
+            "deposits" => {
+                sqlx::query_scalar!(
+                    r#"
+                SELECT count(*) AS "recent!" FROM pay_stellar.deposits
+                WHERE buyer_id = $1 AND created_at > now() - interval '1 day'
+                "#,
+                    buyer_id,
+                )
+                .fetch_one(&mut *tx)
+                .await
+            }
+            "withdrawals" => {
+                sqlx::query_scalar!(
+                    r#"
+                SELECT count(*) AS "recent!" FROM pay_stellar.withdrawals
+                WHERE buyer_id = $1 AND created_at > now() - interval '1 day'
+                "#,
+                    buyer_id,
+                )
+                .fetch_one(&mut *tx)
+                .await
+            }
+            _ => return Err(StoreError::Corrupt("quota for an unknown table")),
+        }
+        .map_err(query("count recent requests"))?;
+        Ok(recent < i64::from(quota))
     }
 
     pub async fn deposit(
@@ -631,14 +711,20 @@ impl Store {
         }))
     }
 
-    /// Inserts a prepared withdrawal. `None` means the idempotency key is
-    /// taken, possibly by a concurrent request; the caller reads that one.
+    /// Inserts a prepared withdrawal, unless the buyer prepared its quota
+    /// of withdrawals in the last day. `KeyTaken` means the idempotency key
+    /// is taken, possibly by a concurrent request; the caller reads that one.
     pub async fn insert_withdrawal(
         &self,
         scope: &Scope,
         withdrawal: &NewWithdrawal<'_>,
-    ) -> Result<Option<Uuid>, StoreError> {
+    ) -> Result<Insertion, StoreError> {
         let id = Uuid::now_v7();
+        let mut tx = self.pool.begin().await.map_err(query("begin withdrawal"))?;
+        let quota = self.quotas.withdrawals_per_buyer;
+        if !self.within_quota(&mut tx, scope, withdrawal.buyer_id, "withdrawals", quota).await? {
+            return Ok(Insertion::QuotaExceeded);
+        }
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.withdrawals
@@ -657,13 +743,19 @@ impl Store {
             withdrawal.authorization_xdr,
             i64::from(withdrawal.expiration_ledger),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await;
         match inserted {
-            Ok(_) => Ok(Some(id)),
-            Err(error) if is_violation_of(&error, WITHDRAWAL_KEY) => Ok(None),
-            Err(source) => Err(StoreError::Query { operation: "insert withdrawal", source }),
+            Ok(_) => {}
+            Err(error) if is_violation_of(&error, WITHDRAWAL_KEY) => {
+                return Ok(Insertion::KeyTaken);
+            }
+            Err(source) => {
+                return Err(StoreError::Query { operation: "insert withdrawal", source });
+            }
         }
+        tx.commit().await.map_err(query("commit withdrawal"))?;
+        Ok(Insertion::Created(id))
     }
 
     pub async fn withdrawal(

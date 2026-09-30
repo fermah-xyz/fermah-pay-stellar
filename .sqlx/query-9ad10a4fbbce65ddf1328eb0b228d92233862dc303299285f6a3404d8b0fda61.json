@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT EXISTS (SELECT 1 FROM pay_stellar.buyers\n                           WHERE seller_deployment_id = $1\n                             AND (external_ref = $2 OR wallet_address = $3)) AS \"taken!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "taken!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9ad10a4fbbce65ddf1328eb0b228d92233862dc303299285f6a3404d8b0fda61"
+}

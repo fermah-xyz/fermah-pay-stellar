@@ -37,7 +37,9 @@ use time::format_description::well_known::Rfc3339;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-use self::store::{Admission, ChargeRecord, ChargeState, DepositRecord, DepositState, NewDeposit};
+use self::store::{
+    Admission, ChargeRecord, ChargeState, DepositRecord, DepositState, Insertion, NewDeposit,
+};
 use crate::auth::scope_of;
 use crate::refusal::Refusal;
 use crate::scope::Scope;
@@ -404,11 +406,17 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             )
             .await
             .map_err(|e| internal(&e))?;
-        let Some(id) = inserted else {
+        let id = match inserted {
+            Insertion::Created(id) => id,
+            Insertion::QuotaExceeded => return Err(Refusal::DepositQuotaExceeded.into()),
             // A concurrent request with the same key committed first.
-            let existing =
-                self.existing_deposit(&scope, None, Some(&key)).await?.ok_or(Refusal::Internal)?;
-            return self.replay_deposit(existing, buyer_id, amount);
+            Insertion::KeyTaken => {
+                let existing = self
+                    .existing_deposit(&scope, None, Some(&key))
+                    .await?
+                    .ok_or(Refusal::Internal)?;
+                return self.replay_deposit(existing, buyer_id, amount);
+            }
         };
         let created =
             self.existing_deposit(&scope, Some(id), None).await?.ok_or(Refusal::Internal)?;
