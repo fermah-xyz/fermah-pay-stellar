@@ -86,6 +86,7 @@ Continue with the [quickstart](docs/quickstart/local.md).
 - [Local quickstart](docs/quickstart/local.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
 - [Self-hosting: chain observer](docs/self-hosting/observer.md)
+- [Quickstart: the whole system on one machine](docs/quickstart/dev-stack.md)
 - [Self-hosting: keys](docs/self-hosting/keys.md)
 - [Self-hosting: the treasury and its cold reserve](docs/self-hosting/treasury.md)
 - [Self-hosting: monitoring](docs/self-hosting/monitoring.md)

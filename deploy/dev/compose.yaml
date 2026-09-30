@@ -1,0 +1,143 @@
+# The whole system on one machine against Stellar testnet: PostgreSQL, the
+# gateway (gRPC and x402), the settlement worker and the chain observer, and
+# optionally Prometheus with the alert rules. For development, not a
+# production deployment. See docs/quickstart/dev-stack.md.
+#
+# Needs the testnet profile (`fermah-pay-stellar-testnet init-roles` and
+# `deploy-prepaid`, docs/quickstart/testnet.md) at PAY_STELLAR_TESTNET_PROFILE.
+name: fermah-pay-stellar-dev
+
+# Built once, by the `migrate` service; the others run the same image.
+x-app: &app
+  image: fermah-pay-stellar:dev
+  pull_policy: never
+  # Key files are readable by their owner only; run as that owner.
+  user: "${DEV_UID:-1000}"
+  restart: unless-stopped
+
+x-chain: &chain
+  PAY_STELLAR_NETWORK: stellar:testnet
+  PAY_STELLAR_RPC_URL: ${PAY_STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+  RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: pay_stellar_owner
+      POSTGRES_PASSWORD: dev-owner
+      POSTGRES_DB: pay_stellar
+    ports:
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pay_stellar_owner -d pay_stellar"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *app
+    pull_policy: build
+    build:
+      context: ../..
+      dockerfile: deploy/dev/Dockerfile
+    restart: "no"
+    command:
+      - fermah-pay-stellar-admin
+      - --database-url
+      - postgres://pay_stellar_owner:dev-owner@postgres:5432/pay_stellar
+      - migrate
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  roles:
+    image: postgres:17.6-bookworm
+    restart: "no"
+    environment:
+      PGPASSWORD: dev-owner
+    command:
+      ["psql", "-h", "postgres", "-U", "pay_stellar_owner", "-d", "pay_stellar",
+       "-v", "ON_ERROR_STOP=1", "-f", "/roles.sql"]
+    volumes:
+      - ./roles.sql:/roles.sql:ro
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  provision:
+    <<: *app
+    restart: "no"
+    entrypoint: ["provision.sh"]
+    environment:
+      ISSUER_DATABASE_URL: postgres://pay_stellar_admin:dev-pay_stellar_admin@postgres:5432/pay_stellar
+    volumes:
+      - ${PAY_STELLAR_TESTNET_PROFILE:?set PAY_STELLAR_TESTNET_PROFILE to the testnet profile directory}:/profile:ro
+      - state:/state
+    depends_on:
+      roles: { condition: service_completed_successfully }
+
+  gateway:
+    <<: *app
+    command: ["fermah-pay-stellar-gateway"]
+    environment:
+      <<: *chain
+      PAY_STELLAR_DATABASE_URL: postgres://pay_stellar_gateway:dev-pay_stellar_gateway@postgres:5432/pay_stellar
+      PAY_STELLAR_LISTEN_ADDR: 0.0.0.0:50051
+      PAY_STELLAR_X402_LISTEN_ADDR: 0.0.0.0:8402
+      PAY_STELLAR_METRICS_ADDR: 0.0.0.0:9101
+    ports:
+      - "127.0.0.1:50051:50051"
+      - "127.0.0.1:8402:8402"
+      - "127.0.0.1:9101:9101"
+    depends_on:
+      provision: { condition: service_completed_successfully }
+
+  worker:
+    <<: *app
+    command: ["fermah-pay-stellar-worker"]
+    environment:
+      <<: *chain
+      PAY_STELLAR_WORKER_DATABASE_URL: postgres://pay_stellar_settlement:dev-pay_stellar_settlement@postgres:5432/pay_stellar
+      PAY_STELLAR_METRICS_ADDR: 0.0.0.0:9102
+      # Not the accounts the testnet CI run sends from, so the two never
+      # race for a sequence number.
+      PAY_STELLAR_SOURCE_KEY_FILE: ${DEV_SOURCE_KEYS:-/profile/channel-2.secret,/profile/channel-3.secret}
+      PAY_STELLAR_FEE_SOURCE_KEY_FILE: /profile/fee-source.secret
+      PAY_STELLAR_OPERATOR_KEY_FILE: /profile/operator.secret
+      PAY_STELLAR_TREASURY_KEY_FILE: /profile/treasury.secret
+    ports:
+      - "127.0.0.1:9102:9102"
+    volumes:
+      - ${PAY_STELLAR_TESTNET_PROFILE}:/profile:ro
+    depends_on:
+      provision: { condition: service_completed_successfully }
+
+  observer:
+    <<: *app
+    command: ["fermah-pay-stellar-observer"]
+    environment:
+      <<: *chain
+      PAY_STELLAR_OBSERVER_DATABASE_URL: postgres://pay_stellar_watch:dev-pay_stellar_watch@postgres:5432/pay_stellar
+      PAY_STELLAR_METRICS_ADDR: 0.0.0.0:9103
+      # The shared testnet contract has a long history of other runs; start
+      # from now rather than report all of it.
+      PAY_STELLAR_OBSERVER_START: latest
+    ports:
+      - "127.0.0.1:9103:9103"
+    depends_on:
+      provision: { condition: service_completed_successfully }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: ["monitoring"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+volumes:
+  pgdata:
+  state:

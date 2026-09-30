@@ -41,3 +41,19 @@ contract-build:
 # network's per-transaction limits, using the built Wasm.
 contract-resources: contract-build
     PREPAID_WASM={{justfile_directory()}}/{{contract_out}}/fermah_pay_stellar_prepaid.wasm cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture
+
+# The whole system on this machine against testnet: PostgreSQL, gateway,
+# worker and observer (see docs/quickstart/dev-stack.md). Needs
+# PAY_STELLAR_TESTNET_PROFILE.
+dev-up *args:
+    DEV_UID=$(id -u) docker compose -f deploy/dev/compose.yaml {{args}} up -d --build
+
+dev-down:
+    docker compose -f deploy/dev/compose.yaml down
+
+dev-logs *args:
+    docker compose -f deploy/dev/compose.yaml logs -f {{args}}
+
+# The development API key the stack provisioned.
+dev-api-key:
+    docker compose -f deploy/dev/compose.yaml run --rm --no-deps --entrypoint jq provision -r .api_key /state/seller.json
