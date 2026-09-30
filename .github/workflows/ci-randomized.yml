@@ -1,13 +1,29 @@
-name: Nightly
+name: Randomized
 
-# Longer runs of the randomized suites than every change can afford: the
-# contract's property tests against their reference model, and the
-# settlement worker's seeded fault simulation, with new seeds every night.
-# A failure names its seed; `DST_SEED=<seed>` replays it.
+# Longer runs of the randomized suites than every pull request can afford:
+# the contract's property tests against their reference model, and the
+# settlement worker's seeded fault simulation, with new seeds each run. They
+# run when code they exercise lands on main, and on demand (for instance
+# before an upgrade); unchanged code gains little from more seeds. A failure
+# names its seed; `DST_SEED=<seed>` replays it.
 on:
-  schedule:
-    - cron: "41 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - contracts/**
+      - crates/stellar-chain/**
+      - crates/gateway/src/submission/**
+      - crates/gateway/src/worker/**
+      - crates/gateway/src/ledger/**
+      - crates/gateway/tests/worker.rs
+      - db/migrations/**
+      - .github/workflows/ci-randomized.yml
   workflow_dispatch:
+
+# A newer merge tests newer code: an older run still going is cancelled.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
