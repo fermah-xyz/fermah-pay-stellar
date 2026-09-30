@@ -5,7 +5,9 @@ treasury (see [the contract](../architecture/prepaid-contract.md#roles)).
 Each can be moved to a new account, for example after a key is exposed. A
 rotation is a contract call authorized by the admin and by the new account;
 the contract refuses it if two roles would share an account, and emits a
-`role` event.
+`role` event. Propose it with `fermah-pay-stellar-contract propose set-role`
+and have the admin's signers and the new account sign it; see
+[an admin that needs several signatures](keys.md#an-admin-that-needs-several-signatures).
 
 ## Operator or treasury
 
@@ -46,5 +48,7 @@ rotation as `role_changed`.
 ## Admin or seller
 
 Neither is part of the gateway's binding; rotate them on the contract only.
-The admin can replace the contract's code and every role, so keep it offline
-or in hardware and rotate it first if any other key is suspected.
+The admin can replace the contract's code and every role, so give it
+several signers (see [keys](keys.md#an-admin-that-needs-several-signatures)),
+keep those keys offline or in hardware, and rotate the admin first if any
+other key is suspected.

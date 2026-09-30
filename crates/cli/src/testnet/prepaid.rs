@@ -266,6 +266,78 @@ impl Context {
         )
     }
 
+    /// Gives the admin account a two-of-three policy: its master key and two
+    /// further signers weigh one each, and a contract call, a payment or a
+    /// change of signers needs two. The sponsor pays the fee and the
+    /// signers' reserves, so the admin still holds no XLM. Running it again
+    /// on an account that already has the policy changes nothing.
+    pub async fn admin_multisig(&self) -> anyhow::Result<()> {
+        use fermah_pay_stellar_chain::multisig::{
+            Policy, account_signers, set_signers_transaction,
+        };
+        self.rpc.verify_network(NETWORK).await?;
+        let sponsor = self.profile.key(SPONSOR)?;
+        let admin = self.profile.key("admin")?;
+        let cosigners = [self.profile.key("admin-signer-1")?, self.profile.key("admin-signer-2")?];
+        let policy = Policy {
+            signers: cosigners.iter().map(|key| (key.address(), 1)).collect(),
+            master_weight: 1,
+            low: 1,
+            medium: 2,
+            high: 2,
+        };
+        let matches = |current: &fermah_pay_stellar_chain::multisig::AccountSigners| {
+            (current.master_weight, current.low, current.medium, current.high)
+                == (policy.master_weight, policy.low, policy.medium, policy.high)
+                && policy.signers.iter().all(|signer| current.signers.contains(signer))
+        };
+        let before = account_signers(&self.rpc, &admin.address())
+            .await?
+            .context("the admin account does not exist")?;
+        let transaction_hash = if matches(&before) {
+            None
+        } else {
+            let sequence = self.sequence_of(&sponsor.address()).await?;
+            let valid_until = unix_now() + self.policy.validity.as_secs();
+            let tx = set_signers_transaction(
+                &sponsor.address(),
+                sequence + 1,
+                &admin.address(),
+                &policy,
+                self.policy.inclusion_fee,
+                valid_until,
+            );
+            let hash = transaction::transaction_hash(&tx, NETWORK)?;
+            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, &admin])?;
+            submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
+                .await?;
+            Some(hex_lower(&hash))
+        };
+        let after = account_signers(&self.rpc, &admin.address())
+            .await?
+            .context("the admin account does not exist")?;
+        ensure!(matches(&after), "the admin account's policy is not the requested one: {after:?}");
+        let admin_xlm =
+            balances(&self.rpc, &admin.address(), &usdc::circle_usdc(NETWORK)).await?.xlm_stroops;
+        ensure!(admin_xlm == Some(0), "the admin account holds XLM: {admin_xlm:?}");
+        evidence::write(
+            &self.evidence_dir,
+            "admin-multisig",
+            json!({
+                "criterion": "admin-multisig",
+                "expected": "the admin account needs two of its three keys for any contract call, payment or change of signers, and still holds no XLM",
+                "admin": admin.address().to_string(),
+                "transaction_hash": transaction_hash,
+                "observed": {
+                    "master_weight": after.master_weight,
+                    "signers": after.signers.iter().map(|(k, w)| json!({ "key": k.to_string(), "weight": w })).collect::<Vec<_>>(),
+                    "thresholds": { "low": after.low, "medium": after.medium, "high": after.high },
+                    "admin_xlm_stroops": admin_xlm,
+                },
+            }),
+        )
+    }
+
     /// Replaces the recorded contract's code with `wasm`, authorized by the
     /// admin, and checks on the ledger that the instance now runs it and that
     /// its totals are unchanged.
@@ -285,9 +357,9 @@ impl Context {
         let uploaded = submitter.submit(upload, auth).await?;
         let function = HostFunction::InvokeContract(pinned.upgrade_call(wasm_hash));
         let auth = self
-            .authorize(&submitter, &function, &[(&admin, pinned.upgrade_authorization(wasm_hash))])
+            .admin_authorization(&submitter, &function, pinned.upgrade_authorization(wasm_hash))
             .await?;
-        let upgraded = submitter.submit(function, auth).await?;
+        let upgraded = submitter.submit(function, vec![auth]).await?;
 
         let after = self.running_wasm(&pinned).await?;
         ensure!(after == wasm_hash, "the contract runs {} after the upgrade", hex_lower(&after));
@@ -313,6 +385,43 @@ impl Context {
                 },
             }),
         )
+    }
+
+    /// The admin's authorization of `function`, signed by the admin key and,
+    /// once the admin account needs two signatures (`admin-multisig`), by
+    /// its first co-signer as well.
+    async fn admin_authorization(
+        &self,
+        submitter: &Submitter<'_>,
+        function: &HostFunction,
+        tree: SorobanAuthorizedInvocation,
+    ) -> anyhow::Result<SorobanAuthorizationEntry> {
+        let admin = self.profile.key("admin")?;
+        let mut keys = vec![admin];
+        if self.profile.has_key("admin-signer-1") {
+            keys.push(self.profile.key("admin-signer-1")?);
+        }
+        let prepared = submitter
+            .prepare_authorizations(
+                function,
+                &[(keys[0].address(), tree)],
+                AUTH_VALIDITY_LEDGERS,
+                Credentials::AddressV2,
+            )
+            .await?;
+        let entry = prepared.entries.first().context("no authorization prepared")?;
+        let payload = fermah_pay_stellar_chain::authorization::signature_payload(
+            network_id(NETWORK),
+            &entry.credentials,
+            &entry.root_invocation,
+        )?;
+        let signatures =
+            keys.iter().map(|key| (*key.address().public_key(), key.sign_raw(&payload))).collect();
+        Ok(fermah_pay_stellar_chain::authorization::attach_signatures(
+            entry,
+            network_id(NETWORK),
+            signatures,
+        )?)
     }
 
     async fn running_wasm(&self, pinned: &PrepaidDeployment) -> anyhow::Result<[u8; 32]> {

@@ -56,6 +56,8 @@ lists the outer (fee-bump) and inner transaction hashes.
 | Record | Shows |
 |---|---|
 | [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation |
+| [`admin-multisig`](testnet/2026-09-30T041524-admin-multisig.json) | the admin account given two co-signers and a medium threshold of two: any two of its three keys, and never one, authorize an admin change; it still holds 0 XLM |
+| [`admin-pause-two-signatures`](testnet/2026-09-30T0416-admin-pause-two-signatures.json), [`admin-unpause-two-signatures`](testnet/2026-09-30T0416-admin-unpause-two-signatures.json) | a pause signed by the two co-signers and an unpause signed by the master key and one co-signer, each proposed, signed on its own and submitted with `fermah-pay-stellar-contract`; the same proposal with one signature was refused for missing weight before anything was sent |
 | [`prepaid-upgrade`](testnet/2026-09-29T143109-prepaid-upgrade.json) | the admin replaces the contract's code in place (Wasm `02d80b2f…` to `78e874a9…`, which announces pauses and limit changes): same contract address, totals unchanged; the running code hash equals the Wasm built in CI from the same source |
 | [`buyers-funded-100`](testnet/2026-09-29T045256-buyers-funded-100.json) | 100 buyers holding 0 XLM with sponsored reserves, each topped up with Circle USDC |
 | [`deposits-1-100`](testnet/2026-09-29T050720-deposits-1-100.json) | 100 deposits: USDC moves from each buyer to the separate treasury and the ledger credits the buyer's account; the buyer only signs its authorization entry, pays no fee and holds 0 XLM before and after |

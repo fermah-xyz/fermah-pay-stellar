@@ -1,0 +1,27 @@
+{
+  "admin": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+  "criterion": "admin-multisig",
+  "expected": "the admin account needs two of its three keys for any contract call, payment or change of signers, and still holds no XLM",
+  "network": "stellar:testnet",
+  "observed": {
+    "admin_xlm_stroops": 0,
+    "master_weight": 1,
+    "signers": [
+      {
+        "key": "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW",
+        "weight": 1
+      },
+      {
+        "key": "GBF6WBNCWSNXFEIXDRBOWL4IATLTS5EYICIXTT4GFOKJWSIM2ZMLINUI",
+        "weight": 1
+      }
+    ],
+    "thresholds": {
+      "high": 2,
+      "low": 1,
+      "medium": 2
+    }
+  },
+  "recorded_at": "2026-09-30T04:15:24.184361716Z",
+  "transaction_hash": "ccff32aa4cee96f3143506600497695e143ede3859aa23d41c824935cd0ef97e"
+}

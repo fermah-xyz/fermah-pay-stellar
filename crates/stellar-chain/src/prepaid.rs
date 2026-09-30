@@ -42,17 +42,75 @@ pub struct Roles {
     pub usdc: [u8; 32],
 }
 
-/// Constructor arguments, in the contract's order: roles, USDC contract and
-/// the `Limits` struct, which encodes as a map keyed by field name.
-#[must_use]
-pub fn constructor_args(roles: &Roles, min_deposit: i128, max_charge: i128) -> Vec<ScVal> {
-    let limits = ScVal::Map(Some(ScMap(
+/// The `Limits` struct, which encodes as a map keyed by field name.
+fn limits_val(min_deposit: i128, max_charge: i128) -> ScVal {
+    ScVal::Map(Some(ScMap(
         VecM::try_from(vec![
             ScMapEntry { key: symbol_val("max_charge"), val: i128_val(max_charge) },
             ScMapEntry { key: symbol_val("min_deposit"), val: i128_val(min_deposit) },
         ])
         .expect("invariant: two entries fit a map"),
-    )));
+    )))
+}
+
+/// A change only the admin may make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminAction {
+    Pause,
+    Unpause,
+    SetLimits {
+        min_deposit: i128,
+        max_charge: i128,
+    },
+    /// Replaces the contract's code with the uploaded Wasm of this hash.
+    Upgrade {
+        wasm_hash: [u8; 32],
+    },
+    /// Moves a role to `holder`, who must authorize it as well.
+    SetRole {
+        role: Role,
+        holder: AccountAddress,
+    },
+}
+
+impl AdminAction {
+    #[must_use]
+    pub fn call(&self, contract: [u8; 32]) -> InvokeContractArgs {
+        match self {
+            Self::Pause => call(contract, "pause", vec![]),
+            Self::Unpause => call(contract, "unpause", vec![]),
+            Self::SetLimits { min_deposit, max_charge } => {
+                call(contract, "set_limits", vec![limits_val(*min_deposit, *max_charge)])
+            }
+            Self::Upgrade { wasm_hash } => call(contract, "upgrade", vec![bytes_val(wasm_hash)]),
+            Self::SetRole { role, holder } => {
+                call(contract, &format!("set_{}", role.token()), vec![account_val(holder)])
+            }
+        }
+    }
+
+    /// The accounts that must authorize the call, and what each signs: the
+    /// admin always; for a role change, the new holder too.
+    #[must_use]
+    pub fn authorizations(
+        &self,
+        contract: [u8; 32],
+        admin: &AccountAddress,
+    ) -> Vec<(AccountAddress, SorobanAuthorizedInvocation)> {
+        let tree = invocation(self.call(contract), vec![]);
+        let mut needed = vec![(admin.clone(), tree.clone())];
+        if let Self::SetRole { holder, .. } = self {
+            needed.push((holder.clone(), tree));
+        }
+        needed
+    }
+}
+
+/// Constructor arguments, in the contract's order: roles, USDC contract and
+/// limits.
+#[must_use]
+pub fn constructor_args(roles: &Roles, min_deposit: i128, max_charge: i128) -> Vec<ScVal> {
+    let limits = limits_val(min_deposit, max_charge);
     vec![
         account_val(&roles.admin),
         account_val(&roles.operator),

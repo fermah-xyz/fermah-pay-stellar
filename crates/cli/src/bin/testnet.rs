@@ -46,6 +46,9 @@ enum Command {
     /// funded by Friendbot; admin, operator, seller, treasury and USDC reserve
     /// sponsored with zero XLM.
     InitRoles,
+    /// Require two of the admin account's three keys (its own and two
+    /// co-signers kept in the profile) for anything it authorizes
+    AdminMultisig,
     /// Replace the recorded contract's code with WASM in place, authorized by
     /// the admin; balances and totals are kept
     UpgradePrepaid {
@@ -167,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
     };
     match cli.command {
         Command::InitRoles => context()?.init_roles().await?,
+        Command::AdminMultisig => context()?.admin_multisig().await?,
         Command::UpgradePrepaid { wasm } => {
             let code =
                 std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;

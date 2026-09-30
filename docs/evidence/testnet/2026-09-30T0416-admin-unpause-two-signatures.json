@@ -1,0 +1,42 @@
+{
+  "criterion": "admin-multisig-unpause",
+  "network": "stellar:testnet",
+  "expected": "an admin change runs only with two of the admin account's three keys; the proposal below carries the signatures that authorized it",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "summary": "call unpause on CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV with ",
+  "transaction_hash": "0c6a0a9c354246fc37bebcf6d16741389615dac358a92155888790341b7361af",
+  "ledger": 4943634,
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/0c6a0a9c354246fc37bebcf6d16741389615dac358a92155888790341b7361af",
+  "signers": [
+    {
+      "account": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+      "signed_by": [
+        "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+        "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW"
+      ]
+    }
+  ],
+  "proposal": {
+    "network": "stellar:testnet",
+    "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+    "summary": "call unpause on CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV with ",
+    "function": "AAAAAAAAAAHGVlM/jP8cBWvjDC3acf4IWQliyCaEt7+5lV52AiJJ0wAAAAd1bnBhdXNlAAAAAAA=",
+    "expiration_ledger": 4960913,
+    "authorizations": [
+      {
+        "account": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+        "entry": "AAAAAgAAAAAAAAAAWbNXNKmk1KoHMQZhNFakZM8H+uafHvOC4Jm+AxrBBw1B2kErU0OlSwBLspEAAAABAAAAAAAAAAHGVlM/jP8cBWvjDC3acf4IWQliyCaEt7+5lV52AiJJ0wAAAAd1bnBhdXNlAAAAAAAAAAAA",
+        "signatures": [
+          {
+            "signer": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+            "signature": "qQ1s8hRnT9N9JrmiNGK1qaN1NT9xqWE0nZ5btD3fXIqdKTBZ7QrqL+Klk+Z6F6f5I835Y0LHCGGoFGoNDlrhDA=="
+          },
+          {
+            "signer": "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW",
+            "signature": "bBmqIgtrFKO49xlP7SZCGWVg5AA3HNZy2vY75qYMxYfsyABwnqd2FKtStxUbXosxvUToGIdALnreLXPSpy+pDQ=="
+          }
+        ]
+      }
+    ]
+  }
+}

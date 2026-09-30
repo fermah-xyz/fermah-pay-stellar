@@ -35,3 +35,38 @@ A reference of the form `<service>://<key>` names a key in a key management serv
 Before building any transaction, the worker has each key sign a random payload and checks the signature against the account the key claims. At every later signature, the worker checks the signature again before it records or sends anything.
 
 A key that signs for another account, or a service that answers wrongly, is therefore refused before it can produce a transaction the network would reject. A signing failure leaves nothing recorded and nothing sent, and the next attempt starts afresh.
+
+## An admin that needs several signatures
+
+The admin authorizes pausing, limit changes, code upgrades and role rotations. No single key should be able to do any of these. A Stellar account can list extra signers with weights, and a contract's authorization of an account needs the account's medium threshold. So an admin account whose medium threshold is 2, with three keys of weight 1, needs any two of them.
+
+`fermah-pay-stellar-contract` makes an admin change in three steps. Each step may run on a different machine, and no signer needs another signer's key.
+
+```bash
+contract() { cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-contract -- "$@"; }
+NET="--network stellar:testnet --rpc-url https://soroban-testnet.stellar.org"
+
+# 1. Simulate the change and write the proposal (here: pause).
+contract propose $NET --contract C... --admin G... \
+  --source-key submitter.secret --fee-key fee-source.secret --out pause.json pause
+
+# 2. Each signer, on their own machine: shows the call and adds a signature.
+contract sign --proposal pause.json --key /path/to/signer.secret
+
+# 3. Check the signatures against the account's signers and threshold on
+#    the ledger, then send the change, fee-bumped.
+contract submit $NET --proposal pause.json \
+  --source-key submitter.secret --fee-key fee-source.secret
+```
+
+The available changes are:
+- `pause` and `unpause`;
+- `set-limits --min-deposit --max-charge`;
+- `upgrade --wasm-hash`;
+- `set-role --role --holder`. The new holder must sign too: name it with `sign --account`.
+
+`sign` recomputes what it signs from the proposal's call rather than trusting the proposal's summary. `submit` refuses a proposal whose signatures do not reach the medium threshold, naming the weight that is missing.
+
+A proposal is valid for the ledgers given to `propose --valid-for-ledgers` (a day by default). After that its authorizations expire and a new proposal is needed.
+
+To give an account signers and thresholds, submit a `SetOptions` transaction signed by keys meeting its current high threshold. Order the operations so that the signers are added before the thresholds are raised. On testnet, `fermah-pay-stellar-testnet admin-multisig` does this for the profile's admin, with a sponsor paying the signers' reserves.

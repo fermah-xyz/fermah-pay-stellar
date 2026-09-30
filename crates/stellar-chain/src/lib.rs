@@ -10,6 +10,7 @@ pub mod authorization;
 pub mod deploy;
 pub mod friendbot;
 pub mod keys;
+pub mod multisig;
 pub mod onboarding;
 pub mod payments;
 pub mod prepaid;

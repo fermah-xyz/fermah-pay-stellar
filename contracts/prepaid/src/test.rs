@@ -1123,6 +1123,127 @@ fn no_args(w: &World) -> soroban_sdk::Vec<Val> {
     soroban_sdk::Vec::new(&w.env)
 }
 
+/// Gives `party`'s account two co-signers of weight one next to its master
+/// key, and a medium threshold of two: any two of the three keys authorize.
+fn make_two_of_three(w: &World, party: &Party, cosigners: &[&SecretKey; 2]) {
+    let mut signers: std::vec::Vec<xdr::Signer> = cosigners
+        .iter()
+        .map(|key| xdr::Signer {
+            key: xdr::SignerKey::Ed25519(xdr::Uint256(*key.address().public_key())),
+            weight: 1,
+        })
+        .collect();
+    signers.sort_by(|a, b| a.key.cmp(&b.key));
+    let account_key = Rc::new(xdr::LedgerKey::Account(xdr::LedgerKeyAccount {
+        account_id: account_xdr_id(&party.key),
+    }));
+    let account = Rc::new(xdr::LedgerEntry {
+        last_modified_ledger_seq: 0,
+        data: xdr::LedgerEntryData::Account(xdr::AccountEntry {
+            account_id: account_xdr_id(&party.key),
+            balance: 100 * 10_000_000,
+            seq_num: xdr::SequenceNumber(0),
+            num_sub_entries: 3,
+            inflation_dest: None,
+            flags: 0,
+            home_domain: xdr::String32::default(),
+            thresholds: xdr::Thresholds([1, 1, 2, 2]),
+            signers: signers.try_into().unwrap(),
+            ext: xdr::AccountEntryExt::V0,
+        }),
+        ext: xdr::LedgerEntryExt::V0,
+    });
+    w.env.host().add_ledger_entry(&account_key, &account, None).unwrap();
+}
+
+/// `account`'s authorization of `call`, carrying the signatures of `keys`.
+fn cosigned(
+    w: &World,
+    account: &Party,
+    keys: &[&SecretKey],
+    call: xdr::InvokeContractArgs,
+) -> xdr::SorobanAuthorizationEntry {
+    let nonce = w.nonce.get();
+    w.nonce.set(nonce + 1);
+    let entry = xdr::SorobanAuthorizationEntry {
+        credentials: xdr::SorobanCredentials::AddressV2(xdr::SorobanAddressCredentials {
+            address: xdr::ScAddress::Account(account_xdr_id(&account.key)),
+            nonce,
+            signature_expiration_ledger: w.env.ledger().sequence() + 100,
+            signature: xdr::ScVal::Void,
+        }),
+        root_invocation: xdr::SorobanAuthorizedInvocation {
+            function: xdr::SorobanAuthorizedFunction::ContractFn(call),
+            sub_invocations: xdr::VecM::default(),
+        },
+    };
+    let network = w.env.ledger().network_id().to_array();
+    let payload = fermah_pay_stellar_chain::authorization::signature_payload(
+        network,
+        &entry.credentials,
+        &entry.root_invocation,
+    )
+    .unwrap();
+    let signatures =
+        keys.iter().map(|key| (*key.address().public_key(), key.sign_raw(&payload))).collect();
+    fermah_pay_stellar_chain::authorization::attach_signatures(&entry, network, signatures).unwrap()
+}
+
+/// Invokes the call an operator's tool builds for `action`, with `auths`.
+fn run_action(
+    w: &World,
+    action: &fermah_pay_stellar_chain::prepaid::AdminAction,
+    auths: &[xdr::SorobanAuthorizationEntry],
+) -> Result<(), soroban_sdk::Error> {
+    let call = action.call(contract_bytes(&w.contract));
+    let function = std::string::String::from_utf8(call.function_name.0.to_vec()).unwrap();
+    let args = soroban_sdk::Vec::from_iter(
+        &w.env,
+        call.args.iter().map(|arg| {
+            <Val as soroban_sdk::TryFromVal<Env, xdr::ScVal>>::try_from_val(&w.env, arg).unwrap()
+        }),
+    );
+    w.invoke(&function, args, auths)
+}
+
+/// The contract's admin actions, built by the operator's proposal tool, run
+/// only with two of a two-of-three admin's keys.
+#[test]
+fn test_a_two_of_three_admin_acts_with_two_signatures_and_not_one() {
+    use fermah_pay_stellar_chain::prepaid::{AdminAction, Role};
+    let w = world();
+    let (first, second) = (SecretKey::generate().unwrap(), SecretKey::generate().unwrap());
+    make_two_of_three(&w, &w.admin, &[&first, &second]);
+    let contract = contract_bytes(&w.contract);
+    let limits = AdminAction::SetLimits { min_deposit: 3 * MIN_DEPOSIT, max_charge: USDC };
+
+    // One co-signer weighs one: refused, and nothing changes.
+    let alone = cosigned(&w, &w.admin, &[&first], limits.call(contract));
+    assert!(run_action(&w, &limits, &[alone]).is_err());
+    assert_eq!(w.client().get_config().limits.min_deposit, MIN_DEPOSIT);
+    // The positive control: both co-signers.
+    let both = cosigned(&w, &w.admin, &[&first, &second], limits.call(contract));
+    run_action(&w, &limits, &[both]).unwrap();
+    assert_eq!(
+        w.client().get_config().limits,
+        Limits { min_deposit: 3 * MIN_DEPOSIT, max_charge: USDC }
+    );
+
+    // The master key and one co-signer pause.
+    let pause = AdminAction::Pause;
+    let master_and_one = cosigned(&w, &w.admin, &[&w.admin.key, &second], pause.call(contract));
+    run_action(&w, &pause, &[master_and_one]).unwrap();
+    assert!(w.client().get_config().paused);
+
+    // A role change needs the admin's two signatures and the new holder's.
+    let successor = w.party(0);
+    let rotate = AdminAction::SetRole { role: Role::Operator, holder: successor.key.address() };
+    let admin_auth = cosigned(&w, &w.admin, &[&first, &second], rotate.call(contract));
+    let holder_auth = cosigned(&w, &successor, &[&successor.key], rotate.call(contract));
+    run_action(&w, &rotate, &[admin_auth, holder_auth]).unwrap();
+    assert_eq!(w.client().get_config().operator, successor.address);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #117)")]
 fn test_construction_with_one_address_in_two_roles_is_refused() {
