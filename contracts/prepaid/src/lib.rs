@@ -27,12 +27,18 @@
 //! ledger too, so a replay is refused either way. The record also answers,
 //! for as long as it lives, what happened to a charge whose transaction's
 //! fate is unknown.
+//!
+//! Daily limits: once the admin sets them, a charge is refused if it would
+//! take more than `per_buyer` from one account, or more than `per_seller`
+//! across all accounts, in one UTC day of ledger time. The counts live in
+//! entries a charge already writes (the account, the instance), so the limit
+//! costs a batch no extra write.
 
 #![no_std]
 
 use soroban_sdk::{
-    Address, BytesN, ContractExecutable, Env, Symbol, Vec, contract, contracterror, contractevent,
-    contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, ContractExecutable, Env, Symbol, TryFromVal, Vec, contract, contracterror,
+    contractevent, contractimpl, contracttype, panic_with_error, symbol_short, token,
 };
 
 /// Largest number of charges one `charge_batch` call accepts. Each charge of
@@ -87,6 +93,8 @@ pub enum Error {
     DuplicateRole = 117,
     /// A charge's last ledger is further ahead than `MAX_CHARGE_WINDOW`.
     ChargeWindowTooLong = 118,
+    /// The charge would take the account or the seller past a daily limit.
+    ChargeAboveDailyLimit = 119,
 }
 
 #[contracttype]
@@ -123,6 +131,36 @@ pub struct Totals {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Account {
     pub balance: i128,
+    /// UTC day (ledger time / 86400) `charged` counts.
+    pub day: u64,
+    /// Charged from this account on `day`.
+    pub charged: i128,
+}
+
+/// An account as the first version of this contract stored it, before daily
+/// counts. It is read as an [`Account`] with nothing charged and written back
+/// in the new form the next time the account changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountV1 {
+    balance: i128,
+}
+
+/// The most that may be charged in one UTC day of ledger time, from one
+/// account and across the seller's accounts, in USDC base units.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DailyLimits {
+    pub per_buyer: i128,
+    pub per_seller: i128,
+}
+
+/// What the seller's accounts were charged on `day`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DayCount {
+    pub day: u64,
+    pub charged: i128,
 }
 
 /// One charge: the account owner, the seller's identifier for the charge,
@@ -144,6 +182,8 @@ pub enum Outcome {
     Duplicate = 3,
     Expired = 4,
     UnknownAccount = 5,
+    /// The charge would pass the account's or the seller's daily limit.
+    AboveDailyLimit = 6,
 }
 
 /// Per-charge result in an event: account owner, charge identifier, amount,
@@ -163,6 +203,10 @@ enum Key {
     RevenueWithdrawal(BytesN<32>),
     /// Temporary: a settled charge's outcome, by owner and charge identifier.
     Charge(Address, BytesN<32>),
+    /// Instance: the daily limits, absent until the admin sets them.
+    DailyLimits,
+    /// Instance: what the seller's accounts were charged today.
+    SellerDay,
 }
 
 #[contractevent(topics = ["deposit"], data_format = "vec")]
@@ -220,6 +264,14 @@ pub struct LimitsChanged {
     pub current: Limits,
 }
 
+/// The admin set the daily limits; `previous` is `None` the first time.
+#[contractevent(topics = ["daily"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DailyLimitsChanged {
+    pub previous: Option<DailyLimits>,
+    pub current: DailyLimits,
+}
+
 #[contractevent(topics = ["revenue"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevenueWithdrawn {
@@ -271,11 +323,8 @@ impl PrepaidLedger {
         }
 
         let account_key = Key::Account(owner.clone());
-        let mut account = env
-            .storage()
-            .persistent()
-            .get::<Key, Account>(&account_key)
-            .unwrap_or(Account { balance: 0 });
+        let mut account =
+            load_account(&env, &account_key).unwrap_or(Account { balance: 0, day: 0, charged: 0 });
         account.balance = checked_add(&env, account.balance, amount);
         let mut totals = totals(&env);
         totals.liabilities = checked_add(&env, totals.liabilities, amount);
@@ -294,7 +343,8 @@ impl PrepaidLedger {
         let config = active_config(&env);
         config.operator.require_auth();
         let mut totals = totals(&env);
-        let settled = settle(&env, &config, &mut totals, charge);
+        let mut day = Charging::load(&env);
+        let settled = settle(&env, &config, &mut totals, &mut day, charge);
         match settled.3 {
             Outcome::Charged => {}
             Outcome::InsufficientBalance => panic_with_error!(&env, Error::InsufficientBalance),
@@ -302,8 +352,10 @@ impl PrepaidLedger {
             Outcome::Duplicate => panic_with_error!(&env, Error::DuplicateCharge),
             Outcome::Expired => panic_with_error!(&env, Error::ChargeExpired),
             Outcome::UnknownAccount => panic_with_error!(&env, Error::UnknownAccount),
+            Outcome::AboveDailyLimit => panic_with_error!(&env, Error::ChargeAboveDailyLimit),
         }
         env.storage().instance().set(&Key::Totals, &totals);
+        day.store(&env);
         extend_instance(&env);
         Charges { settled: Vec::from_array(&env, [settled]) }.publish(&env);
     }
@@ -321,14 +373,16 @@ impl PrepaidLedger {
             panic_with_error!(&env, Error::BatchTooLarge);
         }
         let mut totals = totals(&env);
+        let mut day = Charging::load(&env);
         let mut settled = Vec::new(&env);
         let mut outcomes = Vec::new(&env);
         for charge in charges.iter() {
-            let result = settle(&env, &config, &mut totals, charge);
+            let result = settle(&env, &config, &mut totals, &mut day, charge);
             outcomes.push_back(result.3);
             settled.push_back(result);
         }
         env.storage().instance().set(&Key::Totals, &totals);
+        day.store(&env);
         extend_instance(&env);
         Charges { settled }.publish(&env);
         outcomes
@@ -355,10 +409,7 @@ impl PrepaidLedger {
             panic_with_error!(&env, Error::WithdrawalAlreadyProcessed);
         }
         let account_key = Key::Account(owner.clone());
-        let mut account: Account = env
-            .storage()
-            .persistent()
-            .get(&account_key)
+        let mut account = load_account(&env, &account_key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::UnknownAccount));
         if account.balance < amount {
             panic_with_error!(&env, Error::InsufficientBalance);
@@ -409,14 +460,29 @@ impl PrepaidLedger {
     }
 
     pub fn get_balance(env: Env, owner: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get::<Key, Account>(&Key::Account(owner))
-            .map_or(0, |account| account.balance)
+        load_account(&env, &Key::Account(owner)).map_or(0, |account| account.balance)
     }
 
     pub fn get_account(env: Env, owner: Address) -> Option<Account> {
-        env.storage().persistent().get(&Key::Account(owner))
+        load_account(&env, &Key::Account(owner))
+    }
+
+    pub fn get_daily_limits(env: Env) -> Option<DailyLimits> {
+        env.storage().instance().get(&Key::DailyLimits)
+    }
+
+    /// Limits what one account, and all the seller's accounts together, may
+    /// be charged in a UTC day of ledger time. Both must be positive; a limit
+    /// set above anything charged in a day disables it in effect.
+    pub fn set_daily_limits(env: Env, limits: DailyLimits) {
+        config(&env).admin.require_auth();
+        if limits.per_buyer <= 0 || limits.per_seller <= 0 {
+            panic_with_error!(&env, Error::InvalidLimits);
+        }
+        let previous = env.storage().instance().get(&Key::DailyLimits);
+        env.storage().instance().set(&Key::DailyLimits, &limits);
+        extend_instance(&env);
+        DailyLimitsChanged { previous, current: limits }.publish(&env);
     }
 
     pub fn get_config(env: Env) -> Config {
@@ -480,7 +546,13 @@ impl PrepaidLedger {
     }
 }
 
-fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Settled {
+fn settle(
+    env: &Env,
+    config: &Config,
+    totals: &mut Totals,
+    day: &mut Charging,
+    charge: Charge,
+) -> Settled {
     let Charge(owner, charge_id, amount, last_ledger) = charge;
     // A malformed charge is not a refusal a retry could change: reject the
     // whole call.
@@ -499,22 +571,76 @@ fn settle(env: &Env, config: &Config, totals: &mut Totals, charge: Charge) -> Se
         return Settled(owner, charge_id, amount, Outcome::Expired);
     }
     let key = Key::Account(owner.clone());
-    let outcome = match env.storage().persistent().get::<Key, Account>(&key) {
+    let outcome = match load_account(env, &key) {
         None => Outcome::UnknownAccount,
         Some(_) if amount > config.limits.max_charge => Outcome::AboveLimit,
         Some(account) if amount > account.balance => Outcome::InsufficientBalance,
         Some(mut account) => {
-            account.balance -= amount;
-            totals.liabilities -= amount;
-            totals.revenue = checked_add(env, totals.revenue, amount);
-            put_persistent(env, &key, &account);
-            Outcome::Charged
+            let buyer_today = if account.day == day.today { account.charged } else { 0 };
+            if day.exceeds(env, buyer_today, amount) {
+                Outcome::AboveDailyLimit
+            } else {
+                account.balance -= amount;
+                account.day = day.today;
+                account.charged = checked_add(env, buyer_today, amount);
+                day.seller.charged = checked_add(env, day.seller.charged, amount);
+                totals.liabilities -= amount;
+                totals.revenue = checked_add(env, totals.revenue, amount);
+                put_persistent(env, &key, &account);
+                Outcome::Charged
+            }
         }
     };
     env.storage().temporary().set(&record, &outcome);
     let live_for = last_ledger - now + CHARGE_RECORD_GRACE;
     env.storage().temporary().extend_ttl(&record, live_for, live_for);
     Settled(owner, charge_id, amount, outcome)
+}
+
+/// The daily limits and what the seller's accounts were charged today, for
+/// the charges of one call.
+struct Charging {
+    limits: Option<DailyLimits>,
+    today: u64,
+    seller: DayCount,
+}
+
+impl Charging {
+    fn load(env: &Env) -> Self {
+        let today = env.ledger().timestamp() / 86_400;
+        let seller = env
+            .storage()
+            .instance()
+            .get::<Key, DayCount>(&Key::SellerDay)
+            .filter(|count| count.day == today)
+            .unwrap_or(DayCount { day: today, charged: 0 });
+        Self { limits: env.storage().instance().get(&Key::DailyLimits), today, seller }
+    }
+
+    /// Whether charging `amount` to an account charged `buyer_today` today
+    /// would pass either limit.
+    fn exceeds(&self, env: &Env, buyer_today: i128, amount: i128) -> bool {
+        self.limits.as_ref().is_some_and(|limits| {
+            checked_add(env, buyer_today, amount) > limits.per_buyer
+                || checked_add(env, self.seller.charged, amount) > limits.per_seller
+        })
+    }
+
+    fn store(&self, env: &Env) {
+        env.storage().instance().set(&Key::SellerDay, &self.seller);
+    }
+}
+
+/// The account stored under `key`, in either layout this contract has
+/// written.
+fn load_account(env: &Env, key: &Key) -> Option<Account> {
+    let stored: soroban_sdk::Val = env.storage().persistent().get(key)?;
+    if let Ok(account) = Account::try_from_val(env, &stored) {
+        return Some(account);
+    }
+    let legacy = AccountV1::try_from_val(env, &stored)
+        .unwrap_or_else(|_| panic!("an account entry in neither known layout"));
+    Some(Account { balance: legacy.balance, day: 0, charged: 0 })
 }
 
 fn set_paused(env: &Env, paused: bool) {

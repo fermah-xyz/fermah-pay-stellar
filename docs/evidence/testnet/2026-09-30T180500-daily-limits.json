@@ -1,0 +1,43 @@
+{
+  "criterion": "daily-limits",
+  "expected": "the upgraded contract refuses a charge that would take an account past its daily limit, as AboveDailyLimit, without debiting it; the upgrade and every limit change are authorized by two of the admin's three keys",
+  "network": "stellar:testnet",
+  "contract": "CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV",
+  "wasm_sha256": "02e59475f67a8e9204c2aa6029051ff9ba70254ef69be76b97230d6cedfb3d95",
+  "upload": {
+    "transaction_hash": "4072859251c487ac7b5efe6d9933341c2d2a8cea7b8dea66e98d6bed03841876",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/4072859251c487ac7b5efe6d9933341c2d2a8cea7b8dea66e98d6bed03841876"
+  },
+  "upgrade": {
+    "transaction_hash": "a041b8746d2eae126d6965b0ce35cc1685ba2fcf05800cbc73045fb9878b3a39",
+    "ledger": 4953517,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/a041b8746d2eae126d6965b0ce35cc1685ba2fcf05800cbc73045fb9878b3a39"
+  },
+  "demo_limits": {
+    "per_buyer": 30000,
+    "per_seller": 1000000000,
+    "transaction_hash": "190d35f78bb0dabe5ef9d80f36bbb7161c5ee05a0ea221217d1b7d8024982fce",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/190d35f78bb0dabe5ef9d80f36bbb7161c5ee05a0ea221217d1b7d8024982fce"
+  },
+  "charges": [
+    {
+      "amount": 20000,
+      "outcome": "Charged",
+      "transaction_hash": "72e836783904c4150d26f105b24c2ef22f7a320347b0c070b658f7ab78beb0a3",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/72e836783904c4150d26f105b24c2ef22f7a320347b0c070b658f7ab78beb0a3"
+    },
+    {
+      "amount": 20000,
+      "outcome": "AboveDailyLimit",
+      "transaction_hash": "acd9853cac669d09458e74e9a5faa3bce88704cdcc93267d79ddf5a80e91609c",
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/acd9853cac669d09458e74e9a5faa3bce88704cdcc93267d79ddf5a80e91609c"
+    }
+  ],
+  "final_limits": {
+    "per_buyer": 2000000,
+    "per_seller": 1000000000,
+    "transaction_hash": "05bde84544f7aeddb15a0978fc9557a840e80fea16e192271a1e04c552fd6ab8",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/05bde84544f7aeddb15a0978fc9557a840e80fea16e192271a1e04c552fd6ab8"
+  },
+  "recorded_at": "2026-09-30T18:05:00Z"
+}

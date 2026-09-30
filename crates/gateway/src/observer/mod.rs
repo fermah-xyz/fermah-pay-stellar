@@ -347,6 +347,19 @@ fn describe(record: &ContractEventRecord) -> Described {
                              "max_charge": current.max_charge.to_string() },
             }),
         ),
+        LedgerEvent::DailyLimitsChanged { previous, current } => {
+            let limits = |l: &fermah_pay_stellar_chain::prepaid::DailyLimits| {
+                json!({ "per_buyer": l.per_buyer.to_string(),
+                        "per_seller": l.per_seller.to_string() })
+            };
+            (
+                "daily_limits",
+                None,
+                None,
+                None,
+                json!({ "previous": previous.as_ref().map(limits), "current": limits(current) }),
+            )
+        }
     };
     Described { kind, owner, amount, reference, payload, event: Some(event) }
 }
@@ -745,7 +758,11 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 }
                 // Only the admin can pause or change limits; each is reported
                 // so an unexpected one is noticed.
-                Some(LedgerEvent::PauseChanged { .. } | LedgerEvent::LimitsChanged { .. }) => {
+                Some(
+                    LedgerEvent::PauseChanged { .. }
+                    | LedgerEvent::LimitsChanged { .. }
+                    | LedgerEvent::DailyLimitsChanged { .. },
+                ) => {
                     let verdict = Verdict::Finding(Finding::new(
                         FindingKind::AdminChange,
                         Severity::Warning,

@@ -87,7 +87,8 @@ contract submit $NET --proposal pause.json \
 The available changes are:
 - `pause` and `unpause`;
 - `set-limits --min-deposit --max-charge`;
-- `upgrade --wasm-hash`;
+- `set-daily-limits --per-buyer --per-seller` ([daily limits](../architecture/prepaid-contract.md#daily-limits));
+- `upgrade --wasm-hash`, after `contract upload --wasm <file>` has put the code on the network and printed its hash;
 - `set-role --role --holder`. The new holder must sign too: name it with `sign --account`.
 
 `sign` recomputes what it signs from the proposal's call rather than trusting the proposal's summary. `submit` refuses a proposal whose signatures do not reach the medium threshold, naming the weight that is missing.

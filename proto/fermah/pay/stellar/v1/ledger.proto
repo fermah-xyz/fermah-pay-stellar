@@ -148,7 +148,7 @@ message Charge {
   reserved "sequence";
   ChargeState state = 5;
   // The outcome token once settled: `charged`, `insufficient_balance`,
-  // `above_limit` or `expired`; for a quarantined charge, `duplicate` or
+  // `above_limit`, `above_daily_limit` or `expired`; for a quarantined charge, `duplicate` or
   // `unknown_account` when the contract answered so.
   string outcome = 6;
   string transaction_hash = 7;

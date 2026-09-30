@@ -767,6 +767,19 @@ async fn test_deposit_the_gateway_closed_but_the_contract_credited_is_critical(
     assert_eq!(w.findings().await, [pair("deposit_outcome_mismatch", "critical")]);
 }
 
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_charge_refused_past_the_daily_limit_is_matched_with_its_refusal(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 100).await;
+    w.charge(alice, [1; 32], 30, "refused", Some("above_daily_limit")).await;
+    w.chain.emit(1010, charges_event(&[(&account(1), [1; 32], 30, 6)]));
+    w.observer().observe().await.unwrap();
+    assert_eq!(w.findings().await, []);
+}
+
 // ---- withdrawals ----------------------------------------------------------
 
 #[sqlx::test(migrations = "../../db/migrations")]

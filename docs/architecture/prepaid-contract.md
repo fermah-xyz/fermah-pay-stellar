@@ -38,7 +38,7 @@ restored or the treasury is rotated to another account.
 | Treasury | its side of `withdraw` and `withdraw_revenue` |
 | Operator | `charge`, `charge_batch` |
 | Seller | its side of `withdraw_revenue` |
-| Admin | `pause`, `unpause`, `set_limits`, `upgrade`, and every role rotation |
+| Admin | `pause`, `unpause`, `set_limits`, `set_daily_limits`, `upgrade`, and every role rotation |
 
 The constructor, which runs atomically with deployment, sets the four roles
 and the USDC contract, and refuses to run unless admin, operator, seller and
@@ -102,6 +102,7 @@ shortly after the charge's last ledger:
 | `Charged` | balance debited, revenue credited | yes |
 | `InsufficientBalance` | refused | yes |
 | `AboveLimit` | above the per-charge limit | yes |
+| `AboveDailyLimit` | would take the account or the seller past a [daily limit](#daily-limits) | yes |
 | `UnknownAccount` | no such account | yes |
 | `Duplicate` | the identifier is already recorded | no |
 | `Expired` | past its last ledger | no |
@@ -123,6 +124,14 @@ the window) reverts the whole call. `charge` settles a single charge and
 reverts on any refusal, recording nothing. Every call emits one `charges`
 event listing each entry (owner, identifier, amount, outcome).
 
+### Daily limits
+
+Once the admin calls `set_daily_limits({per_buyer, per_seller})`, a charge is refused as `AboveDailyLimit` if it would take one account's charges, or all accounts' charges together, past that limit within one UTC day of ledger time (`timestamp / 86400`). Both limits must be positive; until the first call there are none, so a contract upgraded from a version without them behaves as before. `get_daily_limits` returns them. Only `Charged` entries count, and the counts start again each day.
+
+The limits are enforced by the contract whatever the gateway admits. They bound what a leaked operator key can move in a day, and what one seller deployment can charge before a person looks.
+
+Each account's count lives in its own entry, which a charge already writes: `Account {balance, day, charged}`. The seller's count lives in the contract instance. A full batch therefore writes no more entries than before. An account stored by an earlier version (`{balance}` only) is read as having nothing charged, and is written in the new layout the next time it changes.
+
 ### Batch size
 
 Stellar limits a transaction to 200 ledger-entry writes and 400 footprint
@@ -137,10 +146,10 @@ Measured in the Soroban VM with the built Wasm, one `charge_batch` call for
 
 | Resource | All charged | Mixed (20 refused, 19 duplicates) | Per-transaction limit |
 |---|---:|---:|---:|
-| CPU instructions | 62.6 M | 48.8 M | 400 M |
-| Memory | 18.4 MB | 14.5 MB | 40 MB |
+| CPU instructions | 64.2 M | 50.1 M | 400 M |
+| Memory | 18.5 MB | 14.6 MB | 40 MB |
 | Ledger-entry writes | 198 | 140 | 200 |
-| Bytes written | 35.3 KB | 25.1 KB | 132 KB |
+| Bytes written | 41.2 KB | 28.7 KB | 132 KB |
 | Event bytes | 12,232 | 12,232 | 16,384 |
 
 These are local VM measurements, reproduced by `just contract-resources` and
@@ -161,6 +170,7 @@ them:
 | `set_admin`, `set_operator`, `set_seller`, `set_treasury` | `"role"`, role name | `[previous, current]` |
 | `pause`, `unpause` | `"pause"` | `paused` after the call, even when it did not change |
 | `set_limits` | `"limits"` | `[previous, current]`, each `{max_charge, min_deposit}` |
+| `set_daily_limits` | `"daily"` | `[previous, current]`, each `{per_buyer, per_seller}`; `previous` is void the first time |
 | `upgrade` | `"executable_update"`, previous code, new code (system event) | an empty vector |
 
 `upgrade` publishes no event of its own: the Soroban host emits a system
@@ -196,6 +206,7 @@ this contract.
 | 116 | `Overflow` |
 | 117 | `DuplicateRole` |
 | 118 | `ChargeWindowTooLong` |
+| 119 | `ChargeAboveDailyLimit` |
 
 ## Storage lifetime
 

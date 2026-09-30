@@ -90,7 +90,7 @@ database holds. A charge not settled by its last ledger is refused as
 | `ADMITTED` | no | debited from the available balance; waiting for a batch |
 | `SUBMITTED` | no | in a batch sent to the network |
 | `CHARGED` | yes | the contract debited the on-chain balance |
-| `REFUSED` | yes | nothing was debited: the contract refused it (`insufficient_balance`, `above_limit`) or it expired (`expired`); the amount is back in the available balance |
+| `REFUSED` | yes | nothing was debited: the contract refused it (`insufficient_balance`, `above_limit`, or `above_daily_limit` when the charge would pass the buyer's or the seller's daily limit on the contract) or it expired (`expired`); the amount is back in the available balance |
 | `QUARANTINED` | no | the contract's answer contradicts the gateway's records (`unknown_account`), or the outcome could not be established from the contract's records; the amount stays debited until an operator resolves it from on-chain evidence to `CHARGED`, `REFUSED` or back to `ADMITTED` |
 
 `GetBalance(buyer_id)` returns `available`, what new charges may still

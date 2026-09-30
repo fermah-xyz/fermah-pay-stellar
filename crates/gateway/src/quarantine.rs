@@ -210,7 +210,10 @@ pub async fn prove_from_transaction<C: Chain>(
         });
     }
     match entry.outcome {
-        Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => Ok((
+        Outcome::Charged
+        | Outcome::InsufficientBalance
+        | Outcome::AboveLimit
+        | Outcome::AboveDailyLimit => Ok((
             Resolution::Settled(entry.outcome),
             format!(
                 "transaction {shown} (ledger {}) settled charge {shown_charge} as {}",
@@ -253,9 +256,10 @@ pub async fn prove_from_record<C: Chain>(
             let outcome = charge_record(&record.data)
                 .ok_or(QuarantineError::Corrupt("charge record does not decode"))?;
             match outcome {
-                Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => {
-                    Resolution::Settled(outcome)
-                }
+                Outcome::Charged
+                | Outcome::InsufficientBalance
+                | Outcome::AboveLimit
+                | Outcome::AboveDailyLimit => Resolution::Settled(outcome),
                 other => {
                     return Err(QuarantineError::RecordUnresolvable {
                         charge: shown_charge,
@@ -376,7 +380,10 @@ pub async fn prove_from_events<L: EventLog>(
         });
     }
     match found.entry.outcome {
-        Outcome::Charged | Outcome::InsufficientBalance | Outcome::AboveLimit => Ok((
+        Outcome::Charged
+        | Outcome::InsufficientBalance
+        | Outcome::AboveLimit
+        | Outcome::AboveDailyLimit => Ok((
             Resolution::Settled(found.entry.outcome),
             format!(
                 "{searched}: event {} of transaction {hash} (ledger {}) settled charge {shown_charge} as {}",

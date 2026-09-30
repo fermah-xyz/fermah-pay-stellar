@@ -1459,6 +1459,155 @@ fn test_full_upgrade_by_admin_keeps_balances() {
     assert_eq!(w.client().get_balance(&w.owner_address(1)), 10 * USDC);
 }
 
+// ---- daily limits -----------------------------------------------------------
+
+fn set_daily(w: &World, per_buyer: i128, per_seller: i128) -> Result<(), soroban_sdk::Error> {
+    admin_call(
+        w,
+        &w.admin,
+        "set_daily_limits",
+        (DailyLimits { per_buyer, per_seller },).into_val(&w.env),
+    )
+}
+
+fn next_day(w: &World) {
+    let now = w.env.ledger().timestamp();
+    w.env.ledger().set_timestamp(now + 86_400);
+}
+
+#[test]
+fn test_without_daily_limits_nothing_is_counted_against_a_charge() {
+    let w = world();
+    funded(&w, 1, 3 * MAX_CHARGE);
+    let outcomes = w
+        .charge_batch(&[
+            w.charge(1, 1, MAX_CHARGE),
+            w.charge(1, 2, MAX_CHARGE),
+            w.charge(1, 3, MAX_CHARGE),
+        ])
+        .unwrap();
+    assert!(outcomes.iter().all(|o| o == Outcome::Charged));
+    assert_eq!(w.client().get_daily_limits(), None);
+}
+
+#[test]
+fn test_a_buyer_past_its_daily_limit_is_refused_until_the_next_day() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    set_daily(&w, 3 * USDC, 100 * USDC).unwrap();
+    let outcomes = w
+        .charge_batch(&[w.charge(1, 1, 2 * USDC), w.charge(1, 2, 2 * USDC), w.charge(1, 3, USDC)])
+        .unwrap();
+    assert_eq!(
+        (outcomes, w.balance(1)),
+        (
+            soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::AboveDailyLimit, Outcome::Charged],
+            7 * USDC
+        )
+    );
+    // The refusal is recorded: the same charge is a duplicate, not a debit.
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 2, 2 * USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Duplicate]
+    );
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 4, USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::AboveDailyLimit]
+    );
+    next_day(&w);
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 5, 3 * USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Charged]
+    );
+    assert_eq!(w.balance(1), 4 * USDC);
+}
+
+#[test]
+fn test_the_seller_daily_limit_counts_every_account_across_calls() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    funded(&w, 2, 10 * USDC);
+    set_daily(&w, 10 * USDC, 5 * USDC).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(1, 1, 2 * USDC), w.charge(2, 2, 2 * USDC)]).unwrap();
+    assert!(outcomes.iter().all(|o| o == Outcome::Charged));
+    let outcomes = w.charge_batch(&[w.charge(1, 3, 2 * USDC), w.charge(2, 4, USDC)]).unwrap();
+    assert_eq!(outcomes, soroban_sdk::vec![&w.env, Outcome::AboveDailyLimit, Outcome::Charged]);
+    let totals = w.client().get_totals();
+    assert_eq!(totals.revenue, 5 * USDC);
+    next_day(&w);
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 5, 2 * USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Charged]
+    );
+}
+
+#[test]
+fn test_a_single_charge_past_a_daily_limit_reverts_with_its_reason() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    set_daily(&w, USDC, 100 * USDC).unwrap();
+    let request = w.charge(1, 1, 2 * USDC);
+    let auth = w.signed(&w.operator, w.deployment().charge_authorization(&request));
+    let args: soroban_sdk::Vec<Val> = (w.contract_charge(&request),).into_val(&w.env);
+    assert_eq!(
+        w.invoke::<()>("charge", args, &[auth]),
+        Err(contract_error(Error::ChargeAboveDailyLimit))
+    );
+    assert_eq!(w.balance(1), 10 * USDC);
+}
+
+#[test]
+fn test_only_the_admin_sets_positive_daily_limits_and_each_change_is_announced() {
+    let w = world();
+    let limits = (DailyLimits { per_buyer: USDC, per_seller: USDC },).into_val(&w.env);
+    assert_eq!(admin_call(&w, &w.operator, "set_daily_limits", limits), Err(auth_failure()));
+    assert_eq!(set_daily(&w, 0, USDC), Err(contract_error(Error::InvalidLimits)));
+    assert_eq!(set_daily(&w, USDC, -1), Err(contract_error(Error::InvalidLimits)));
+    set_daily(&w, USDC, 2 * USDC).unwrap();
+    let last = w.env.events().all().events().last().unwrap().clone();
+    let expected = DailyLimitsChanged {
+        previous: None,
+        current: DailyLimits { per_buyer: USDC, per_seller: 2 * USDC },
+    };
+    assert_eq!(last, expected.to_xdr(&w.env, &w.contract));
+    // The gateway's decoder reads the event the contract really emits.
+    let xdr::ContractEventBody::V0(body) = &last.body;
+    assert_eq!(
+        fermah_pay_stellar_chain::prepaid::ledger_event(&body.topics, &body.data),
+        Some(fermah_pay_stellar_chain::prepaid::LedgerEvent::DailyLimitsChanged {
+            previous: None,
+            current: fermah_pay_stellar_chain::prepaid::DailyLimits {
+                per_buyer: USDC,
+                per_seller: 2 * USDC,
+            },
+        })
+    );
+    assert_eq!(
+        w.client().get_daily_limits(),
+        Some(DailyLimits { per_buyer: USDC, per_seller: 2 * USDC })
+    );
+}
+
+#[test]
+fn test_an_account_stored_before_daily_counts_is_read_and_charged() {
+    let w = world();
+    funded(&w, 1, 10 * USDC);
+    let owner = w.owner_address(1);
+    // As the first version of the contract wrote it.
+    w.env.as_contract(&w.contract, || {
+        w.env
+            .storage()
+            .persistent()
+            .set(&Key::Account(owner.clone()), &AccountV1 { balance: 10 * USDC });
+    });
+    assert_eq!(w.balance(1), 10 * USDC);
+    set_daily(&w, 3 * USDC, 100 * USDC).unwrap();
+    let outcomes = w.charge_batch(&[w.charge(1, 1, 2 * USDC), w.charge(1, 2, 2 * USDC)]).unwrap();
+    assert_eq!(outcomes, soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::AboveDailyLimit]);
+    let account = w.client().get_account(&owner).unwrap();
+    assert_eq!((account.balance, account.charged), (8 * USDC, 2 * USDC));
+}
+
 // ---- revenue ----------------------------------------------------------------
 
 fn withdraw_revenue(w: &World, amount: i128, id: u8) -> Result<(), soroban_sdk::Error> {

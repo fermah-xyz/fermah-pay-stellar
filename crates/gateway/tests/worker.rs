@@ -139,6 +139,8 @@ struct Net {
     /// The treasury's USDC as a trailing read reports it, when it differs
     /// from what it holds now.
     stale_treasury: Option<i128>,
+    /// Owners the contract's daily limit refuses today.
+    over_daily: HashSet<AccountAddress>,
     clock: ManualClock,
     /// The contract's events, and the oldest ledger the node retains.
     events: EventStream,
@@ -361,6 +363,7 @@ impl Net {
                             None => 5,
                             Some(_) if amount > MAX_CHARGE => 2,
                             Some(balance) if amount > *balance => 1,
+                            Some(_) if self.over_daily.contains(&owner) => 6,
                             Some(balance) => {
                                 *balance -= amount;
                                 0
@@ -963,6 +966,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             archived: HashSet::new(),
             entries_behind: 0,
             stale_treasury: None,
+            over_daily: HashSet::new(),
             clock: clock.clone(),
             events: EventStream::default(),
             oldest: 1,
@@ -3218,4 +3222,26 @@ async fn test_closing_a_withdrawal_locks_the_buyer_before_the_withdrawal(
     api.execute("ROLLBACK").await.unwrap();
     closing.await.unwrap().unwrap();
     assert_eq!(w.get_withdrawal(&unsigned.withdrawal_id).await.state(), WithdrawalState::Expired);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_charge_past_the_daily_limit_is_refused_and_returned(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let y = w.funded("y", 100).await;
+    w.stellar.with(|n| n.over_daily.insert(x.key.address()));
+    let refused = w.charge(&x, 30, "c-1").await;
+    let charged = w.charge(&y, 30, "c-2").await;
+    w.settle(&w.worker()).await;
+    let refused = w.get_charge(&refused.charge_id).await;
+    assert_eq!(
+        (refused.state(), refused.outcome.as_str()),
+        (ChargeState::Refused, "above_daily_limit")
+    );
+    assert_eq!(w.get_charge(&charged.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(w.stellar.account(&x.key.address()), Some(100));
 }
