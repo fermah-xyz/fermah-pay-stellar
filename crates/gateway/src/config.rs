@@ -47,6 +47,24 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS", default_value = "720")]
     pub deposit_authorization_ledgers: NonZeroU32,
 
+    /// New buyers a seller deployment may register in 24 hours.
+    #[arg(long, env = "PAY_STELLAR_MAX_NEW_BUYERS_PER_DAY", default_value = "1000")]
+    pub max_new_buyers_per_day: u32,
+
+    /// Deposits a buyer may prepare in 24 hours; each one the worker sends
+    /// costs the operator a fee.
+    #[arg(long, env = "PAY_STELLAR_MAX_DEPOSITS_PER_BUYER_PER_DAY", default_value = "10")]
+    pub max_deposits_per_buyer_per_day: u32,
+
+    /// Withdrawals a buyer may prepare in 24 hours.
+    #[arg(long, env = "PAY_STELLAR_MAX_WITHDRAWALS_PER_BUYER_PER_DAY", default_value = "5")]
+    pub max_withdrawals_per_buyer_per_day: u32,
+
+    /// Smallest withdrawal, in USDC base units (0.01 USDC by default); each
+    /// costs the operator a fee whatever its amount.
+    #[arg(long, env = "PAY_STELLAR_MIN_WITHDRAWAL", default_value = "100000")]
+    pub min_withdrawal: i64,
+
     /// Requests processed at once, across all connections. Every request,
     /// authenticated or not, costs a database lookup, so this bounds the
     /// load unauthenticated traffic can put on the database; rate limiting

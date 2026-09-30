@@ -134,6 +134,22 @@ withdrawal. Until then a copy of the signed entry could still be included.
 | `FAILED` | yes | included as failed, and the contract never processed it; the amount is back in the available balance |
 | `EXPIRED` | yes | the authorization lapsed and the contract never processed it; any held amount is back in the available balance |
 
+## Quotas
+
+Each deposit or withdrawal the worker sends costs the operator a network fee,
+and a buyer's first deposit creates contract state the operator pays rent
+for, whatever the amount. So the gateway limits, per buyer and per 24 hours,
+how many deposits (`PAY_STELLAR_MAX_DEPOSITS_PER_BUYER_PER_DAY`, 10 by
+default) and withdrawals (`PAY_STELLAR_MAX_WITHDRAWALS_PER_BUYER_PER_DAY`, 5
+by default) may be prepared. It also refuses withdrawals below
+`PAY_STELLAR_MIN_WITHDRAWAL` (0.01 USDC by default). The contract itself
+refuses deposits below its `min_deposit`.
+
+Each count is taken in the same transaction as the insert, with the buyer's
+row locked, so concurrent requests cannot pass a quota together. A repeated
+request with the same idempotency key is answered from its row and counts
+nothing.
+
 ## Idempotency
 
 `PrepareDeposit`, `CreateCharge` and `PrepareWithdrawal` take an
@@ -158,6 +174,7 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `INVALID_ARGUMENT` | `invalid_idempotency_key` | key outside the allowed alphabet or length | correct the input |
 | `INVALID_ARGUMENT` | `invalid_buyer_id`, `invalid_deposit_id`, `invalid_charge_id`, `invalid_withdrawal_id` | not a UUID | correct the input |
 | `INVALID_ARGUMENT` | `invalid_destination` | the withdrawal destination is not a `G...` account address | correct the input |
+| `INVALID_ARGUMENT` | `withdrawal_below_minimum` | the withdrawal is below the gateway's minimum | withdraw more |
 | `INVALID_ARGUMENT` | `invalid_authorization_entry` | not a base64 XDR authorization entry | send the entry as returned by the wallet |
 | `INVALID_ARGUMENT` | `authorization_mismatch` | the entry differs from the prepared one in more than its signature, or is for another account | sign the prepared entry unchanged |
 | `INVALID_ARGUMENT` | `invalid_signature` | the signature does not verify with the buyer's account key | sign with the buyer's wallet |
@@ -169,5 +186,6 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `FAILED_PRECONDITION` | `deposit_already_signed` | the deposit holds a different signed entry | nothing to do; poll `GetDeposit` |
 | `FAILED_PRECONDITION` | `withdrawal_expired` | the withdrawal's authorization expiration ledger has passed | prepare a new withdrawal |
 | `FAILED_PRECONDITION` | `withdrawal_already_signed` | the withdrawal holds a different signed entry | nothing to do; poll `GetWithdrawal` |
+| `RESOURCE_EXHAUSTED` | `deposit_quota_exceeded`, `withdrawal_quota_exceeded` | the buyer prepared its quota of deposits or withdrawals in the last 24 hours | retry later |
 | `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached; nothing was created | retry |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

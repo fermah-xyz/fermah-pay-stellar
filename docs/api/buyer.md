@@ -26,6 +26,9 @@ Behaviour:
 - Same reference with a different wallet, or a wallet already linked to
   another reference: refused with `buyer_conflict`. The existing link is not
   changed.
+- A deployment registers at most `PAY_STELLAR_MAX_NEW_BUYERS_PER_DAY` new
+  buyers in any 24 hours (1000 by default); beyond that a new buyer is
+  refused with `buyer_quota_exceeded`. A repeated registration counts nothing.
 
 A buyer's wallet link cannot be changed after creation.
 
@@ -59,5 +62,6 @@ Branch on the token, not on free text.
 | `INVALID_ARGUMENT` | `invalid_buyer_id` | `buyer_id` is not a UUID | correct the input |
 | `INVALID_ARGUMENT` | `missing_lookup` | neither `buyer_id` nor `external_ref` set | set one |
 | `ALREADY_EXISTS` | `buyer_conflict` | reference or wallet already bound differently | do not retry with the same input |
+| `RESOURCE_EXHAUSTED` | `buyer_quota_exceeded` | the deployment registered its quota of new buyers in the last 24 hours | retry later, or ask the operator for a higher quota |
 | `NOT_FOUND` | `buyer_not_found` | no such buyer in the caller's deployment | create it, or check the reference |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

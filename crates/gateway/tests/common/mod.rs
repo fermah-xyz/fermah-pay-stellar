@@ -16,7 +16,7 @@ use fermah_pay_stellar_domain::Network;
 use fermah_pay_stellar_gateway::issuance;
 use fermah_pay_stellar_gateway::ledger::{LatestLedger, LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
-use fermah_pay_stellar_gateway::store::Store;
+use fermah_pay_stellar_gateway::store::{Quotas, Store};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use tokio::net::TcpListener;
@@ -98,7 +98,9 @@ pub async fn start(opts: PgPoolOptions, connect: PgConnectOptions, network: Netw
 }
 
 /// Starts the API with `api_ledger` as its view of the latest ledger;
-/// `ledger` is the handle the harness exposes for tests that set it.
+/// `ledger` is the handle the harness exposes for tests that set it. The
+/// production quotas apply, except that any withdrawal amount is accepted:
+/// the tests move a few base units at a time.
 pub async fn start_with<L: LatestLedger>(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
@@ -106,13 +108,25 @@ pub async fn start_with<L: LatestLedger>(
     api_ledger: L,
     ledger: Ledger,
 ) -> Harness {
+    let quotas = Quotas { min_withdrawal: 1, ..Quotas::default() };
+    start_with_quotas(opts, connect, network, api_ledger, ledger, quotas).await
+}
+
+pub async fn start_with_quotas<L: LatestLedger>(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+    network: Network,
+    api_ledger: L,
+    ledger: Ledger,
+    quotas: Quotas,
+) -> Harness {
     let owner = opts.max_connections(1).connect_with(connect.clone()).await.unwrap();
     let api = pool_as(&connect, "SET ROLE pay_stellar_api", 3).await;
     let issuer = pool_as(&connect, "SET ROLE pay_stellar_issuer", 1).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
-    let store = Store::new(api.clone());
+    let store = Store::new(api.clone()).with_quotas(quotas);
     let ledger_api = LedgerApi::new(
         store.clone(),
         api_ledger,
