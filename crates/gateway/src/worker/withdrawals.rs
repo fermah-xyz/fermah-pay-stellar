@@ -140,13 +140,28 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
     /// Closes the withdrawal and returns a held amount in the same
     /// statement, so it is returned exactly once. A withdrawal never signed
-    /// held nothing.
+    /// held nothing. The buyer row is locked before the withdrawal row, the
+    /// order in which the API locks them when it stores a signature and
+    /// holds the amount, so the two cannot deadlock.
     async fn close_withdrawal(
         &self,
         id: Uuid,
         state: &'static str,
         reason: &str,
     ) -> Result<(), WorkerError> {
+        let mut tx = self.pool.begin().await.map_err(store("begin closing a withdrawal"))?;
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.buyers b
+            JOIN pay_stellar.withdrawals w ON w.buyer_id = b.id
+            WHERE w.id = $1
+            FOR UPDATE OF b
+            "#,
+            id,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store("lock the withdrawing buyer"))?;
         let closed = sqlx::query_scalar!(
             r#"
             WITH closed AS (
@@ -165,9 +180,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             state,
             reason,
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(store("close withdrawal"))?;
+        tx.commit().await.map_err(store("commit closing a withdrawal"))?;
         withdrawal_closed(state, closed);
         Ok(())
     }
