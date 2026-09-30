@@ -51,7 +51,7 @@ use tokio::net::TcpListener;
 use tonic::transport::Channel;
 use tonic::{Code, Request};
 
-use super::{CHANNEL, Context, FEE_SOURCE, NETWORK, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
+use super::{CHANNEL, Context, FEE_SOURCE, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
 use crate::testnet::evidence::{self, tx_url};
 use crate::testnet::ledger::balances;
 
@@ -168,7 +168,7 @@ impl Context {
         sources: Vec<Arc<dyn Signer>>,
         quotas: Quotas,
     ) -> anyhow::Result<Stack> {
-        fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, NETWORK).await?;
+        fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, self.network).await?;
         let (recorded, pinned) = self.deployment()?;
         let operator = self.profile.key("operator")?;
         ensure!(
@@ -187,7 +187,7 @@ impl Context {
         let run = format!("{run}-{}", unix_now());
         let product = issuance::create_product(&issuer, &run).await?;
         let deployment =
-            issuance::create_seller_deployment(&issuer, product, "testnet", NETWORK).await?;
+            issuance::create_seller_deployment(&issuer, product, "testnet", self.network).await?;
         let key = issuance::issue_api_key(&issuer, deployment, "end-to-end").await?;
         let token = key.token;
         issuance::bind_ledger_contract(
@@ -209,7 +209,7 @@ impl Context {
         let ledger = LedgerApi::new(
             store.clone(),
             self.rpc.clone(),
-            NETWORK,
+            self.network,
             LedgerPolicy { authorization_validity_ledgers: 720, charge_validity_ledgers: 720 },
         );
         let mut gateway_stop = stopped.clone();
@@ -221,14 +221,15 @@ impl Context {
         let x402 = tokio::spawn(serve_x402(x402_listener, ledger.clone(), limits, async move {
             let _ = x402_stop.wait_for(|stop| *stop).await;
         }));
-        let gateway = tokio::spawn(serve(listener, store, NETWORK, ledger, limits, async move {
-            let _ = gateway_stop.wait_for(|stop| *stop).await;
-        }));
+        let gateway =
+            tokio::spawn(serve(listener, store, self.network, ledger, limits, async move {
+                let _ = gateway_stop.wait_for(|stop| *stop).await;
+            }));
         let engine = Engine::new(
             worker_pool.clone(),
             self.rpc.clone(),
             SystemClock,
-            NETWORK,
+            self.network,
             Keys::new(sources, LocalSigner::arc(self.profile.key(FEE_SOURCE)?))?,
             EnginePolicy {
                 // The worker's own defaults: bid from the market, never
@@ -291,7 +292,7 @@ impl Context {
         contract: &str,
         records: &PgPool,
     ) -> anyhow::Result<serde_json::Value> {
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let channel = Channel::from_shared(endpoint.to_owned())?.connect().await?;
         let mut buyers = BuyerServiceClient::new(channel.clone());
         let mut ledger = LedgerServiceClient::new(channel);
@@ -303,7 +304,7 @@ impl Context {
         let reserve = self.profile.key(USDC_RESERVE)?;
         let onboarding = onboard_buyers(
             &self.rpc,
-            NETWORK,
+            self.network,
             &sponsor,
             &[&buyer],
             &asset,
@@ -321,8 +322,8 @@ impl Context {
             self.policy.inclusion_fee,
             valid_until,
         )?;
-        let funding_hash = transaction::transaction_hash(&tx, NETWORK)?;
-        let envelope = transaction::sign(tx, NETWORK, &[&sponsor, &reserve])?;
+        let funding_hash = transaction::transaction_hash(&tx, self.network)?;
+        let envelope = transaction::sign(tx, self.network, &[&sponsor, &reserve])?;
         submit_and_wait(&self.rpc, &envelope, funding_hash, valid_until, self.policy.poll_interval)
             .await?;
         let before = balances(&self.rpc, &buyer.address(), &asset).await?;
@@ -364,7 +365,7 @@ impl Context {
             &prepared.authorization_entry_xdr,
             Limits::none(),
         )?;
-        let signed = sign_entry(&entry, network_id(NETWORK), &[&buyer])?;
+        let signed = sign_entry(&entry, network_id(self.network), &[&buyer])?;
         ledger
             .submit_deposit(authed(
                 SubmitDepositRequest {
@@ -445,7 +446,7 @@ impl Context {
 
         // A facilitator's calls through the x402 interface, for a commitment
         // the buyer signs; settled on-chain with the next batch.
-        let mut facilitator = Facilitator::new(x402_endpoint, token)?;
+        let mut facilitator = Facilitator::new(self.network, x402_endpoint, token)?;
         let commitment =
             facilitator.pay(&buyer, contract, &usdc::contract_strkey(pinned.usdc)).await?;
 
@@ -508,7 +509,7 @@ impl Context {
             &prepared.authorization_entry_xdr,
             Limits::none(),
         )?;
-        let signed = sign_entry(&entry, network_id(NETWORK), &[&buyer])?;
+        let signed = sign_entry(&entry, network_id(self.network), &[&buyer])?;
         ledger
             .submit_withdrawal(authed(
                 SubmitWithdrawalRequest {
@@ -723,6 +724,7 @@ impl Context {
 /// Plays a facilitator against the x402 interface, logging every request
 /// and response (the API key is never logged).
 struct Facilitator {
+    network: fermah_pay_stellar_domain::Network,
     http: reqwest::Client,
     endpoint: String,
     token: String,
@@ -730,8 +732,13 @@ struct Facilitator {
 }
 
 impl Facilitator {
-    fn new(endpoint: &str, token: &str) -> anyhow::Result<Self> {
+    fn new(
+        network: fermah_pay_stellar_domain::Network,
+        endpoint: &str,
+        token: &str,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
+            network,
             http: http_client(Duration::from_secs(30))?,
             endpoint: endpoint.to_owned(),
             token: token.to_owned(),
@@ -771,7 +778,7 @@ impl Facilitator {
         let supported = self.call("GET", "/supported", None).await?;
         ensure!(
             supported["kinds"][0]["scheme"] == "batch-settlement"
-                && supported["kinds"][0]["network"] == NETWORK.caip2(),
+                && supported["kinds"][0]["network"] == self.network.caip2(),
             "unexpected /supported {supported}"
         );
         let mut bytes = [0_u8; 32];
@@ -781,7 +788,7 @@ impl Facilitator {
         let amount = X402_AMOUNT.to_string();
         let payer = buyer.address();
         let message = commitment_message(
-            NETWORK.caip2(),
+            self.network.caip2(),
             asset,
             pay_to,
             &amount,
@@ -790,10 +797,11 @@ impl Facilitator {
             &valid_until,
         );
         let signature = sep53::sign(buyer, message.as_bytes());
+        let network = self.network.caip2();
         let requirements = |amount: &str| {
             json!({
                 "scheme": "batch-settlement",
-                "network": NETWORK.caip2(),
+                "network": network,
                 "amount": amount,
                 "asset": asset,
                 "payTo": pay_to,

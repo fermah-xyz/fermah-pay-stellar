@@ -1,6 +1,13 @@
 //! Evidence records: one JSON file per network operation.
+//!
+//! A record says which network it was taken on. One taken on a local
+//! standalone network is a test run, not evidence: its USDC is a stand-in and
+//! it has no public explorer, and the record says so.
 
 use std::path::Path;
+use std::sync::OnceLock;
+
+use fermah_pay_stellar_domain::Network;
 
 use anyhow::Context;
 use time::OffsetDateTime;
@@ -8,9 +15,25 @@ use time::format_description::well_known::Rfc3339;
 
 pub const EXPLORER: &str = "https://stellar.expert/explorer/testnet";
 
+static NETWORK: OnceLock<Network> = OnceLock::new();
+
+/// The network every record of this process is taken on; testnet unless set.
+pub fn set_network(network: Network) {
+    let _ = NETWORK.set(network);
+}
+
+fn network() -> Network {
+    NETWORK.get().copied().unwrap_or(Network::Testnet)
+}
+
+/// The public explorer page of a transaction; empty on a local network,
+/// which has none.
 #[must_use]
 pub fn tx_url(hash: &str) -> String {
-    format!("{EXPLORER}/tx/{hash}")
+    match network() {
+        Network::Local => String::new(),
+        _ => format!("{EXPLORER}/tx/{hash}"),
+    }
 }
 
 /// Adds `recorded_at` and writes `record` to
@@ -28,7 +51,12 @@ fn write_at(
     now: OffsetDateTime,
 ) -> anyhow::Result<()> {
     record["recorded_at"] = serde_json::Value::String(now.format(&Rfc3339)?);
-    record["network"] = serde_json::Value::String("stellar:testnet".to_owned());
+    record["network"] = serde_json::Value::String(network().caip2().to_owned());
+    if network() == Network::Local {
+        record["local_test_run"] = serde_json::json!(
+            "taken on a local standalone network with a stand-in USDC: a test run, not network evidence"
+        );
+    }
     std::fs::create_dir_all(dir)?;
     let stamp = format!("{}T{:02}{:02}{:02}", now.date(), now.hour(), now.minute(), now.second());
     let path = dir.join(format!("{stamp}-{name}.json"));

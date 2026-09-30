@@ -181,3 +181,87 @@ jobs:
         env:
           SQLX_OFFLINE: "true"
         run: cargo test --workspace --all-features --locked
+
+  # The whole system on a standalone Stellar network in this job: the built
+  # contract, the gateway and the settlement worker against a real node, on
+  # every change, with no secrets and no shared accounts. Its USDC is a
+  # stand-in; the testnet workflow remains the check against Circle USDC on a
+  # public network.
+  local-e2e:
+    name: Local end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_USER: pay_stellar_owner
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: pay_stellar
+        ports:
+          - 5432:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd "pg_isready -U pay_stellar_owner -d pay_stellar"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Started first: the node needs about a minute before it serves.
+      - name: Start a local Stellar network
+        run: |
+          docker run -d --name stellar -p 8000:8000 \
+            stellar/quickstart@sha256:1d57fcdc3bc3775f841c4eed877cfc10e406ab7b879c0531844549aeff52ff0a \
+            --local --enable core,rpc --limits testnet
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install stellar CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-delay 2 \
+            https://github.com/stellar/stellar-cli/releases/download/v28.1.0/stellar-cli-28.1.0-x86_64-unknown-linux-gnu.tar.gz \
+            -o "$RUNNER_TEMP/stellar.tar.gz"
+          echo "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462  $RUNNER_TEMP/stellar.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/stellar.tar.gz" -C "$HOME/.cargo/bin" stellar
+      - name: Build
+        run: |
+          set -euo pipefail
+          stellar contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir target/contract-wasm
+          SQLX_OFFLINE=true cargo build --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-testnet
+      - name: Wait for the network
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          until curl -sf -X POST -H 'content-type: application/json' \
+                  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://localhost:8000/rpc \
+                  | grep -q '"healthy"' \
+             && [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8000/friendbot?addr=GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7')" = 200 ]; do
+            [ "$SECONDS" -lt "$deadline" ] || { echo "the local network did not come up"; exit 1; }
+            sleep 5
+          done
+      - name: Deploy and run end to end
+        env:
+          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+        run: |
+          set -euo pipefail
+          tool() {
+            ./target/debug/fermah-pay-stellar-testnet --network stellar:local \
+              --rpc-url http://localhost:8000/rpc --profile-dir "$RUNNER_TEMP/local-profile" \
+              --evidence-dir "$RUNNER_TEMP/local-evidence" "$@"
+          }
+          tool init-roles
+          tool mint-local-usdc --amount 1000000000
+          tool deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
+            --min-deposit 100000 --max-charge 10000000
+          tool end-to-end
+      - name: Node logs on failure
+        if: failure()
+        run: docker logs --tail 200 stellar
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: local-end-to-end
+          path: ${{ runner.temp }}/local-evidence/
+          if-no-files-found: ignore

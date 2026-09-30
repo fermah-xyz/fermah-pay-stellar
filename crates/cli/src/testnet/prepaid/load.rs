@@ -29,7 +29,7 @@ use sqlx::PgPool;
 use tonic::transport::Channel;
 
 use super::e2e::Stack;
-use super::{Context, NETWORK, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
+use super::{Context, SPONSOR, SUBMITTER, USDC_RESERVE, unix_now};
 use crate::testnet::evidence;
 
 /// Each buyer deposits 0.1 USDC.
@@ -97,10 +97,10 @@ impl Context {
             let refs: Vec<&SecretKey> = chunk.iter().collect();
             onboard_buyers(
                 &self.rpc,
-                NETWORK,
+                self.network,
                 &sponsor,
                 &refs,
-                &usdc::circle_usdc(NETWORK),
+                &usdc::circle_usdc(self.network),
                 self.onboarding_policy(),
             )
             .await?;
@@ -109,7 +109,7 @@ impl Context {
     }
 
     async fn load(&self, stack: &Stack, shape: &LoadShape) -> anyhow::Result<Value> {
-        let asset = usdc::circle_usdc(NETWORK);
+        let asset = usdc::circle_usdc(self.network);
         let sponsor = self.profile.key(SPONSOR)?;
         let reserve = self.profile.key(USDC_RESERVE)?;
         let token: &str = &stack.token;
@@ -119,8 +119,15 @@ impl Context {
             (0..shape.buyers).map(|_| SecretKey::generate()).collect::<Result<_, _>>()?;
         for chunk in buyers.chunks(MAX_BUYERS_PER_TRANSACTION) {
             let refs: Vec<&SecretKey> = chunk.iter().collect();
-            onboard_buyers(&self.rpc, NETWORK, &sponsor, &refs, &asset, self.onboarding_policy())
-                .await?;
+            onboard_buyers(
+                &self.rpc,
+                self.network,
+                &sponsor,
+                &refs,
+                &asset,
+                self.onboarding_policy(),
+            )
+            .await?;
         }
         for chunk in buyers.chunks(100) {
             let sequence = self.sequence_of(&sponsor.address()).await?;
@@ -135,8 +142,8 @@ impl Context {
                 self.policy.inclusion_fee,
                 valid_until,
             )?;
-            let hash = transaction::transaction_hash(&tx, NETWORK)?;
-            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, &reserve])?;
+            let hash = transaction::transaction_hash(&tx, self.network)?;
+            let envelope = transaction::sign(tx, self.network, &[&sponsor, &reserve])?;
             submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
                 .await?;
         }
@@ -175,7 +182,7 @@ impl Context {
                 &prepared.authorization_entry_xdr,
                 Limits::none(),
             )?;
-            let signed = sign_entry(&entry, network_id(NETWORK), &[buyer])?;
+            let signed = sign_entry(&entry, network_id(self.network), &[buyer])?;
             ledger
                 .submit_deposit(authed(
                     SubmitDepositRequest {

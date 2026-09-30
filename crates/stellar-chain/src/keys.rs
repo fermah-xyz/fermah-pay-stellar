@@ -26,6 +26,17 @@ impl SecretKey {
         Ok(Self(SigningKey::from_bytes(&seed)))
     }
 
+    /// The key whose Ed25519 seed is `seed`. Anyone who knows the seed holds
+    /// the key: this is for keys meant to be public, such as the issuer of a
+    /// local network's stand-in USDC.
+    #[must_use]
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        let mut seed = Zeroizing::new(seed);
+        let key = Self(SigningKey::from_bytes(&seed));
+        seed.zeroize();
+        key
+    }
+
     pub fn from_strkey(seed: &str) -> Result<Self, SecretKeyError> {
         let mut key = stellar_strkey::ed25519::PrivateKey::from_string(seed)
             .map_err(|_| SecretKeyError::Malformed)?;

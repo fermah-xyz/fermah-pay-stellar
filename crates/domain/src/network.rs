@@ -8,10 +8,16 @@ use std::str::FromStr;
 pub enum Network {
     Testnet,
     Pubnet,
+    /// A standalone network on one machine, such as `stellar/quickstart
+    /// --local`: for development and continuous integration only. Its USDC
+    /// is a stand-in anyone can issue.
+    Local,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("unknown network identifier; expected `stellar:testnet` or `stellar:pubnet`")]
+#[error(
+    "unknown network identifier; expected `stellar:testnet`, `stellar:pubnet` or `stellar:local`"
+)]
 pub struct UnknownNetwork;
 
 impl Network {
@@ -21,6 +27,7 @@ impl Network {
         match self {
             Self::Testnet => "stellar:testnet",
             Self::Pubnet => "stellar:pubnet",
+            Self::Local => "stellar:local",
         }
     }
 
@@ -32,6 +39,7 @@ impl Network {
         match self {
             Self::Testnet => "Test SDF Network ; September 2015",
             Self::Pubnet => "Public Global Stellar Network ; September 2015",
+            Self::Local => "Standalone Network ; February 2017",
         }
     }
 }
@@ -49,6 +57,7 @@ impl FromStr for Network {
         match s {
             "stellar:testnet" => Ok(Self::Testnet),
             "stellar:pubnet" => Ok(Self::Pubnet),
+            "stellar:local" => Ok(Self::Local),
             _ => Err(UnknownNetwork),
         }
     }
@@ -60,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_caip2_round_trips_for_every_network() {
-        for network in [Network::Testnet, Network::Pubnet] {
+        for network in [Network::Testnet, Network::Pubnet, Network::Local] {
             assert_eq!(network.caip2().parse::<Network>(), Ok(network));
         }
     }
