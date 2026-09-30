@@ -22,6 +22,9 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_oldest_waiting_charge_seconds` | worker | how long the oldest of them has waited |
 | `pay_stellar_charges_settled_total{result}` | worker | charges settled by result: `charged`, a refusal outcome, `quarantined`, `requeued` |
 | `pay_stellar_deposits_closed_total{state}` | worker | deposits closed: `confirmed`, `expired`, `failed` |
+| `pay_stellar_withdrawals_closed_total{state}` | worker | withdrawals closed: `confirmed`, `expired`, `failed` |
+| `pay_stellar_withdrawals_waiting` | worker | signed withdrawals not yet sent |
+| `pay_stellar_oldest_waiting_withdrawal_seconds` | worker | how long the oldest of them has waited since it was signed |
 | `pay_stellar_fee_source_spendable_stroops` | worker | XLM the fee account can spend above its reserve; below the fee floor no new transaction is built |
 | `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
 | `pay_stellar_signing_failures_total{role}` | worker | signatures that failed or did not verify, by key: `operator`, `source`, `fee_source` |
@@ -49,6 +52,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarContractLifeShort` | critical | The worker extends a contract below about 7 days of life; at half that it has failed to. Check its logs, its source accounts and the fee account |
 | `PayStellarChargesWaiting` | warning | Batches are not going out. Check the worker's logs, its source accounts and the fee account's balance |
 | `PayStellarSubmissionsNotLanding` | warning | Transactions keep expiring or failing. Check the inclusion bid against network fees and the RPC node's health |
+| `PayStellarWithdrawalsWaiting` | warning | A signed withdrawal has not gone out for ten minutes while its amount is held. Check that a worker holds the treasury key, that the treasury holds enough USDC, and the withdrawal's `last_error` |
 | `PayStellarWorkerFailing` | warning | Settlement rounds keep failing; read the worker's error logs |
 | `PayStellarObserverLagging` | warning | The observer is more than an hour behind. Fix it before the events it has not read leave the RPC node's retention |
 | `PayStellarNoLeader` | critical | Worker or observer processes are running but none holds the lease, so nothing is settled or observed. Check their logs for database errors |

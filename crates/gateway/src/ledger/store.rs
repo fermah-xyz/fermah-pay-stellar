@@ -1,4 +1,5 @@
-//! PostgreSQL access for deposits, charges and balances, under the API role.
+//! PostgreSQL access for deposits, charges, withdrawals and balances, under
+//! the API role.
 //! Every query binds the caller's deployment and network, so a row of another
 //! deployment is indistinguishable from a missing one.
 
@@ -13,6 +14,7 @@ use crate::store::{Store, StoreError};
 
 const DEPOSIT_KEY: &str = "deposits_idempotency_key";
 const CHARGE_KEY: &str = "charges_idempotency_key";
+const WITHDRAWAL_KEY: &str = "withdrawals_idempotency_key";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepositState {
@@ -34,6 +36,30 @@ impl DepositState {
             "failed" => Self::Failed,
             "expired" => Self::Expired,
             _ => return Err(StoreError::Corrupt("deposit state outside the CHECK constraint")),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithdrawalState {
+    AwaitingSignature,
+    Signed,
+    Submitted,
+    Confirmed,
+    Failed,
+    Expired,
+}
+
+impl WithdrawalState {
+    fn parse(raw: &str) -> Result<Self, StoreError> {
+        Ok(match raw {
+            "awaiting_signature" => Self::AwaitingSignature,
+            "signed" => Self::Signed,
+            "submitted" => Self::Submitted,
+            "confirmed" => Self::Confirmed,
+            "failed" => Self::Failed,
+            "expired" => Self::Expired,
+            _ => return Err(StoreError::Corrupt("withdrawal state outside the CHECK constraint")),
         })
     }
 }
@@ -109,6 +135,44 @@ pub struct NewDeposit<'a> {
     pub expiration_ledger: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawalRecord {
+    pub id: Uuid,
+    pub buyer_id: Uuid,
+    pub wallet: AccountAddress,
+    pub amount: i64,
+    pub destination: AccountAddress,
+    pub state: WithdrawalState,
+    pub authorization_xdr: String,
+    pub signed_authorization_xdr: Option<String>,
+    pub expiration_ledger: i64,
+    pub transaction_hash: Option<Vec<u8>>,
+    pub ledger: Option<i32>,
+    pub created_at: OffsetDateTime,
+}
+
+pub struct NewWithdrawal<'a> {
+    pub buyer_id: Uuid,
+    pub key: &'a IdempotencyKey,
+    pub amount: i64,
+    pub destination: &'a AccountAddress,
+    pub withdrawal_id: [u8; 32],
+    pub authorization_xdr: &'a str,
+    pub expiration_ledger: u32,
+}
+
+/// What storing a withdrawal's signed entry did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithdrawalSigning {
+    /// Stored, and the amount held from the available balance.
+    Held,
+    /// The withdrawal no longer awaits a signature; a concurrent request
+    /// may have stored one.
+    NotOpen,
+    /// The available balance does not cover the amount; nothing changed.
+    InsufficientBalance,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admission {
     Admitted(ChargeRecord),
@@ -124,6 +188,7 @@ pub enum Admission {
 pub struct Balance {
     pub available: i64,
     pub pending_charges: i64,
+    pub pending_withdrawals: i64,
 }
 
 /// The on-chain identifier of the charge a seller names with `key`: the
@@ -543,7 +608,10 @@ impl Store {
             SELECT b.available,
                    COALESCE((SELECT SUM(c.amount) FROM pay_stellar.charges c
                              WHERE c.buyer_id = b.id AND c.state IN ('admitted', 'submitted')),
-                            0)::BIGINT AS "pending!"
+                            0)::BIGINT AS "pending!",
+                   COALESCE((SELECT SUM(w.amount) FROM pay_stellar.withdrawals w
+                             WHERE w.buyer_id = b.id AND w.state IN ('signed', 'submitted')),
+                            0)::BIGINT AS "withdrawing!"
             FROM pay_stellar.buyers b
             WHERE b.id = $1 AND b.product_id = $2 AND b.seller_deployment_id = $3
               AND b.network = $4
@@ -556,6 +624,150 @@ impl Store {
         .fetch_optional(&self.pool)
         .await
         .map_err(query("read balance"))?;
-        Ok(row.map(|row| Balance { available: row.available, pending_charges: row.pending }))
+        Ok(row.map(|row| Balance {
+            available: row.available,
+            pending_charges: row.pending,
+            pending_withdrawals: row.withdrawing,
+        }))
+    }
+
+    /// Inserts a prepared withdrawal. `None` means the idempotency key is
+    /// taken, possibly by a concurrent request; the caller reads that one.
+    pub async fn insert_withdrawal(
+        &self,
+        scope: &Scope,
+        withdrawal: &NewWithdrawal<'_>,
+    ) -> Result<Option<Uuid>, StoreError> {
+        let id = Uuid::now_v7();
+        let inserted = sqlx::query!(
+            r#"
+            INSERT INTO pay_stellar.withdrawals
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount,
+                 destination_address, withdrawal_id, authorization_xdr, expiration_ledger)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+            id,
+            withdrawal.buyer_id,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+            withdrawal.key.as_str(),
+            withdrawal.amount,
+            withdrawal.destination.as_str(),
+            withdrawal.withdrawal_id.as_slice(),
+            withdrawal.authorization_xdr,
+            i64::from(withdrawal.expiration_ledger),
+        )
+        .execute(&self.pool)
+        .await;
+        match inserted {
+            Ok(_) => Ok(Some(id)),
+            Err(error) if is_violation_of(&error, WITHDRAWAL_KEY) => Ok(None),
+            Err(source) => Err(StoreError::Query { operation: "insert withdrawal", source }),
+        }
+    }
+
+    pub async fn withdrawal(
+        &self,
+        scope: &Scope,
+        id: Option<Uuid>,
+        key: Option<&IdempotencyKey>,
+    ) -> Result<Option<WithdrawalRecord>, StoreError> {
+        let row = sqlx::query!(
+            r#"
+            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address, w.state,
+                   w.authorization_xdr, w.signed_authorization_xdr, w.expiration_ledger,
+                   w.created_at, s.outer_hash AS "outer_hash?", s.ledger AS "ledger?"
+            FROM pay_stellar.withdrawals w
+            JOIN pay_stellar.buyers b
+              ON b.id = w.buyer_id AND b.seller_deployment_id = w.seller_deployment_id
+             AND b.network = w.network
+            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id
+            WHERE w.seller_deployment_id = $1 AND w.network = $2
+              AND (w.id = $3 OR w.idempotency_key = $4)
+            "#,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+            id,
+            key.map(IdempotencyKey::as_str),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(query("read withdrawal"))?;
+        row.map(|row| {
+            Ok(WithdrawalRecord {
+                id: row.id,
+                buyer_id: row.buyer_id,
+                wallet: address(&row.wallet_address)?,
+                amount: row.amount,
+                destination: address(&row.destination_address)?,
+                state: WithdrawalState::parse(&row.state)?,
+                authorization_xdr: row.authorization_xdr,
+                signed_authorization_xdr: row.signed_authorization_xdr,
+                expiration_ledger: row.expiration_ledger,
+                transaction_hash: row.outer_hash,
+                ledger: row.ledger,
+                created_at: row.created_at,
+            })
+        })
+        .transpose()
+    }
+
+    /// Stores the verified signed entry and holds the amount from the
+    /// buyer's available balance, in one database transaction with the
+    /// buyer row locked first, as charge admission locks it: a charge
+    /// admitted concurrently sees either the balance before the hold or
+    /// after it, never both spending the same units.
+    pub async fn sign_withdrawal(
+        &self,
+        scope: &Scope,
+        id: Uuid,
+        signed_authorization_xdr: &str,
+    ) -> Result<WithdrawalSigning, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(query("begin withdrawal signing"))?;
+        let buyer = sqlx::query!(
+            r#"
+            SELECT b.available, w.amount FROM pay_stellar.withdrawals w
+            JOIN pay_stellar.buyers b ON b.id = w.buyer_id
+            WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3
+            FOR UPDATE OF b
+            "#,
+            id,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(query("lock withdrawing buyer"))?;
+        let Some(buyer) = buyer else { return Ok(WithdrawalSigning::NotOpen) };
+        let signed = sqlx::query!(
+            r#"
+            UPDATE pay_stellar.withdrawals
+            SET state = 'signed', signed_authorization_xdr = $2, signed_at = now()
+            WHERE id = $1 AND state = 'awaiting_signature'
+            "#,
+            id,
+            signed_authorization_xdr,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(query("sign withdrawal"))?;
+        if signed.rows_affected() != 1 {
+            return Ok(WithdrawalSigning::NotOpen);
+        }
+        if buyer.available < buyer.amount {
+            return Ok(WithdrawalSigning::InsufficientBalance);
+        }
+        sqlx::query!(
+            r#"
+            UPDATE pay_stellar.buyers b SET available = b.available - w.amount
+            FROM pay_stellar.withdrawals w WHERE w.id = $1 AND b.id = w.buyer_id
+            "#,
+            id,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(query("hold withdrawal"))?;
+        tx.commit().await.map_err(query("commit withdrawal signing"))?;
+        Ok(WithdrawalSigning::Held)
     }
 }

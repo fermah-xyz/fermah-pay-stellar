@@ -528,6 +528,9 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_api", "ledger_contracts", "SELECT"),
         ("pay_stellar_api", "seller_deployments", "SELECT"),
         ("pay_stellar_api", "submissions", "SELECT"),
+        ("pay_stellar_api", "withdrawals", "INSERT"),
+        ("pay_stellar_api", "withdrawals", "SELECT"),
+        ("pay_stellar_api", "withdrawals", "UPDATE"),
         ("pay_stellar_observer", "buyers", "SELECT"),
         ("pay_stellar_observer", "chain_charge_entries", "INSERT"),
         ("pay_stellar_observer", "chain_charge_entries", "SELECT"),
@@ -552,6 +555,7 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_observer", "reconciliation_streaks", "INSERT"),
         ("pay_stellar_observer", "reconciliation_streaks", "SELECT"),
         ("pay_stellar_observer", "reconciliation_streaks", "UPDATE"),
+        ("pay_stellar_observer", "withdrawals", "SELECT"),
         ("pay_stellar_operator", "buyers", "SELECT"),
         ("pay_stellar_operator", "chain_charge_entries", "SELECT"),
         ("pay_stellar_operator", "chain_events", "SELECT"),
@@ -563,6 +567,7 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_operator", "reconciliation_baselines", "SELECT"),
         ("pay_stellar_operator", "reconciliation_findings", "SELECT"),
         ("pay_stellar_operator", "submissions", "SELECT"),
+        ("pay_stellar_operator", "withdrawals", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "INSERT"),
         ("pay_stellar_issuer", "api_keys", "SELECT"),
         ("pay_stellar_issuer", "api_keys", "UPDATE"),
@@ -587,6 +592,8 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_worker", "submissions", "INSERT"),
         ("pay_stellar_worker", "submissions", "SELECT"),
         ("pay_stellar_worker", "submissions", "UPDATE"),
+        ("pay_stellar_worker", "withdrawals", "SELECT"),
+        ("pay_stellar_worker", "withdrawals", "UPDATE"),
     ]
     .into_iter()
     .map(|(r, t, p)| (r.to_owned(), t.to_owned(), p.to_owned()))
@@ -613,7 +620,7 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
          CROSS JOIN (VALUES ('pay_stellar_api'), ('pay_stellar_worker'), ('pay_stellar_operator'),
                             ('pay_stellar_observer')) AS r(role)
          CROSS JOIN (VALUES ('INSERT'), ('UPDATE')) AS p(privilege)
-         WHERE c.relname IN ('buyers', 'deposits', 'charges', 'observer_cursors')
+         WHERE c.relname IN ('buyers', 'deposits', 'charges', 'withdrawals', 'observer_cursors')
            AND a.attnum > 0 AND NOT a.attisdropped
            AND has_column_privilege(r.role, a.attrelid, a.attnum, p.privilege)",
     )
@@ -681,7 +688,36 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
                 "last_ledger",
             ],
         ),
+        columns(
+            "pay_stellar_api",
+            "INSERT",
+            "withdrawals",
+            &[
+                "id",
+                "buyer_id",
+                "seller_deployment_id",
+                "network",
+                "idempotency_key",
+                "amount",
+                "destination_address",
+                "withdrawal_id",
+                "authorization_xdr",
+                "expiration_ledger",
+            ],
+        ),
+        columns(
+            "pay_stellar_api",
+            "UPDATE",
+            "withdrawals",
+            &["state", "signed_authorization_xdr", "signed_at"],
+        ),
         columns("pay_stellar_worker", "UPDATE", "buyers", &["available"]),
+        columns(
+            "pay_stellar_worker",
+            "UPDATE",
+            "withdrawals",
+            &["state", "submission_id", "last_error", "resolved_at"],
+        ),
         columns(
             "pay_stellar_worker",
             "UPDATE",

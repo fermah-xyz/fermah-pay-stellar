@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.buyers b SET available = b.available - w.amount\n            FROM pay_stellar.withdrawals w WHERE w.id = $1 AND b.id = w.buyer_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4988b53cd142391d1f2d1ef8648024ca890badb5ea19397ed39261325f308cc1"
+}

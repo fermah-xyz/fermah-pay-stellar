@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.withdrawals\n            SET state = 'signed', submission_id = NULL,\n                last_error = 'not included before its transaction expired; sending again'\n            WHERE id = $1 AND state = 'submitted'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de56fc2f8b70f8f9b44ab9bbb26d485859c7405d872f2d49e87f291bd36c80dd"
+}

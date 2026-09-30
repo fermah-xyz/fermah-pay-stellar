@@ -1,0 +1,128 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT w.id, w.amount, w.withdrawal_id, w.destination_address,\n                   w.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network\n            WHERE w.network = $1 AND l.operator_address = $2 AND l.treasury_address = $3\n              AND w.state = 'signed' AND w.id <> ALL($4) AND w.expiration_ledger > $5\n            ORDER BY w.created_at\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "withdrawal_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "withdrawal_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "destination_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "destination_address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "signed_authorization_xdr!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "UuidArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "368aec9f12d7e92a5c4361d3b9e33207e3a5dc99e30cb5b9f3fc5b506ac22690"
+}

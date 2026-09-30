@@ -21,11 +21,11 @@ what their process needs:
 
 | Group role | Granted to | Privileges |
 |---|---|---|
-| `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits and charges, only in their initial state; store a deposit's verified signature; debit a buyer's available balance when admitting a charge |
+| `pay_stellar_api` | the gateway's login role | read key digests and deployment scope; create buyers (never with a balance); create deposits, charges and withdrawals, only in their initial state; store a deposit's or withdrawal's verified signature; debit a buyer's available balance when admitting a charge or holding a withdrawal |
 | `pay_stellar_issuer` | the provisioning login role | create products, deployments and keys; set `revoked_at` on keys; bind a deployment to its ledger contract |
-| `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md). Also read the chain observer's events and findings, and record a reconciliation baseline, which no role can change or delete; for that it reads buyers' available balances and the state and amount of deposits |
-| `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; credit confirmed deposits and refused charges back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed. Take, renew and release the lease that picks which worker acts |
-| `pay_stellar_observer` | the login role of the [chain observer](observer.md) | read ledger bindings, buyer wallets and available balances, and the amount, identifier and state of deposits and charges; append observed events, verdicts and findings, which no role can update or delete; move its read position forward; keep the count of each discrepancy's consecutive checks; take, renew and release the lease that picks which observer acts. No write to any balance, deposit, charge or binding |
+| `pay_stellar_operator` | the login role of a person resolving quarantined charges | read charges; call `resolve_quarantined_charge`, the only way out of quarantine; see [resolving quarantined charges](quarantine.md). Also read the chain observer's events and findings, and record a reconciliation baseline, which no role can change or delete; for that it reads buyers' available balances and the state and amount of deposits and withdrawals |
+| `pay_stellar_worker` | the login role of the process that submits transactions | record submissions and their outcomes; move deposits and charges to their outcomes; move withdrawals to their outcomes; credit confirmed deposits, refused charges and returned withdrawals back to the available balance. The signed envelope, hashes and sequence of a recorded submission cannot be changed. Take, renew and release the lease that picks which worker acts |
+| `pay_stellar_observer` | the login role of the [chain observer](observer.md) | read ledger bindings, buyer wallets and available balances, and the amount, identifier and state of deposits, charges and withdrawals, and a withdrawal's destination; append observed events, verdicts and findings, which no role can update or delete; move its read position forward; keep the count of each discrepancy's consecutive checks; take, renew and release the lease that picks which observer acts. No write to any balance, deposit, charge or binding |
 
 No role can change a buyer's wallet, an amount, a charge's identifier or
 a ledger binding after the row is written, and no role can move a submission,
@@ -80,7 +80,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup (network passphrase, and protocol 27 or later). Must be `https` unless it points at this host |
 | Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
 | Gateway | `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` | ledgers a charge may wait for settlement before it is refunded, default 720 (about an hour), at most 17280 |
-| Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit signature stays valid, default 720 (about an hour) |
+| Gateway | `PAY_STELLAR_DEPOSIT_AUTHORIZATION_LEDGERS` | ledgers a buyer's deposit or withdrawal signature stays valid, default 720 (about an hour). A withdrawal the treasury cannot pay stays held this long before its amount is returned |
 | Admin | `PAY_STELLAR_ADMIN_DATABASE_URL` | owner URL for `migrate`, issuer URL otherwise |
 | Worker | `PAY_STELLAR_WORKER_DATABASE_URL` | URL of the worker login role |
 | Worker | `PAY_STELLAR_NETWORK`, `PAY_STELLAR_RPC_URL` | as for the gateway |
@@ -88,6 +88,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_LEASE_SECS` | how long a worker's lease lasts without renewal, default 15, at least 3: a standby takes over this long after a worker stops without releasing it |
 | Worker | `PAY_STELLAR_FEE_SOURCE_KEY_FILE` | [key reference](keys.md) of the account that pays fees |
 | Worker | `PAY_STELLAR_OPERATOR_KEY_FILE` | [key reference](keys.md) of the contracts' operator; the worker serves the deployments bound with this operator |
+| Worker | `PAY_STELLAR_TREASURY_KEY_FILE` | optional [key reference](keys.md) of the treasury; the worker pays the withdrawals of the deployments bound with this treasury. Without it, withdrawals wait until they lapse |
 | Worker | `PAY_STELLAR_FEE_FLOOR_STROOPS` | spendable XLM, in stroops, below which the fee account pays only for finishing work in flight; default `100000000` (10 XLM) |
 | Worker | `PAY_STELLAR_TTL_THRESHOLD_LEDGERS`, `PAY_STELLAR_TTL_EXTEND_TO_LEDGERS`, `PAY_STELLAR_TTL_CHECK_SECS` | a served contract's instance and code are extended to `…EXTEND_TO…` ledgers of life (default 518400, about 30 days) once fewer than `…THRESHOLD…` remain (default 120960, about 7 days), checked every `…CHECK_SECS…` (default 600) |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |

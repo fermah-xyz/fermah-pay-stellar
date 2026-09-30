@@ -42,6 +42,9 @@ pub enum FindingKind {
     DepositAmountMismatch,
     DepositOutcomeMismatch,
     DepositUnsettled,
+    UnknownWithdrawal,
+    WithdrawalMismatch,
+    WithdrawalOutcomeMismatch,
     RoleChanged,
     AdminChange,
     BindingOutOfDate,
@@ -66,6 +69,9 @@ impl FindingKind {
             Self::DepositAmountMismatch => "deposit_amount_mismatch",
             Self::DepositOutcomeMismatch => "deposit_outcome_mismatch",
             Self::DepositUnsettled => "deposit_unsettled",
+            Self::UnknownWithdrawal => "unknown_withdrawal",
+            Self::WithdrawalMismatch => "withdrawal_mismatch",
+            Self::WithdrawalOutcomeMismatch => "withdrawal_outcome_mismatch",
             Self::RoleChanged => "role_changed",
             Self::AdminChange => "admin_change",
             Self::BindingOutOfDate => "binding_out_of_date",
@@ -116,6 +122,15 @@ pub struct ChargeRow {
 pub struct DepositRow {
     pub id: uuid::Uuid,
     pub amount: i64,
+    pub state: String,
+}
+
+/// A withdrawal row as the observer reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WithdrawalRow {
+    pub id: uuid::Uuid,
+    pub amount: i64,
+    pub destination: String,
     pub state: String,
 }
 
@@ -248,6 +263,56 @@ pub fn judge_deposit(
             with_row(),
         )),
         _ => Verdict::Pending,
+    }
+}
+
+/// Judges a `withdraw` event. The row exists before any treasury
+/// authorization is signed for it, so there is nothing to wait for: an
+/// event without one, or that disagrees with it, is final.
+#[must_use]
+pub fn judge_withdrawal(
+    owner: &str,
+    destination: &str,
+    amount: i128,
+    withdrawal_id: &[u8; 32],
+    row: Option<&WithdrawalRow>,
+) -> Verdict {
+    let mut detail = json!({
+        "owner": owner,
+        "destination": destination,
+        "withdrawal_id": fermah_pay_stellar_chain::rpc::hex_lower(withdrawal_id),
+        "amount": amount.to_string(),
+    });
+    let Some(row) = row else {
+        // The treasury authorized a withdrawal the gateway never prepared:
+        // its key was used outside the worker.
+        return Verdict::Finding(Finding::new(
+            FindingKind::UnknownWithdrawal,
+            Severity::Warning,
+            detail,
+        ));
+    };
+    detail["withdrawal"] = json!({
+        "id": row.id.to_string(),
+        "amount": row.amount.to_string(),
+        "destination": row.destination,
+        "state": row.state,
+    });
+    if i128::from(row.amount) != amount || row.destination != destination {
+        return Verdict::Finding(Finding::new(
+            FindingKind::WithdrawalMismatch,
+            Severity::Critical,
+            detail,
+        ));
+    }
+    match row.state.as_str() {
+        "signed" | "submitted" | "confirmed" => Verdict::Matched,
+        // Never held, or held and returned, although the USDC left.
+        _ => Verdict::Finding(Finding::new(
+            FindingKind::WithdrawalOutcomeMismatch,
+            Severity::Critical,
+            detail,
+        )),
     }
 }
 

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH closed AS (\n                UPDATE pay_stellar.withdrawals\n                SET state = $2, last_error = $3, resolved_at = now()\n                WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n                RETURNING buyer_id, amount, signed_at IS NOT NULL AS held\n            ), returned AS (\n                UPDATE pay_stellar.buyers b\n                SET available = b.available + closed.amount\n                FROM closed WHERE b.id = closed.buyer_id AND closed.held\n            )\n            SELECT count(*) AS \"closed!\" FROM closed\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "closed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "853a83ed50fe2f1114c631f325c44fc9099b7274823f53044d22f380a4dbac62"
+}

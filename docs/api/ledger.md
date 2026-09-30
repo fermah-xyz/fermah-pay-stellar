@@ -4,8 +4,8 @@ Service `fermah.pay.stellar.v1.LedgerService`, defined in
 [`proto/fermah/pay/stellar/v1/ledger.proto`](../../proto/fermah/pay/stellar/v1/ledger.proto).
 
 Authentication and scope work as in the [buyer API](buyer.md): the API key
-selects the deployment, and a deposit, charge or buyer of another deployment
-is reported exactly like one that does not exist.
+selects the deployment, and a deposit, charge, withdrawal or buyer of another
+deployment is reported exactly like one that does not exist.
 
 Amounts are USDC base units: one USDC is `10000000`.
 
@@ -94,23 +94,61 @@ database holds. A charge not settled by its last ledger is refused as
 | `QUARANTINED` | no | the contract's answer contradicts the gateway's records (`unknown_account`), or the outcome could not be established from the contract's records; the amount stays debited until an operator resolves it from on-chain evidence to `CHARGED`, `REFUSED` or back to `ADMITTED` |
 
 `GetBalance(buyer_id)` returns `available`, what new charges may still
-debit, and `pending_charges`, the sum of admitted and submitted charges.
+debit; `pending_charges`, the sum of admitted and submitted charges; and
+`pending_withdrawals`, the sum held for signed withdrawals not yet final.
+
+## Withdrawals
+
+A withdrawal returns unused credit from the treasury to the buyer's wallet,
+or to another `G...` account the buyer names; that account needs a USDC
+trustline. It follows the same two steps as a deposit:
+
+1. `PrepareWithdrawal(buyer_id, amount, destination, idempotency_key)`
+   returns the authorization entry the buyer signs. It covers exactly this
+   amount, destination and withdrawal identifier. Nothing is held yet, but a
+   request above the available balance is refused at once.
+2. `SubmitWithdrawal(withdrawal_id, signed_authorization_entry_xdr)`
+   verifies the signed entry. In the same database transaction it holds the
+   amount from the available balance, so charges admitted afterwards cannot
+   spend it. It is refused with `insufficient_balance` if charges admitted
+   since the prepare step left too little.
+
+The settlement worker adds the treasury's authorization and sends the
+withdrawal. The contract records every withdrawal identifier it processes
+and refuses it again, so a withdrawal pays out at most once. If the treasury
+cannot pay yet (for example, it is short of USDC until it is topped up),
+the withdrawal waits in `SIGNED` and is retried until the buyer's
+authorization lapses.
+
+The held amount returns to the available balance only once the withdrawal is
+`FAILED` or `EXPIRED`. Like a deposit's outcome, that is decided after the
+buyer's authorization has lapsed, from the contract's own record of the
+withdrawal. Until then a copy of the signed entry could still be included.
+
+| State | Final | Meaning |
+|---|---|---|
+| `AWAITING_SIGNATURE` | no | waiting for the signed entry; nothing held |
+| `SIGNED` | no | verified and held; waiting to be sent |
+| `SUBMITTED` | no | in a transaction sent to the network |
+| `CONFIRMED` | yes | processed by the contract; the USDC went to `destination` |
+| `FAILED` | yes | included as failed, and the contract never processed it; the amount is back in the available balance |
+| `EXPIRED` | yes | the authorization lapsed and the contract never processed it; any held amount is back in the available balance |
 
 ## Idempotency
 
-`PrepareDeposit` and `CreateCharge` take an `idempotency_key`: 1–128
-characters of `[A-Za-z0-9._:@+-]`, unique per deployment and per operation
-type.
+`PrepareDeposit`, `CreateCharge` and `PrepareWithdrawal` take an
+`idempotency_key`: 1–128 characters of `[A-Za-z0-9._:@+-]`, unique per
+deployment and per operation type.
 
-- Repeating a request with the same key, buyer and amount returns the
-  original deposit or charge with `created = false`, whatever happened in
-  between. A repeated charge is never debited again, even if the balance is
-  now too low for a new one.
-- Reusing a key with a different buyer or amount is refused with
-  `idempotency_conflict`.
+- Repeating a request with the same key, buyer and amount (and, for a
+  withdrawal, destination) returns the original deposit, charge or withdrawal
+  with `created = false`, whatever happened in between. A repeated charge is
+  never debited again, even if the balance is now too low for a new one.
+- Reusing a key with a different buyer, amount or destination is refused
+  with `idempotency_conflict`.
 
-`SubmitDeposit` with the entry already stored for that deposit returns the
-deposit unchanged.
+`SubmitDeposit` or `SubmitWithdrawal` with the entry already stored returns
+the deposit or withdrawal unchanged, and holds nothing again.
 
 ## Refusals
 
@@ -118,15 +156,18 @@ deposit unchanged.
 |---|---|---|---|
 | `INVALID_ARGUMENT` | `invalid_amount` | amount is zero or negative | correct the input |
 | `INVALID_ARGUMENT` | `invalid_idempotency_key` | key outside the allowed alphabet or length | correct the input |
-| `INVALID_ARGUMENT` | `invalid_buyer_id`, `invalid_deposit_id`, `invalid_charge_id` | not a UUID | correct the input |
+| `INVALID_ARGUMENT` | `invalid_buyer_id`, `invalid_deposit_id`, `invalid_charge_id`, `invalid_withdrawal_id` | not a UUID | correct the input |
+| `INVALID_ARGUMENT` | `invalid_destination` | the withdrawal destination is not a `G...` account address | correct the input |
 | `INVALID_ARGUMENT` | `invalid_authorization_entry` | not a base64 XDR authorization entry | send the entry as returned by the wallet |
 | `INVALID_ARGUMENT` | `authorization_mismatch` | the entry differs from the prepared one in more than its signature, or is for another account | sign the prepared entry unchanged |
 | `INVALID_ARGUMENT` | `invalid_signature` | the signature does not verify with the buyer's account key | sign with the buyer's wallet |
-| `ALREADY_EXISTS` | `idempotency_conflict` | key already used with another buyer or amount | use a new key |
-| `NOT_FOUND` | `buyer_not_found`, `deposit_not_found`, `charge_not_found` | no such resource in the caller's deployment | check the ID |
+| `ALREADY_EXISTS` | `idempotency_conflict` | key already used with another buyer, amount or destination | use a new key |
+| `NOT_FOUND` | `buyer_not_found`, `deposit_not_found`, `charge_not_found`, `withdrawal_not_found` | no such resource in the caller's deployment | check the ID |
 | `FAILED_PRECONDITION` | `ledger_not_configured` | the deployment has no ledger contract bound | bind one |
-| `FAILED_PRECONDITION` | `insufficient_balance` | available balance below the amount | deposit first |
+| `FAILED_PRECONDITION` | `insufficient_balance` | available balance below the amount | deposit first, or withdraw less |
 | `FAILED_PRECONDITION` | `deposit_expired` | the authorization's expiration ledger has passed | prepare a new deposit |
 | `FAILED_PRECONDITION` | `deposit_already_signed` | the deposit holds a different signed entry | nothing to do; poll `GetDeposit` |
+| `FAILED_PRECONDITION` | `withdrawal_expired` | the withdrawal's authorization expiration ledger has passed | prepare a new withdrawal |
+| `FAILED_PRECONDITION` | `withdrawal_already_signed` | the withdrawal holds a different signed entry | nothing to do; poll `GetWithdrawal` |
 | `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached; nothing was created | retry |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

@@ -59,6 +59,12 @@ groups:
         annotations:
           summary: "A charge has waited over ten minutes for a batch"
           action: "Check the worker's logs, its sources' sequence and the fee account's balance"
+      - alert: PayStellarWithdrawalsWaiting
+        expr: pay_stellar_oldest_waiting_withdrawal_seconds > 600
+        labels: { severity: warning }
+        annotations:
+          summary: "A signed withdrawal has waited over ten minutes to be sent"
+          action: "Check that a worker holds the treasury key, the treasury's USDC, and the withdrawal's last_error"
       - alert: PayStellarSubmissionsNotLanding
         expr: sum(increase(pay_stellar_submissions_closed_total{state=~"expired|failed|quarantined"}[30m])) > 3
         labels: { severity: warning }

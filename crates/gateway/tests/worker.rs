@@ -10,10 +10,10 @@
 mod common;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use common::{EventStream, Harness, Ledger, Tenant, authed, pool_as, start_with};
+use common::{EventStream, Harness, Ledger, Tenant, assert_refused, authed, pool_as, start_with};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
@@ -59,8 +59,9 @@ use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
     Charge, ChargeState, CreateBuyerRequest, CreateChargeRequest, Deposit, DepositState,
-    GetBalanceRequest, GetChargeRequest, GetDepositRequest, PrepareDepositRequest,
-    SubmitDepositRequest,
+    GetBalanceRequest, GetChargeRequest, GetDepositRequest, GetWithdrawalRequest,
+    PrepareDepositRequest, PrepareWithdrawalRequest, SubmitDepositRequest, SubmitWithdrawalRequest,
+    Withdrawal, WithdrawalState,
 };
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -91,8 +92,11 @@ struct ContractState {
     /// Settled charge records: outcome code and the last ledger they live.
     records: HashMap<(AccountAddress, [u8; 32]), (u32, u32)>,
     deposits: HashSet<(AccountAddress, [u8; 32])>,
-    /// USDC held by each wallet, which a deposit moves into the treasury.
+    withdrawals: HashSet<(AccountAddress, [u8; 32])>,
+    /// USDC held by each wallet, which a deposit moves into the treasury and
+    /// a withdrawal moves back out.
     usdc: HashMap<AccountAddress, i128>,
+    treasury_usdc: i128,
     used_nonces: HashSet<(AccountAddress, i64)>,
 }
 
@@ -207,7 +211,7 @@ impl Net {
     fn touched_archived(&self, call: &InvokeContractArgs) -> Vec<AccountAddress> {
         let args = call.args.as_slice();
         let owners: Vec<AccountAddress> = match call.function_name.0.as_slice() {
-            b"deposit" => vec![owner_of(&args[0])],
+            b"deposit" | b"withdraw" => vec![owner_of(&args[0])],
             b"charge_batch" => {
                 let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
                 charges
@@ -270,7 +274,35 @@ impl Net {
                     return Err("USDC balance too low".to_owned());
                 }
                 *held -= amount;
+                state.treasury_usdc += amount;
                 *state.accounts.entry(owner).or_insert(0) += amount;
+                Ok((state, ScVal::Void, None))
+            }
+            b"withdraw" => {
+                let owner = owner_of(&args[0]);
+                let amount = i128_of(&args[1]);
+                let destination = owner_of(&args[2]);
+                let ScVal::Bytes(id) = &args[3] else { panic!("withdrawal id") };
+                let id: [u8; 32] = id.as_slice().try_into().unwrap();
+                if !authorized.contains(&owner) {
+                    return Err("owner did not authorize".to_owned());
+                }
+                if !authorized.contains(&treasury()) {
+                    return Err("treasury did not authorize".to_owned());
+                }
+                if !state.withdrawals.insert((owner.clone(), id)) {
+                    return Err("Error(Contract, #114)".to_owned());
+                }
+                let balance = state.accounts.get_mut(&owner).ok_or("Error(Contract, #107)")?;
+                if *balance < amount {
+                    return Err("Error(Contract, #108)".to_owned());
+                }
+                *balance -= amount;
+                if state.treasury_usdc < amount {
+                    return Err("USDC balance too low".to_owned());
+                }
+                state.treasury_usdc -= amount;
+                *state.usdc.entry(destination).or_default() += amount;
                 Ok((state, ScVal::Void, None))
             }
             b"charge_batch" => {
@@ -710,6 +742,9 @@ impl Chain for Stellar {
                 existing.insert(self.deployment.charge_record_key(owner, id), ScVal::U32(*code));
             }
         }
+        for (owner, id) in &state.withdrawals {
+            existing.insert(self.deployment.withdrawal_key(owner, id), ScVal::Void);
+        }
         for (owner, id) in &state.deposits {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
         }
@@ -836,8 +871,16 @@ struct TestBuyer {
     key: SecretKey,
 }
 
+/// The treasury's key, the same for every test in this binary.
+static TREASURY_SEED: LazyLock<String> =
+    LazyLock::new(|| SecretKey::generate().unwrap().to_strkey().to_string());
+
+fn treasury_key() -> SecretKey {
+    SecretKey::from_strkey(&TREASURY_SEED).unwrap()
+}
+
 fn treasury() -> AccountAddress {
-    AccountAddress::from_public_key([11; 32])
+    treasury_key().address()
 }
 
 async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
@@ -944,6 +987,94 @@ impl World {
 
     fn worker(&self) -> Worker<Stellar, ManualClock> {
         self.worker_with(&self.source_seed, 100)
+    }
+
+    /// A worker that also holds the treasury's key, so it sends withdrawals.
+    fn paying_worker(&self) -> Worker<Stellar, ManualClock> {
+        self.worker().with_treasury(LocalSigner::arc(treasury_key()))
+    }
+
+    /// Prepares a withdrawal and returns it with the buyer's signed entry.
+    async fn prepared_withdrawal(
+        &self,
+        buyer: &TestBuyer,
+        amount: i64,
+        key: &str,
+    ) -> Result<(Withdrawal, String), tonic::Status> {
+        let request = PrepareWithdrawalRequest {
+            buyer_id: buyer.id.clone(),
+            amount,
+            destination: String::new(),
+            idempotency_key: key.to_owned(),
+        };
+        let withdrawal = self
+            .ledger()
+            .await
+            .prepare_withdrawal(authed(request, &self.tenant.token))
+            .await?
+            .into_inner()
+            .withdrawal
+            .unwrap();
+        let entry = SorobanAuthorizationEntry::from_xdr_base64(
+            &withdrawal.authorization_entry_xdr,
+            Limits::none(),
+        )
+        .unwrap();
+        let signed = sign_entry(&entry, network_id(Network::Testnet), &[&buyer.key]).unwrap();
+        Ok((withdrawal, signed.to_xdr_base64(Limits::none()).unwrap()))
+    }
+
+    async fn submit_withdrawal(
+        &self,
+        withdrawal: &Withdrawal,
+        signed: &str,
+    ) -> Result<Withdrawal, tonic::Status> {
+        let request = SubmitWithdrawalRequest {
+            withdrawal_id: withdrawal.withdrawal_id.clone(),
+            signed_authorization_entry_xdr: signed.to_owned(),
+        };
+        Ok(self
+            .ledger()
+            .await
+            .submit_withdrawal(authed(request, &self.tenant.token))
+            .await?
+            .into_inner()
+            .withdrawal
+            .unwrap())
+    }
+
+    /// A withdrawal to the buyer's wallet, signed and held.
+    async fn withdraw(&self, buyer: &TestBuyer, amount: i64, key: &str) -> Withdrawal {
+        let (withdrawal, signed) = self.prepared_withdrawal(buyer, amount, key).await.unwrap();
+        self.submit_withdrawal(&withdrawal, &signed).await.unwrap()
+    }
+
+    async fn get_withdrawal(&self, id: &str) -> Withdrawal {
+        self.ledger()
+            .await
+            .get_withdrawal(authed(
+                GetWithdrawalRequest { withdrawal_id: id.to_owned() },
+                &self.tenant.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .withdrawal
+            .unwrap()
+    }
+
+    /// What the API reports held for withdrawals not yet final.
+    async fn withdrawing(&self, buyer: &TestBuyer) -> i64 {
+        self.ledger()
+            .await
+            .get_balance(authed(
+                GetBalanceRequest { buyer_id: buyer.id.clone() },
+                &self.tenant.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .pending_withdrawals
     }
 
     async fn ledger(&self) -> LedgerServiceClient<tonic::transport::Channel> {
@@ -1090,6 +1221,7 @@ impl World {
         let query = match table {
             "deposits" => "SELECT last_error FROM pay_stellar.deposits WHERE id = $1::uuid",
             "charges" => "SELECT last_error FROM pay_stellar.charges WHERE id = $1::uuid",
+            "withdrawals" => "SELECT last_error FROM pay_stellar.withdrawals WHERE id = $1::uuid",
             other => panic!("no table {other}"),
         };
         sqlx::query_scalar(query).bind(id).fetch_one(&self.h.owner).await.unwrap()
@@ -2592,4 +2724,235 @@ async fn test_a_leader_whose_lease_is_taken_stops_and_resumes_once_it_is_free(
     sqlx::query("DELETE FROM pay_stellar.leases").execute(&w.h.owner).await.unwrap();
     eventually("the work starting again", || async { started.load(Ordering::SeqCst) == 2 }).await;
     task.abort();
+}
+
+// ---- withdrawals ------------------------------------------------------------
+
+fn usdc_of(w: &World, owner: &AccountAddress) -> i128 {
+    w.stellar.with(|n| n.state.usdc.get(owner).copied().unwrap_or(0))
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_holds_its_amount_and_pays_it_out_once(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let wallet = x.key.address();
+    assert_eq!(usdc_of(&w, &wallet), 0);
+    let (prepared, signed) = w.prepared_withdrawal(&x, 40, "w-1").await.unwrap();
+    // Nothing is held until the buyer's signature is stored.
+    assert_eq!(prepared.state(), WithdrawalState::AwaitingSignature);
+    assert_eq!(w.balance(&x).await, (100, 0));
+
+    let held = w.submit_withdrawal(&prepared, &signed).await.unwrap();
+    assert_eq!(held.state(), WithdrawalState::Signed);
+    assert_eq!(w.balance(&x).await, (60, 0));
+    assert_eq!(w.withdrawing(&x).await, 40);
+    // Submitting the same signed entry again changes nothing.
+    w.submit_withdrawal(&prepared, &signed).await.unwrap();
+    assert_eq!(w.balance(&x).await, (60, 0));
+
+    w.settle(&w.paying_worker()).await;
+    let paid = w.get_withdrawal(&held.withdrawal_id).await;
+    assert_eq!(paid.state(), WithdrawalState::Confirmed);
+    assert!(!paid.transaction_hash.is_empty());
+    assert_eq!(w.balance(&x).await, (60, 0));
+    assert_eq!(w.withdrawing(&x).await, 0);
+    assert_eq!(w.stellar.account(&wallet), Some(60));
+    assert_eq!(usdc_of(&w, &wallet), 40);
+    assert_eq!(w.stellar.with(|n| n.state.treasury_usdc), 60);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_above_the_available_balance_holds_nothing(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    w.charge(&x, 50, "c-1").await;
+    let refused = w.prepared_withdrawal(&x, 60, "w-1").await.unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "insufficient_balance");
+
+    // Covered when prepared, but a charge admitted before the signature is
+    // stored leaves too little: the signature is refused and nothing held.
+    let (prepared, signed) = w.prepared_withdrawal(&x, 40, "w-2").await.unwrap();
+    w.charge(&x, 20, "c-2").await;
+    let refused = w.submit_withdrawal(&prepared, &signed).await.unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "insufficient_balance");
+    assert_eq!(w.balance(&x).await, (30, 70));
+    assert_eq!(
+        w.get_withdrawal(&prepared.withdrawal_id).await.state(),
+        WithdrawalState::AwaitingSignature
+    );
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_nobody_can_send_is_returned_once_its_authorization_lapses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let held = w.withdraw(&x, 40, "w-1").await;
+    // Prepared and never signed: it holds nothing, so it returns nothing.
+    let (unsigned, _) = w.prepared_withdrawal(&x, 30, "w-2").await.unwrap();
+    // A worker without the treasury's key sends nothing.
+    let worker = w.worker();
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Signed);
+    assert_eq!(w.balance(&x).await, (60, 0));
+
+    w.stellar.set_latest(held.expiration_ledger);
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Signed);
+    w.stellar.set_latest(held.expiration_ledger + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Expired);
+    assert_eq!(w.get_withdrawal(&unsigned.withdrawal_id).await.state(), WithdrawalState::Expired);
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(w.withdrawing(&x).await, 0);
+    assert_eq!(w.stellar.account(&x.key.address()), Some(100));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_refused_while_the_treasury_is_short_is_sent_once_it_is_funded(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let held = w.withdraw(&x, 40, "w-1").await;
+    w.stellar.with(|n| n.state.treasury_usdc = 10);
+    let worker = w.paying_worker();
+    assert_eq!(worker.step().await.unwrap(), Step::Idle);
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Signed);
+    let error = w.last_error("withdrawals", &held.withdrawal_id).await.unwrap();
+    assert!(error.contains("USDC balance too low"), "{error}");
+
+    w.stellar.with(|n| n.state.treasury_usdc = 100);
+    w.clock.advance(RETRY_AFTER + Duration::from_secs(1));
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+    assert_eq!(usdc_of(&w, &x.key.address()), 40);
+    assert_eq!(w.balance(&x).await, (60, 0));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_included_elsewhere_is_confirmed_from_the_marker_and_not_returned(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let held = w.withdraw(&x, 40, "w-1").await;
+    let worker = w.paying_worker();
+    let sent_before = w.stellar.sent().len();
+    w.stellar.with(|n| n.drop_sends = 1);
+    worker.step().await.unwrap();
+    // A copy of the broadcast authorizations lands in someone else's
+    // transaction; ours never does.
+    w.stellar.include_elsewhere(&w.stellar.sent()[sent_before]);
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.settle(&worker).await;
+    // Sent again with a fresh treasury authorization, which the contract
+    // refuses: the buyer's nonce is spent and the marker exists.
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Signed);
+    assert_eq!(w.balance(&x).await, (60, 0));
+
+    w.stellar.set_latest(held.expiration_ledger + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+    assert_eq!(w.balance(&x).await, (60, 0));
+    assert_eq!(usdc_of(&w, &x.key.address()), 40);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_included_as_failed_is_returned_only_after_its_authorization_lapses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let held = w.withdraw(&x, 40, "w-1").await;
+    let worker = w.paying_worker();
+    w.stellar.with(|n| n.fail_inclusions = 1);
+    w.settle(&worker).await;
+    // The buyer's signed entry could still be included elsewhere: the
+    // amount stays held.
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Submitted);
+    assert_eq!(w.balance(&x).await, (60, 0));
+
+    w.stellar.set_latest(held.expiration_ledger + 1);
+    w.stellar.with(|n| n.entries_behind = 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Submitted);
+
+    w.stellar.with(|n| n.entries_behind = 0);
+    w.settle(&worker).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Failed);
+    assert_eq!(w.balance(&x).await, (100, 0));
+    assert_eq!(usdc_of(&w, &x.key.address()), 0);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawal_requests_repeat_by_key_and_refuse_what_they_cannot_honour(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let world = &w;
+    let prepare = |amount: i64, destination: String, key: &str| {
+        let request = PrepareWithdrawalRequest {
+            buyer_id: x.id.clone(),
+            amount,
+            destination,
+            idempotency_key: key.to_owned(),
+        };
+        let token = world.tenant.token.clone();
+        async move {
+            world
+                .ledger()
+                .await
+                .prepare_withdrawal(authed(request, &token))
+                .await
+                .map(tonic::Response::into_inner)
+        }
+    };
+    let other = SecretKey::generate().unwrap().address();
+
+    let first = prepare(40, other.to_string(), "w-1").await.unwrap();
+    assert!(first.created);
+    assert_eq!(first.withdrawal.as_ref().unwrap().destination, other.to_string());
+    let again = prepare(40, other.to_string(), "w-1").await.unwrap();
+    assert!(!again.created);
+    assert_eq!(again.withdrawal, first.withdrawal);
+    // The same key for another amount or destination is another request.
+    let conflict = prepare(41, other.to_string(), "w-1").await.unwrap_err();
+    assert_refused(&conflict, tonic::Code::AlreadyExists, "idempotency_conflict");
+    let conflict = prepare(40, String::new(), "w-1").await.unwrap_err();
+    assert_refused(&conflict, tonic::Code::AlreadyExists, "idempotency_conflict");
+
+    // An empty destination is the buyer's wallet; anything else must be an
+    // account address.
+    let own = prepare(10, String::new(), "w-2").await.unwrap();
+    assert_eq!(own.withdrawal.unwrap().destination, x.key.address().to_string());
+    let invalid = prepare(10, "CAAA".to_owned(), "w-3").await.unwrap_err();
+    assert_refused(&invalid, tonic::Code::InvalidArgument, "invalid_destination");
+
+    let missing = w
+        .ledger()
+        .await
+        .get_withdrawal(authed(
+            GetWithdrawalRequest { withdrawal_id: uuid::Uuid::now_v7().to_string() },
+            &w.tenant.token,
+        ))
+        .await
+        .unwrap_err();
+    assert_refused(&missing, tonic::Code::NotFound, "withdrawal_not_found");
+    // Nothing prepared holds anything.
+    assert_eq!(w.balance(&x).await, (100, 0));
 }

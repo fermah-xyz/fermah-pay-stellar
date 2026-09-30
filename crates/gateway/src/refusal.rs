@@ -28,6 +28,11 @@ pub enum Refusal {
     DepositAlreadySigned,
     InvalidChargeId,
     ChargeNotFound,
+    InvalidWithdrawalId,
+    WithdrawalNotFound,
+    WithdrawalExpired,
+    WithdrawalAlreadySigned,
+    InvalidDestination,
     NetworkUnavailable,
     Internal,
 }
@@ -58,6 +63,11 @@ impl Refusal {
             Self::DepositAlreadySigned => "deposit_already_signed",
             Self::InvalidChargeId => "invalid_charge_id",
             Self::ChargeNotFound => "charge_not_found",
+            Self::InvalidWithdrawalId => "invalid_withdrawal_id",
+            Self::WithdrawalNotFound => "withdrawal_not_found",
+            Self::WithdrawalExpired => "withdrawal_expired",
+            Self::WithdrawalAlreadySigned => "withdrawal_already_signed",
+            Self::InvalidDestination => "invalid_destination",
             Self::NetworkUnavailable => "network_unavailable",
             Self::Internal => "internal",
         }
@@ -78,13 +88,20 @@ impl Refusal {
             | Self::InvalidAuthorizationEntry
             | Self::AuthorizationMismatch
             | Self::InvalidSignature
-            | Self::InvalidChargeId => Code::InvalidArgument,
+            | Self::InvalidChargeId
+            | Self::InvalidWithdrawalId
+            | Self::InvalidDestination => Code::InvalidArgument,
             Self::BuyerConflict | Self::IdempotencyConflict => Code::AlreadyExists,
-            Self::BuyerNotFound | Self::DepositNotFound | Self::ChargeNotFound => Code::NotFound,
+            Self::BuyerNotFound
+            | Self::DepositNotFound
+            | Self::ChargeNotFound
+            | Self::WithdrawalNotFound => Code::NotFound,
             Self::InsufficientBalance
             | Self::LedgerNotConfigured
             | Self::DepositExpired
-            | Self::DepositAlreadySigned => Code::FailedPrecondition,
+            | Self::DepositAlreadySigned
+            | Self::WithdrawalExpired
+            | Self::WithdrawalAlreadySigned => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

@@ -1,6 +1,6 @@
-//! Settlement: submits signed deposits and batches of admitted charges
-//! through the durable submission engine, and applies each outcome to the rows
-//! it settles.
+//! Settlement: submits signed deposits, withdrawals and batches of admitted
+//! charges through the durable submission engine, and applies each outcome
+//! to the rows it settles.
 //!
 //! A submission is recorded in the same database transaction that links it to
 //! its deposit or charges, so there is never an envelope in flight without a
@@ -40,6 +40,8 @@ use fermah_pay_stellar_domain::{AccountAddress, Network};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+mod withdrawals;
 
 use crate::events::{ChargeSearch, FoundEntry, search_charge};
 use crate::submission::{Chain, Clock, Engine, EngineError, Kind, Resolution, Restore, State};
@@ -104,6 +106,9 @@ pub struct Worker<C, K> {
     pool: PgPool,
     operator: Arc<dyn Signer>,
     operator_address: AccountAddress,
+    /// The key of the treasury that pays withdrawals, for the deployments
+    /// bound with it; without one, withdrawals wait.
+    treasury: Option<Arc<dyn Signer>>,
     settings: Settings,
     /// Deposits and deployments whose last attempt the network refused in
     /// simulation, and when they may be tried again. In memory: after a
@@ -220,11 +225,20 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             pool,
             operator_address: operator.address(),
             operator,
+            treasury: None,
             settings,
             set_aside: Mutex::new(HashMap::new()),
             ttl_checked_at: Mutex::new(None),
             base_reserve: Mutex::new(None),
         }
+    }
+
+    /// Signs withdrawals with `treasury`, for the deployments whose
+    /// treasury it is.
+    #[must_use]
+    pub fn with_treasury(mut self, treasury: Arc<dyn Signer>) -> Self {
+        self.treasury = Some(treasury);
+        self
     }
 
     pub const fn engine(&self) -> &Engine<C, K> {
@@ -252,6 +266,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         metrics::gauge!("pay_stellar_submissions_in_flight").set(open as f64);
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
+        self.conclude_lapsed_withdrawals().await?;
         self.expire_charges().await?;
         self.record_backlog().await?;
         let mut submitted = Vec::new();
@@ -266,7 +281,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         while funded && open + submitted.len() < self.engine.capacity() {
             let next = match self.submit_deposit().await? {
                 Some(id) => Some(id),
-                None => self.submit_charges().await?,
+                None => match self.submit_withdrawal().await? {
+                    Some(id) => Some(id),
+                    None => self.submit_charges().await?,
+                },
             };
             let Some(id) = next else { break };
             self.engine.broadcast(id).await?;
@@ -457,9 +475,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         Ok(sent)
     }
 
-    /// Charges waiting for a batch on this operator's deployments, and how
-    /// long the oldest has waited: a growing age means batches are not going
-    /// out.
+    /// Charges waiting for a batch, and signed withdrawals waiting to be
+    /// sent, on this operator's deployments, and how long the oldest of each
+    /// has waited: a growing age means they are not going out.
     async fn record_backlog(&self) -> Result<(), WorkerError> {
         let backlog = sqlx::query!(
             r#"
@@ -479,6 +497,26 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         #[allow(clippy::cast_precision_loss)]
         metrics::gauge!("pay_stellar_charges_waiting").set(backlog.waiting as f64);
         metrics::gauge!("pay_stellar_oldest_waiting_charge_seconds").set(backlog.oldest);
+        // Signed withdrawals not yet sent: typically the treasury is short
+        // of USDC, or no worker holds its key.
+        let withdrawals = sqlx::query!(
+            r#"
+            SELECT count(*) AS "waiting!",
+                   COALESCE(EXTRACT(EPOCH FROM now() - min(w.signed_at)), 0)::float8 AS "oldest!"
+            FROM pay_stellar.withdrawals w
+            JOIN pay_stellar.ledger_contracts l
+              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network
+            WHERE w.state = 'signed' AND w.network = $1 AND l.operator_address = $2
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store("read withdrawal backlog"))?;
+        #[allow(clippy::cast_precision_loss)]
+        metrics::gauge!("pay_stellar_withdrawals_waiting").set(withdrawals.waiting as f64);
+        metrics::gauge!("pay_stellar_oldest_waiting_withdrawal_seconds").set(withdrawals.oldest);
         Ok(())
     }
 
@@ -527,7 +565,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
               AND (EXISTS (SELECT 1 FROM pay_stellar.charges c
                            WHERE c.submission_id = s.id AND c.state = 'submitted')
                 OR EXISTS (SELECT 1 FROM pay_stellar.deposits d
-                           WHERE d.submission_id = s.id AND d.state = 'submitted'))
+                           WHERE d.submission_id = s.id AND d.state = 'submitted')
+                OR EXISTS (SELECT 1 FROM pay_stellar.withdrawals w
+                           WHERE w.submission_id = s.id AND w.state = 'submitted'))
             ORDER BY s.created_at
             "#,
             self.network().caip2(),
@@ -540,6 +580,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             match row.kind.as_str() {
                 "charge_batch" => self.settle_charges(row.id, &resolution).await?,
                 "deposit" => self.settle_deposit(row.id, &resolution).await?,
+                "withdrawal" => self.settle_withdrawal(row.id, &resolution).await?,
                 _ => {}
             }
         }

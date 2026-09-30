@@ -1,10 +1,12 @@
-//! `LedgerService` gRPC handlers: deposits, charges and balances.
+//! `LedgerService` gRPC handlers: deposits, charges, withdrawals and
+//! balances.
 //!
 //! The API process never signs or submits a transaction. It prepares what the
 //! buyer signs, verifies what the buyer returns, and admits charges against
 //! the database balance; the worker settles both on-chain.
 
 pub mod store;
+mod withdrawals;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -25,8 +27,10 @@ use fermah_pay_stellar_proto::v1::ledger_service_server::LedgerService;
 use fermah_pay_stellar_proto::v1::{
     Charge, ChargeState as WireChargeState, CreateChargeRequest, CreateChargeResponse, Deposit,
     DepositState as WireDepositState, GetBalanceRequest, GetBalanceResponse, GetChargeRequest,
-    GetChargeResponse, GetDepositRequest, GetDepositResponse, PrepareDepositRequest,
-    PrepareDepositResponse, SubmitDepositRequest, SubmitDepositResponse,
+    GetChargeResponse, GetDepositRequest, GetDepositResponse, GetWithdrawalRequest,
+    GetWithdrawalResponse, PrepareDepositRequest, PrepareDepositResponse, PrepareWithdrawalRequest,
+    PrepareWithdrawalResponse, SubmitDepositRequest, SubmitDepositResponse,
+    SubmitWithdrawalRequest, SubmitWithdrawalResponse,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -53,9 +57,11 @@ impl LatestLedger for RpcClient {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LedgerPolicy {
-    /// Ledgers a buyer's deposit authorization stays valid after it is
-    /// prepared. It covers the time a person takes to approve in a wallet;
-    /// the worker can resubmit the same signed entry until it lapses.
+    /// Ledgers a buyer's deposit or withdrawal authorization stays valid
+    /// after it is prepared. It covers the time a person takes to approve in
+    /// a wallet; the worker can resubmit the same signed entry until it
+    /// lapses. A withdrawal's amount stays held until then if it cannot be
+    /// sent.
     pub authorization_validity_ledgers: u32,
     /// Ledgers after admission during which a charge may still be settled.
     /// Past them the contract refuses it and its amount is returned; the
@@ -154,9 +160,9 @@ fn unsigned(entry: &SorobanAuthorizationEntry) -> SorobanAuthorizationEntry {
     SorobanAuthorizationEntry { credentials, root_invocation: entry.root_invocation.clone() }
 }
 
-const fn signature_refusal(refusal: &SignedEntryRefusal) -> Refusal {
+const fn signature_refusal(refusal: &SignedEntryRefusal, expired: Refusal) -> Refusal {
     match refusal {
-        SignedEntryRefusal::Expired { .. } => Refusal::DepositExpired,
+        SignedEntryRefusal::Expired { .. } => expired,
         SignedEntryRefusal::BadSignature | SignedEntryRefusal::UnsupportedSignature => {
             Refusal::InvalidSignature
         }
@@ -450,7 +456,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             latest,
             self.policy.authorization_validity_ledgers,
         )
-        .map_err(|refusal| signature_refusal(&refusal))?;
+        .map_err(|refusal| signature_refusal(&refusal, Refusal::DepositExpired))?;
 
         let signed_xdr = signed
             .to_xdr_base64(Limits::none())
@@ -529,6 +535,31 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         Ok(Response::new(GetBalanceResponse {
             available: balance.available,
             pending_charges: balance.pending_charges,
+            pending_withdrawals: balance.pending_withdrawals,
         }))
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_withdrawal(
+        &self,
+        request: Request<PrepareWithdrawalRequest>,
+    ) -> Result<Response<PrepareWithdrawalResponse>, Status> {
+        self.prepare_withdrawal_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_withdrawal(
+        &self,
+        request: Request<SubmitWithdrawalRequest>,
+    ) -> Result<Response<SubmitWithdrawalResponse>, Status> {
+        self.submit_withdrawal_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_withdrawal(
+        &self,
+        request: Request<GetWithdrawalRequest>,
+    ) -> Result<Response<GetWithdrawalResponse>, Status> {
+        self.get_withdrawal_request(request).await
     }
 }

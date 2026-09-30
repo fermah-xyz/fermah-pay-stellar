@@ -1,7 +1,8 @@
 //! One seller's view end to end, on testnet, through the gateway API: a new
 //! buyer with no XLM deposits Circle USDC with one wallet signature, is
-//! charged three times, a retried charge is not charged again, and the
-//! gateway's balance matches the contract's.
+//! charged three times, a retried charge is not charged again, withdraws
+//! part of the rest back to the wallet, and the gateway's balance matches
+//! the contract's.
 //!
 //! The gateway and the settlement worker run inside this process, each on a
 //! database pool under its production role, against the database at
@@ -39,7 +40,8 @@ use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
     ChargeState, CreateBuyerRequest, CreateChargeRequest, DepositState, GetBalanceRequest,
-    GetChargeRequest, GetDepositRequest, PrepareDepositRequest, SubmitDepositRequest,
+    GetChargeRequest, GetDepositRequest, GetWithdrawalRequest, PrepareDepositRequest,
+    PrepareWithdrawalRequest, SubmitDepositRequest, SubmitWithdrawalRequest, WithdrawalState,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -59,6 +61,8 @@ const DEPOSIT: i64 = 1_000_000;
 const CHARGES: [i64; 3] = [100_000, 200_000, 300_000];
 /// Settled through the x402 interface, from a commitment the buyer signs.
 const X402_AMOUNT: i64 = 50_000;
+/// Returned to the buyer's wallet: 0.01 USDC.
+const WITHDRAWAL: i64 = 100_000;
 const SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL: Duration = Duration::from_secs(2);
 
@@ -201,7 +205,8 @@ impl Context {
                 ttl_extend_to_ledgers: 518_400,
                 ttl_check_every: Duration::from_secs(600),
             },
-        );
+        )
+        .with_treasury(LocalSigner::arc(self.profile.key("treasury")?));
         let mut worker_stop = stopped.clone();
         let settlement = tokio::spawn(async move {
             worker
@@ -434,16 +439,80 @@ impl Context {
             .context("settlement without a contract charge id")?
             .to_owned();
 
+        // Withdrawal: the wallet signs the prepared entry, the gateway holds
+        // the amount, and the worker adds the treasury's signature.
+        let wallet_before = balances(&self.rpc, &buyer.address(), &asset).await?;
+        let prepared = ledger
+            .prepare_withdrawal(authed(
+                PrepareWithdrawalRequest {
+                    buyer_id: buyer_id.clone(),
+                    amount: WITHDRAWAL,
+                    destination: String::new(),
+                    idempotency_key: "withdrawal-1".to_owned(),
+                },
+                token,
+            )?)
+            .await?
+            .into_inner()
+            .withdrawal
+            .context("no withdrawal returned")?;
+        let entry = SorobanAuthorizationEntry::from_xdr_base64(
+            &prepared.authorization_entry_xdr,
+            Limits::none(),
+        )?;
+        let signed = sign_entry(&entry, network_id(NETWORK), &[&buyer])?;
+        ledger
+            .submit_withdrawal(authed(
+                SubmitWithdrawalRequest {
+                    withdrawal_id: prepared.withdrawal_id.clone(),
+                    signed_authorization_entry_xdr: signed.to_xdr_base64(Limits::none())?,
+                },
+                token,
+            )?)
+            .await?;
+        let withdrawal = until(
+            "withdrawal",
+            || {
+                let mut ledger = ledger.clone();
+                let request =
+                    GetWithdrawalRequest { withdrawal_id: prepared.withdrawal_id.clone() };
+                async move {
+                    ledger
+                        .get_withdrawal(authed(request, token)?)
+                        .await?
+                        .into_inner()
+                        .withdrawal
+                        .context("no withdrawal")
+                }
+            },
+            |w| !matches!(w.state(), WithdrawalState::Signed | WithdrawalState::Submitted),
+        )
+        .await?;
+        ensure!(
+            withdrawal.state() == WithdrawalState::Confirmed,
+            "withdrawal ended {:?}",
+            withdrawal.state()
+        );
+        let wallet_after = balances(&self.rpc, &buyer.address(), &asset).await?;
+        ensure!(
+            wallet_after.usdc.zip(wallet_before.usdc).map(|(a, b)| a - b) == Some(WITHDRAWAL),
+            "the wallet's USDC went from {:?} to {:?}, expected {WITHDRAWAL} more",
+            wallet_before.usdc,
+            wallet_after.usdc
+        );
+
         let balance = ledger
             .get_balance(authed(GetBalanceRequest { buyer_id: buyer_id.clone() }, token)?)
             .await?
             .into_inner();
-        let expected = DEPOSIT - CHARGES.iter().sum::<i64>() - X402_AMOUNT;
+        let expected = DEPOSIT - CHARGES.iter().sum::<i64>() - X402_AMOUNT - WITHDRAWAL;
         ensure!(
-            (balance.available, balance.pending_charges) == (expected, 0),
-            "gateway balance {} pending {}, expected {expected}",
+            (balance.available, balance.pending_charges, balance.pending_withdrawals)
+                == (expected, 0, 0),
+            "gateway balance {} pending charges {} withdrawals {}, expected {expected}",
             balance.available,
-            balance.pending_charges
+            balance.pending_charges,
+            balance.pending_withdrawals
         );
         let account = self
             .rpc
@@ -514,10 +583,13 @@ impl Context {
         batches.sort();
         batches.dedup();
 
-        // Which accounts sequenced the deposit and the batches: the channel
-        // account, holding no XLM, sends while it is free.
-        let hashes: Vec<String> =
-            std::iter::once(deposit.transaction_hash.clone()).chain(batches.clone()).collect();
+        // Which accounts sequenced the deposit, the batches and the
+        // withdrawal: the channel account, holding no XLM, sends while it is
+        // free.
+        let hashes: Vec<String> = std::iter::once(deposit.transaction_hash.clone())
+            .chain(batches.clone())
+            .chain(std::iter::once(withdrawal.transaction_hash.clone()))
+            .collect();
         let sources: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT source_address FROM pay_stellar.submissions
              WHERE encode(outer_hash, 'hex') = ANY($1)",
@@ -538,7 +610,7 @@ impl Context {
         );
         Ok(json!({
             "criterion": "api-end-to-end",
-            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge, and the gateway balance equals the contract balance",
+            "expected": "through the gateway API: a new buyer with 0 XLM deposits Circle USDC with one signature, three charges settle on-chain, a retried charge returns the original, the contract refuses a replayed charge, the buyer withdraws part of the rest to the same wallet with one signature, and the gateway balance equals the contract balance",
             "contract": contract,
             "buyer": buyer.address().to_string(),
             "onboarding_transaction": hex_lower(&onboarding.transaction_hash),
@@ -568,6 +640,15 @@ impl Context {
                 "result": "refused before submission as DuplicateCharge (contract error 110)",
                 "account_unchanged": true,
             },
+            "withdrawal": {
+                "amount": WITHDRAWAL,
+                "destination": withdrawal.destination,
+                "transaction_hash": withdrawal.transaction_hash,
+                "ledger": withdrawal.ledger,
+                "public_explorer_url": tx_url(&withdrawal.transaction_hash),
+                "wallet_usdc_before": wallet_before.usdc,
+                "wallet_usdc_after": wallet_after.usdc,
+            },
             "x402": {
                 "commitment": commitment,
                 "amount": X402_AMOUNT,
@@ -577,6 +658,7 @@ impl Context {
             "observed": {
                 "gateway_available": balance.available,
                 "gateway_pending": balance.pending_charges,
+                "gateway_pending_withdrawals": balance.pending_withdrawals,
                 "contract_balance": account.to_string(),
                 "charge_records": "charged",
                 "buyer_xlm_stroops_before": before.xlm_stroops,
