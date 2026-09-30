@@ -1,0 +1,69 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT ledger, recorded_at,\n                   liabilities::text AS \"liabilities!\", revenue::text AS \"revenue!\",\n                   liabilities_offset::text AS \"liabilities_offset!\",\n                   revenue_offset::text AS \"revenue_offset!\"\n            FROM pay_stellar.reconciliation_baselines\n            WHERE seller_deployment_id = $1 AND ledger <= $2\n            ORDER BY ledger DESC, recorded_at DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.reconciliation_baselines",
+            "name": "ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "recorded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.reconciliation_baselines",
+            "name": "recorded_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "liabilities!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "revenue!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "liabilities_offset!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "revenue_offset!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "054d9971611f470f4121ccef7e2ee98b091396b9b1422fa4f89481003db177bc"
+}

@@ -115,6 +115,13 @@ jobs:
           PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
         run: |
           ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence end-to-end
+      # The event decoders against what the deployed contract really emitted.
+      - name: Read the contract's events
+        env:
+          DEPLOYMENT: ${{ vars.TESTNET_DEPLOYMENT_JSON }}
+        run: |
+          STELLAR_TESTNET_PREPAID_CONTRACT=$(jq -r .contract <<< "$DEPLOYMENT") \
+            cargo test --locked -p fermah-pay-stellar-chain --test testnet_events -- --ignored
       - name: Summarise the transactions
         if: always()
         run: |

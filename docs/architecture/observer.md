@@ -116,15 +116,22 @@ The database is read a moment after the chain, and a submission can settle
 in between; a withdrawal can land between reads. A discrepancy is therefore
 recorded only after it persisted through several consecutive checks
 (`PAY_STELLAR_OBSERVER_CONFIRMATIONS`), and once until it clears. The count
-is kept in memory, so after a restart a standing discrepancy is recorded
-again once it is confirmed again.
+is kept in `pay_stellar.reconciliation_streaks` and updated in the
+transaction that records the finding, so a restart neither records a
+standing discrepancy again nor loses a streak in progress.
 
-The event and database checks rely on the event stream holding the
-contract's whole history: they compare the contract's totals with sums over
-the events the observer read. An observer started after the contract's first
-deposit, or that recorded an `event_gap`, shows the missing history as a
-standing `event_totals_mismatch`; start it at the contract's deployment
-ledger while the node still retains it.
+The event and database checks compare the contract's totals with sums over
+the events the observer read, so they need the contract's history from the
+start. An observer started after the contract's first deposit, or that
+recorded an `event_gap`, cannot explain the totals from events alone.
+
+A baseline resolves this. An operator acknowledges, with
+`admin observer-baseline`, that at the current ledger the contract's totals
+and the database's books stand as they are. From then on both checks
+compare only what changed after that ledger. The baseline is taken only
+while no charge or deposit is in flight, with the books read before and
+after the contract and required to be equal, so the offsets between the
+two are exact. Baselines are append-only and name who took them and why.
 
 ## What it cannot see
 

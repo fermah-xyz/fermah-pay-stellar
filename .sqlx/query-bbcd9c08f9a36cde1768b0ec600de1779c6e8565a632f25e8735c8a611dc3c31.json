@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO pay_stellar.reconciliation_streaks (seller_deployment_id, kind, checks)\n                VALUES ($1, $2, 1)\n                ON CONFLICT (seller_deployment_id, kind) DO UPDATE\n                SET checks = pay_stellar.reconciliation_streaks.checks + 1, updated_at = now()\n                RETURNING checks, recorded\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "checks",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.reconciliation_streaks",
+            "name": "checks"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "recorded",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.reconciliation_streaks",
+            "name": "recorded"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "bbcd9c08f9a36cde1768b0ec600de1779c6e8565a632f25e8735c8a611dc3c31"
+}

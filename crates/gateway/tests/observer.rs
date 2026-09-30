@@ -29,7 +29,9 @@ use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_k
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::events::EventLog;
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
-use fermah_pay_stellar_gateway::observer::{ChainReader, Observer, Settings, StartPosition};
+use fermah_pay_stellar_gateway::observer::{
+    ChainReader, Observer, ObserverError, Settings, StartPosition,
+};
 use fermah_pay_stellar_gateway::submission::Clock;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -986,6 +988,30 @@ async fn test_persistent_deficit_is_recorded_once_as_critical(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_restarted_observer_neither_repeats_nor_forgets_a_streak(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    agreeing(&w).await;
+    w.chain.with(|n| n.trustline = Some((89, 1)));
+    // A streak one check short, then a restart: the next check completes it.
+    reconcile_times(&w.observer(), CONFIRMATIONS - 1).await;
+    assert_eq!(w.findings().await, []);
+    reconcile_times(&w.observer(), 1).await;
+    assert_eq!(w.findings().await, [pair("treasury_deficit", "critical")]);
+    // Recorded, then restarted with the deficit still standing: not again.
+    reconcile_times(&w.observer(), CONFIRMATIONS).await;
+    assert_eq!(w.findings().await.len(), 1);
+    // Cleared and back: a new streak, recorded once it is confirmed.
+    w.chain.with(|n| n.trustline = Some((90, 1)));
+    reconcile_times(&w.observer(), 1).await;
+    w.chain.with(|n| n.trustline = Some((89, 1)));
+    reconcile_times(&w.observer(), CONFIRMATIONS).await;
+    assert_eq!(w.findings().await.len(), 2);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
 async fn test_surplus_is_informational(opts: PgPoolOptions, connect: PgConnectOptions) {
     let w = world(opts, connect).await;
     agreeing(&w).await;
@@ -1084,6 +1110,93 @@ async fn test_contract_totals_the_events_do_not_explain_are_recorded(
     let mut kinds: Vec<String> = w.findings().await.into_iter().map(|(kind, _)| kind).collect();
     kinds.sort();
     assert_eq!(kinds, ["event_totals_mismatch", "ledger_totals_mismatch"]);
+}
+
+// ---- baselines ------------------------------------------------------------
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_baseline_lets_reconciliation_resume_after_lost_history(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let operator = pool_as(&connect, "SET ROLE pay_stellar_operator", 1).await;
+    let w = world(opts, connect).await;
+    // Alice's deposit happened before observation began: the stream lacks
+    // it, so the events cannot explain the contract's totals.
+    let alice = w.buyer(1, 70).await;
+    w.deposit(alice, [1; 32], 100, "confirmed").await;
+    w.charge(alice, [1; 32], 30, "charged", Some("charged")).await;
+    w.chain.emit(1020, charges_event(&[(&account(1), [1; 32], 30, 0)]));
+    w.chain.emit(1030, revenue_event(10, [9; 32]));
+    w.chain.with(|n| {
+        n.liabilities = 70;
+        n.revenue = 20;
+        n.trustline = Some((90, 1));
+    });
+    let observer = w.observer();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("event_totals_mismatch", "warning")]);
+
+    // The operator acknowledges the books as they stand.
+    let ledger = observer.record_baseline(&operator, w.deployment, "history lost").await.unwrap();
+    assert_eq!(ledger, w.chain.with(|n| n.latest));
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await.len(), 1, "compared from the baseline on");
+
+    // A charge after it, on-chain and in the books: nothing to record.
+    w.chain.with(|n| n.latest += 20);
+    w.charge(alice, [2; 32], 5, "charged", Some("charged")).await;
+    sqlx::query("UPDATE pay_stellar.buyers SET available = 65 WHERE id = $1")
+        .bind(alice)
+        .execute(&w.owner)
+        .await
+        .unwrap();
+    w.chain.emit(ledger + 10, charges_event(&[(&account(1), [2; 32], 5, 0)]));
+    w.chain.with(|n| {
+        n.liabilities = 65;
+        n.revenue = 25;
+    });
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await.len(), 1);
+
+    // A change after it that nothing explains is still caught.
+    w.chain.with(|n| {
+        n.liabilities = 60;
+        n.trustline = Some((85, 1));
+    });
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    let mut kinds: Vec<String> = w.findings().await.into_iter().map(|(kind, _)| kind).collect();
+    kinds.sort();
+    assert_eq!(kinds, ["event_totals_mismatch", "event_totals_mismatch", "ledger_totals_mismatch"]);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_baseline_waits_until_nothing_is_in_flight(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let operator = pool_as(&connect, "SET ROLE pay_stellar_operator", 1).await;
+    let w = world(opts, connect).await;
+    let alice = agreeing(&w).await;
+    let pending = w.charge(alice, [2; 32], 5, "submitted", None).await;
+    let refused = w.observer().record_baseline(&operator, w.deployment, "now").await;
+    assert!(matches!(refused, Err(ObserverError::NotQuiet)), "{refused:?}");
+    // The positive control: the charge final, the baseline is taken.
+    sqlx::query(
+        "UPDATE pay_stellar.charges SET state = 'charged', outcome = 'charged', settled_at = now()
+         WHERE id = $1",
+    )
+    .bind(pending)
+    .execute(&w.owner)
+    .await
+    .unwrap();
+    w.observer().record_baseline(&operator, w.deployment, "now").await.unwrap();
+    // The table is append-only, for the operator as for everyone.
+    let error = sqlx::query("DELETE FROM pay_stellar.reconciliation_baselines")
+        .execute(&w.owner)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("append-only"), "{error}");
 }
 
 // ---- privileges -----------------------------------------------------------

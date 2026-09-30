@@ -18,10 +18,8 @@
 pub mod matching;
 mod reconcile;
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use fermah_pay_stellar_chain::prepaid::{ChainAddress, LedgerEvent, Role, ledger_event};
@@ -123,6 +121,10 @@ pub enum ObserverError {
     Inconsistent(String),
     #[error("the contract's instance entry is missing or not the prepaid ledger's layout")]
     UnreadableContract,
+    #[error("no deployment {0} is bound on this network")]
+    UnknownDeployment(Uuid),
+    #[error("charges or deposits are in flight, or the books moved while they were read; retry")]
+    NotQuiet,
 }
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> ObserverError {
@@ -193,22 +195,12 @@ pub struct Recorded {
     pub finding: Finding,
 }
 
-#[derive(Default)]
-struct Streak {
-    count: u32,
-    recorded: bool,
-}
-
 pub struct Observer<R, K> {
     pool: PgPool,
     chain: R,
     clock: K,
     network: Network,
     settings: Settings,
-    /// Consecutive reconciliation checks each discrepancy has persisted
-    /// through, per deployment and kind. In memory: after a restart a
-    /// standing discrepancy is confirmed, and recorded, once more.
-    streaks: Mutex<HashMap<(Uuid, FindingKind), Streak>>,
 }
 
 fn i64_of(value: u32) -> i64 {
@@ -362,7 +354,7 @@ fn locate(detail: &mut Value, event_id: &str, ledger: i64, transaction_hash: &[u
 
 impl<R: ChainReader, K: Clock> Observer<R, K> {
     pub fn new(pool: PgPool, chain: R, clock: K, network: Network, settings: Settings) -> Self {
-        Self { pool, chain, clock, network, settings, streaks: Mutex::new(HashMap::new()) }
+        Self { pool, chain, clock, network, settings }
     }
 
     /// The deployments bound on this observer's network whose binding names
@@ -908,28 +900,64 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         }
     }
 
-    /// Counts one more check in which a discrepancy of `kind` is `present`,
-    /// or ends its streak; whether it has now persisted through enough
-    /// consecutive checks to be recorded, and was not recorded yet.
-    fn persisted(&self, deployment: Uuid, kind: FindingKind, present: bool) -> bool {
-        let Ok(mut streaks) = self.streaks.lock() else { return false };
-        if !present {
-            streaks.remove(&(deployment, kind));
-            return false;
-        }
-        let streak = streaks.entry((deployment, kind)).or_default();
-        streak.count = streak.count.saturating_add(1);
-        streak.count >= self.settings.confirmations.max(1) && !streak.recorded
-    }
-
-    /// Marks discrepancies as recorded, once their findings are committed:
-    /// a failed write leaves them to be recorded on the next check.
-    fn mark_recorded(&self, deployment: Uuid, kinds: impl IntoIterator<Item = FindingKind>) {
-        if let Ok(mut streaks) = self.streaks.lock() {
-            for kind in kinds {
-                streaks.entry((deployment, kind)).or_default().recorded = true;
+    /// Counts one more check for each discrepancy that is present, and ends
+    /// the streak of each that is not, then records the findings of those
+    /// that have now lasted `confirmations` checks and were not recorded
+    /// yet, all in one transaction: a crash leaves a streak and its finding
+    /// together, and a restart does not record a standing discrepancy again.
+    async fn record_checks(
+        &self,
+        deployment: Uuid,
+        checks: Vec<(FindingKind, Option<Finding>)>,
+    ) -> Result<Vec<Recorded>, ObserverError> {
+        let confirmations = i32::try_from(self.settings.confirmations.max(1)).unwrap_or(i32::MAX);
+        let mut tx = self.pool.begin().await.map_err(store("begin reconciliation"))?;
+        let mut recorded = Vec::new();
+        for (kind, finding) in checks {
+            let Some(finding) = finding else {
+                sqlx::query!(
+                    "DELETE FROM pay_stellar.reconciliation_streaks
+                     WHERE seller_deployment_id = $1 AND kind = $2",
+                    deployment,
+                    kind.as_str(),
+                )
+                .execute(&mut *tx)
+                .await
+                .map_err(store("end streak"))?;
+                continue;
+            };
+            let streak = sqlx::query!(
+                r#"
+                INSERT INTO pay_stellar.reconciliation_streaks (seller_deployment_id, kind, checks)
+                VALUES ($1, $2, 1)
+                ON CONFLICT (seller_deployment_id, kind) DO UPDATE
+                SET checks = pay_stellar.reconciliation_streaks.checks + 1, updated_at = now()
+                RETURNING checks, recorded
+                "#,
+                deployment,
+                kind.as_str(),
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(store("count streak"))?;
+            if streak.checks < confirmations || streak.recorded {
+                continue;
             }
+            let entry = Recorded { deployment, event: None, finding };
+            insert_finding(&mut tx, &entry).await?;
+            sqlx::query!(
+                "UPDATE pay_stellar.reconciliation_streaks SET recorded = true
+                 WHERE seller_deployment_id = $1 AND kind = $2",
+                deployment,
+                kind.as_str(),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store("mark streak recorded"))?;
+            recorded.push(entry);
         }
+        tx.commit().await.map_err(store("commit reconciliation"))?;
+        Ok(recorded)
     }
 }
 
