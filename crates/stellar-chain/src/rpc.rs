@@ -72,6 +72,9 @@ pub struct LedgerEntryRecord {
     /// Carries the sponsoring account of the entry, if any.
     pub ext: LedgerEntryExt,
     pub last_modified_ledger: u32,
+    /// Last ledger the entry lives through before it is archived; only
+    /// contract data and code have one.
+    pub live_until_ledger: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +365,7 @@ impl RpcClient {
             xdr: String,
             ext_xdr: Option<String>,
             last_modified_ledger_seq: u32,
+            live_until_ledger_seq: Option<u32>,
         }
         let encoded = keys
             .iter()
@@ -386,6 +390,7 @@ impl RpcClient {
                     data: decode(METHOD, &entry.xdr)?,
                     ext,
                     last_modified_ledger: entry.last_modified_ledger_seq,
+                    live_until_ledger: entry.live_until_ledger_seq,
                 })
             })
             .collect::<Result<Vec<_>, RpcError>>()?;

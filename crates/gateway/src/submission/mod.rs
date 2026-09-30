@@ -39,7 +39,7 @@ use fermah_pay_stellar_chain::rpc::{
 use fermah_pay_stellar_chain::signer::Signer;
 use fermah_pay_stellar_chain::soroban::{self, AssemblyError};
 use fermah_pay_stellar_chain::stellar_xdr::{
-    FeeBumpTransactionInnerTx, HostFunction, Limits, OperationBody, ReadXdr, ScVal,
+    FeeBumpTransactionInnerTx, HostFunction, LedgerKey, Limits, OperationBody, ReadXdr, ScVal,
     SorobanAuthorizationEntry, SorobanCredentials, SorobanTransactionData, Transaction,
     TransactionEnvelope, TransactionV1Envelope, VecM, WriteXdr,
 };
@@ -73,6 +73,8 @@ pub enum Kind {
     ChargeBatch,
     Withdrawal,
     Restore,
+    /// Extends the life of contract entries before they would be archived.
+    Extend,
 }
 
 impl Kind {
@@ -82,6 +84,7 @@ impl Kind {
             Self::ChargeBatch => "charge_batch",
             Self::Withdrawal => "withdrawal",
             Self::Restore => "restore",
+            Self::Extend => "extend",
         }
     }
 }
@@ -424,6 +427,52 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         )
         .map_err(EngineError::Assembly)?;
         self.seal(kind, slot, tx).await
+    }
+
+    /// Builds a transaction extending the life of `keys` to `extend_to`
+    /// ledgers past its inclusion, priced by simulating it over exactly
+    /// those entries. It is recorded and sent like any other submission.
+    pub async fn prepare_extend(
+        &self,
+        keys: Vec<LedgerKey>,
+        extend_to: u32,
+    ) -> Result<Prepared, EngineError> {
+        let slot = self.next_slot(Kind::Extend).await?;
+        let unassembled = soroban::extend_ttl_transaction(
+            &slot.source,
+            slot.sequence,
+            slot.inclusion_fee,
+            slot.valid_until_unix,
+            extend_to,
+        );
+        let for_simulation = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx: soroban::extend_ttl_simulation(unassembled.clone(), keys)
+                .map_err(EngineError::Assembly)?,
+            signatures: VecM::default(),
+        });
+        let simulation =
+            match self.chain.simulate(&for_simulation).await.map_err(EngineError::Chain)? {
+                SimulationOutcome::Succeeded(simulation) => *simulation,
+                SimulationOutcome::Failed { error, .. } => {
+                    return Err(EngineError::SimulationFailed(error));
+                }
+                // An archived entry cannot be extended; it must be restored,
+                // which its next use does on its own.
+                SimulationOutcome::RestoreRequired { transaction_data, min_resource_fee } => {
+                    return Err(EngineError::RestoreRequired(Box::new(Restore {
+                        transaction_data: *transaction_data,
+                        min_resource_fee,
+                    })));
+                }
+            };
+        let tx = soroban::assemble(
+            unassembled,
+            simulation.transaction_data,
+            simulation.min_resource_fee,
+            self.policy.resource_fee_margin_percent,
+        )
+        .map_err(EngineError::Assembly)?;
+        self.seal(Kind::Extend, slot, tx).await
     }
 
     /// Builds the transaction that restores the archived entries a refused

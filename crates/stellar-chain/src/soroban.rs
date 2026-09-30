@@ -10,10 +10,11 @@
 
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use stellar_xdr::{
-    ExtensionPoint, FeeBumpTransaction, FeeBumpTransactionEnvelope, FeeBumpTransactionExt,
-    FeeBumpTransactionInnerTx, HostFunction, InvokeHostFunctionOp, Memo, Operation, OperationBody,
-    Preconditions, RestoreFootprintOp, SequenceNumber, SorobanAuthorizationEntry,
-    SorobanTransactionData, TimeBounds, TimePoint, Transaction, TransactionEnvelope,
+    ExtendFootprintTtlOp, ExtensionPoint, FeeBumpTransaction, FeeBumpTransactionEnvelope,
+    FeeBumpTransactionExt, FeeBumpTransactionInnerTx, HostFunction, InvokeHostFunctionOp,
+    LedgerFootprint, LedgerKey, Memo, Operation, OperationBody, Preconditions, RestoreFootprintOp,
+    SequenceNumber, SorobanAuthorizationEntry, SorobanResources, SorobanTransactionData,
+    SorobanTransactionDataExt, TimeBounds, TimePoint, Transaction, TransactionEnvelope,
     TransactionExt, TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
     TransactionV1Envelope, VecM, WriteXdr,
 };
@@ -98,6 +99,62 @@ pub fn restore_transaction(
             .expect("invariant: one operation fits the operation limit"),
         ext: TransactionExt::V0,
     }
+}
+
+/// A transaction extending the life of the ledger entries its footprint will
+/// name so they live `extend_to` ledgers past the ledger it lands in.
+/// Unassembled: [`extend_ttl_simulation`] gives the copy to simulate, and
+/// [`assemble`] applies what the simulation returns.
+pub fn extend_ttl_transaction(
+    source: &AccountAddress,
+    sequence: i64,
+    inclusion_fee: u32,
+    valid_until_unix: u64,
+    extend_to: u32,
+) -> Transaction {
+    let operation = Operation {
+        source_account: None,
+        body: OperationBody::ExtendFootprintTtl(ExtendFootprintTtlOp {
+            ext: ExtensionPoint::V0,
+            extend_to,
+        }),
+    };
+    Transaction {
+        source_account: muxed_account(source),
+        fee: inclusion_fee,
+        seq_num: SequenceNumber(sequence),
+        cond: Preconditions::Time(TimeBounds {
+            min_time: TimePoint(0),
+            max_time: TimePoint(valid_until_unix),
+        }),
+        memo: Memo::None,
+        operations: VecM::try_from(vec![operation])
+            .expect("invariant: one operation fits the operation limit"),
+        ext: TransactionExt::V0,
+    }
+}
+
+/// `tx` with `keys` as its read-only footprint, the form a node simulates an
+/// extension in: it prices the rent for exactly those entries.
+pub fn extend_ttl_simulation(
+    mut tx: Transaction,
+    keys: Vec<LedgerKey>,
+) -> Result<Transaction, AssemblyError> {
+    tx.ext = TransactionExt::V1(SorobanTransactionData {
+        ext: SorobanTransactionDataExt::V0,
+        resources: SorobanResources {
+            footprint: LedgerFootprint {
+                read_only: VecM::try_from(keys)
+                    .map_err(|_| AssemblyError::Encode("too many footprint keys".to_owned()))?,
+                read_write: VecM::default(),
+            },
+            instructions: 0,
+            disk_read_bytes: 0,
+            write_bytes: 0,
+        },
+        resource_fee: 0,
+    });
+    Ok(tx)
 }
 
 /// Applies simulated resources. The resource fee is raised by

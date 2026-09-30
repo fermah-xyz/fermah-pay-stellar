@@ -28,18 +28,19 @@ use fermah_pay_stellar_chain::rpc::{
 use fermah_pay_stellar_chain::signer::LocalSigner;
 use fermah_pay_stellar_chain::soroban::fee_bump_hash;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    AccountEntry, AccountEntryExt, ContractDataEntry, ContractEvent, ContractEventBody,
-    ContractEventType, ContractEventV0, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx,
-    Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryChanges,
-    LedgerEntryData, LedgerEntryExt, LedgerFootprint, LedgerKey, LedgerKeyAccount,
+    AccountEntry, AccountEntryExt, BytesM, ContractCodeEntry, ContractCodeEntryExt,
+    ContractDataEntry, ContractEvent, ContractEventBody, ContractEventType, ContractEventV0,
+    ContractExecutable, ContractId, ExtensionPoint, FeeBumpTransactionInnerTx, Hash, HostFunction,
+    Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, LedgerEntryChanges, LedgerEntryData,
+    LedgerEntryExt, LedgerFootprint, LedgerKey, LedgerKeyAccount, LedgerKeyContractCode,
     LedgerKeyContractData, Limits, Memo, MuxedAccount, Operation, OperationBody, OperationMetaV2,
-    Preconditions, ReadXdr, ScAddress, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec, SequenceNumber,
-    SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanAuthorizedFunction,
-    SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources, SorobanTransactionData,
-    SorobanTransactionDataExt, SorobanTransactionMetaExt, SorobanTransactionMetaV2, String32,
-    Thresholds, Transaction, TransactionEnvelope, TransactionExt, TransactionMeta,
-    TransactionMetaV4, TransactionResult, TransactionResultExt, TransactionResultResult,
-    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    Preconditions, ReadXdr, ScAddress, ScContractInstance, ScMap, ScMapEntry, ScSymbol, ScVal,
+    ScVec, SequenceNumber, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, SorobanResources,
+    SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
+    SorobanTransactionMetaV2, String32, Thresholds, Transaction, TransactionEnvelope,
+    TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
+    TransactionResultResult, TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::{account_id, address_of};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
@@ -72,6 +73,10 @@ const START_LEDGER: u32 = 1_000;
 const BASE_RESERVE: u32 = 5_000_000;
 /// The worker's fee floor in these tests: 10 XLM.
 const FEE_FLOOR: i64 = 100_000_000;
+/// The worker's contract life settings in these tests.
+const TTL_THRESHOLD: u32 = 120_960;
+const TTL_EXTEND_TO: u32 = 518_400;
+const TTL_CHECK_EVERY: Duration = Duration::from_secs(600);
 const OPERATOR_LEDGERS: u32 = 12;
 const VALIDITY: Duration = Duration::from_secs(60);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -105,6 +110,10 @@ struct Net {
     stuck: HashSet<AccountAddress>,
     /// XLM, in stroops, of any classic account read, i.e. the fee account.
     fee_balance: i64,
+    /// Last ledger the contract's instance and code live through; `None`
+    /// leaves them unreadable, as for a contract this network does not hold.
+    instance_live_until: Option<u32>,
+    code_live_until: u32,
     /// The next included transactions fail without effect.
     fail_inclusions: usize,
     /// `charge_batch` returns one outcome fewer than it settled.
@@ -159,6 +168,17 @@ fn inner(envelope: &TransactionEnvelope) -> Transaction {
 fn is_restore(envelope: &TransactionEnvelope) -> bool {
     matches!(inner(envelope).operations[0].body, OperationBody::RestoreFootprint(_))
 }
+
+/// The ledgers of life an extension asks for, if the envelope is one.
+fn extension(envelope: &TransactionEnvelope) -> Option<u32> {
+    match &inner(envelope).operations[0].body {
+        OperationBody::ExtendFootprintTtl(op) => Some(op.extend_to),
+        _ => None,
+    }
+}
+
+/// The contract's code hash in these tests.
+const WASM: [u8; 32] = [42; 32];
 
 /// The contract call and authorization entries of an envelope.
 fn invocation(
@@ -447,6 +467,18 @@ impl Chain for Stellar {
         if let Some(barrier) = self.with(|n| n.simulation_barrier.clone()) {
             barrier.wait().await;
         }
+        if extension(envelope).is_some() {
+            let TransactionExt::V1(data) = &inner(envelope).ext else {
+                panic!("an extension is simulated with its footprint")
+            };
+            return Ok(SimulationOutcome::Succeeded(Box::new(Simulation {
+                transaction_data: data.clone(),
+                min_resource_fee: 700,
+                auth: Vec::new(),
+                result: None,
+                latest_ledger: self.with(|n| n.latest),
+            })));
+        }
         let (call, auth, _) = invocation(envelope);
         let archived = self.with(|n| n.touched_archived(&call));
         if !archived.is_empty() {
@@ -533,6 +565,11 @@ impl Chain for Stellar {
             let status = if n.fail_inclusions > 0 {
                 n.fail_inclusions -= 1;
                 TransactionStatus::Failed(included(envelope, n.latest, false, None))
+            } else if let Some(extend_to) = extension(envelope) {
+                let until = n.latest + extend_to;
+                n.instance_live_until = n.instance_live_until.map(|now| now.max(until));
+                n.code_live_until = n.code_live_until.max(until);
+                TransactionStatus::Success(included(envelope, n.latest, true, None))
             } else if is_restore(envelope) {
                 let tx = inner(envelope);
                 let TransactionExt::V1(data) = &tx.ext else { panic!("restore without resources") };
@@ -650,6 +687,7 @@ impl Chain for Stellar {
                 }),
                 ext: LedgerEntryExt::V0,
                 last_modified_ledger: 1,
+                live_until_ledger: None,
             }
         };
         let state = self.with(|n| n.state.clone());
@@ -675,6 +713,38 @@ impl Chain for Stellar {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
         }
         let fee_balance = self.with(|n| n.fee_balance);
+        let (instance_until, code_until) =
+            self.with(|n| (n.instance_live_until, n.code_live_until));
+        let instance_key = self.deployment.instance_key();
+        let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(WASM) });
+        let contract_entry = |key: &LedgerKey| {
+            let until = instance_until?;
+            if *key == instance_key {
+                let mut record = contract_data(
+                    key,
+                    ScVal::ContractInstance(ScContractInstance {
+                        executable: ContractExecutable::Wasm(Hash(WASM)),
+                        storage: None,
+                    }),
+                );
+                record.live_until_ledger = Some(until);
+                Some(record)
+            } else if *key == code_key {
+                Some(LedgerEntryRecord {
+                    key: key.clone(),
+                    data: LedgerEntryData::ContractCode(ContractCodeEntry {
+                        ext: ContractCodeEntryExt::V0,
+                        hash: Hash(WASM),
+                        code: BytesM::default(),
+                    }),
+                    ext: LedgerEntryExt::V0,
+                    last_modified_ledger: 1,
+                    live_until_ledger: Some(code_until),
+                })
+            } else {
+                None
+            }
+        };
         let account = |key: &LedgerKey| {
             let LedgerKey::Account(LedgerKeyAccount { account_id }) = key else { return None };
             Some(LedgerEntryRecord {
@@ -693,6 +763,7 @@ impl Chain for Stellar {
                 }),
                 ext: LedgerEntryExt::V0,
                 last_modified_ledger: 1,
+                live_until_ledger: None,
             })
         };
         Ok(LedgerEntries {
@@ -700,6 +771,7 @@ impl Chain for Stellar {
                 .iter()
                 .filter_map(|key| {
                     account(key)
+                        .or_else(|| contract_entry(key))
                         .or_else(|| existing.get(key).map(|val| contract_data(key, val.clone())))
                 })
                 .collect(),
@@ -786,6 +858,8 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
             drop_sends: 0,
             stuck: HashSet::new(),
             fee_balance: 100_000_000_000,
+            instance_live_until: None,
+            code_live_until: 0,
             fail_inclusions: 0,
             truncate_outcomes: false,
             skip_records: false,
@@ -860,6 +934,9 @@ impl World {
                 retry_after: RETRY_AFTER,
                 max_batch,
                 fee_floor_stroops: FEE_FLOOR,
+                ttl_threshold_ledgers: TTL_THRESHOLD,
+                ttl_extend_to_ledgers: TTL_EXTEND_TO,
+                ttl_check_every: TTL_CHECK_EVERY,
             },
         )
     }
@@ -1846,6 +1923,54 @@ async fn test_at_the_fee_floor_work_in_flight_finishes_and_nothing_new_is_built(
     w.settle(&worker).await;
     assert_eq!(w.get_charge(&second.charge_id).await.state(), ChargeState::Charged);
     assert_eq!(w.stellar.account(&x.key.address()), Some(70));
+}
+
+/// Envelopes sent that extend entries' life, with their footprints.
+fn extensions_sent(w: &World) -> Vec<Vec<LedgerKey>> {
+    w.stellar
+        .sent()
+        .iter()
+        .filter(|envelope| extension(envelope).is_some())
+        .map(|envelope| {
+            let TransactionExt::V1(data) = &inner(envelope).ext else { panic!("unassembled") };
+            data.resources.footprint.read_only.to_vec()
+        })
+        .collect()
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_idle_contract_is_extended_before_it_could_be_archived(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let worker = w.worker();
+    let latest = w.stellar.with(|n| n.latest);
+
+    // The positive control: exactly at the threshold, nothing is sent.
+    w.stellar.with(|n| {
+        n.instance_live_until = Some(latest + TTL_THRESHOLD);
+        n.code_live_until = latest + TTL_EXTEND_TO;
+    });
+    worker.step().await.unwrap();
+    assert!(extensions_sent(&w).is_empty());
+
+    // One ledger less, at the next check: instance and code are extended.
+    w.stellar.with(|n| n.instance_live_until = Some(latest + TTL_THRESHOLD - 1));
+    worker.step().await.unwrap();
+    assert!(extensions_sent(&w).is_empty(), "not checked again before the interval");
+    w.clock.advance(TTL_CHECK_EVERY);
+    worker.step().await.unwrap();
+    let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(WASM) });
+    let sent = extensions_sent(&w);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains(&w.stellar.deployment.instance_key()) && sent[0].contains(&code_key));
+    assert_eq!(w.stellar.with(|n| n.instance_live_until), Some(latest + TTL_EXTEND_TO));
+
+    // Extended, it is left alone at the next check.
+    w.clock.advance(TTL_CHECK_EVERY);
+    worker.step().await.unwrap();
+    assert_eq!(extensions_sent(&w).len(), 1);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

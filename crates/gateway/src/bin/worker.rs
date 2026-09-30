@@ -74,6 +74,16 @@ struct Config {
     /// finishing work in flight (10 XLM by default).
     #[arg(long, env = "PAY_STELLAR_FEE_FLOOR_STROOPS", default_value = "100000000")]
     fee_floor_stroops: i64,
+    /// Ledgers of life left below which a served contract's instance and
+    /// code are extended (about 7 days, as the contract itself uses).
+    #[arg(long, env = "PAY_STELLAR_TTL_THRESHOLD_LEDGERS", default_value = "120960")]
+    ttl_threshold_ledgers: u32,
+    /// Ledgers of life an extension gives them (about 30 days).
+    #[arg(long, env = "PAY_STELLAR_TTL_EXTEND_TO_LEDGERS", default_value = "518400")]
+    ttl_extend_to_ledgers: u32,
+    /// Seconds between reads of the contracts' remaining life.
+    #[arg(long, env = "PAY_STELLAR_TTL_CHECK_SECS", default_value = "600")]
+    ttl_check_secs: u64,
     #[arg(long, env = "PAY_STELLAR_RETRY_AFTER_SECS", default_value = "30")]
     retry_after_secs: u64,
     #[arg(long, env = "PAY_STELLAR_BUSY_POLL_MILLIS", default_value = "1000")]
@@ -148,6 +158,9 @@ async fn main() -> anyhow::Result<()> {
             retry_after: Duration::from_secs(config.retry_after_secs),
             max_batch: config.max_batch,
             fee_floor_stroops: config.fee_floor_stroops,
+            ttl_threshold_ledgers: config.ttl_threshold_ledgers,
+            ttl_extend_to_ledgers: config.ttl_extend_to_ledgers,
+            ttl_check_every: Duration::from_secs(config.ttl_check_secs),
         },
     );
     worker

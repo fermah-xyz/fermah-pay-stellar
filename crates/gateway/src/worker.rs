@@ -25,14 +25,15 @@ use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry_wit
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, ChargeRequest, DepositIntent, MAX_BATCH, Outcome, PrepaidDeployment,
-    batch_outcomes, charge_record,
+    batch_outcomes, charge_record, instance_wasm,
 };
 use fermah_pay_stellar_chain::reserve::spendable_stroops;
 use fermah_pay_stellar_chain::rpc::RpcError;
 use fermah_pay_stellar_chain::signer::Signer;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    HostFunction, LedgerEntryData, LedgerKey, LedgerKeyAccount, Limits, ReadXdr, ScAddress, ScVal,
-    SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanCredentials,
+    Hash, HostFunction, LedgerEntryData, LedgerKey, LedgerKeyAccount, LedgerKeyContractCode,
+    Limits, ReadXdr, ScAddress, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    SorobanCredentials,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
@@ -57,6 +58,14 @@ pub struct Settings {
     /// flight rather than for starting more. Resending an envelope costs
     /// nothing until it is included.
     pub fee_floor_stroops: i64,
+    /// Remaining ledgers of life below which a served contract's instance
+    /// and code are extended, and how many ledgers of life they get. The
+    /// contract extends itself on every write; this keeps an idle one from
+    /// being archived.
+    pub ttl_threshold_ledgers: u32,
+    pub ttl_extend_to_ledgers: u32,
+    /// How often the contracts' remaining life is read.
+    pub ttl_check_every: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +109,8 @@ pub struct Worker<C, K> {
     /// simulation, and when they may be tried again. In memory: after a
     /// restart they are simply tried once more.
     set_aside: Mutex<HashMap<Uuid, OffsetDateTime>>,
+    /// When the contracts' remaining life was last read.
+    ttl_checked_at: Mutex<Option<OffsetDateTime>>,
 }
 
 fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> WorkerError {
@@ -205,6 +216,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             operator,
             settings,
             set_aside: Mutex::new(HashMap::new()),
+            ttl_checked_at: Mutex::new(None),
         }
     }
 
@@ -237,6 +249,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         self.record_backlog().await?;
         let mut submitted = Vec::new();
         let funded = self.fee_source_funded().await?;
+        if funded {
+            for id in self.keep_alive(self.engine.capacity().saturating_sub(open)).await? {
+                self.engine.broadcast(id).await?;
+                self.engine.resolve(id).await?;
+                submitted.push(id);
+            }
+        }
         while funded && open + submitted.len() < self.engine.capacity() {
             let next = match self.submit_deposit().await? {
                 Some(id) => Some(id),
@@ -310,6 +329,107 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             );
         }
         Ok(funded)
+    }
+
+    /// Extends the life of each served contract whose instance or code has
+    /// fewer than the threshold's ledgers left, sending at most `room`
+    /// extensions. Runs at most once per check interval; a contract missed
+    /// for lack of room is taken at the next check, well before it could be
+    /// archived.
+    async fn keep_alive(&self, room: usize) -> Result<Vec<Uuid>, WorkerError> {
+        let now = self.engine.clock().now();
+        let every = time::Duration::try_from(self.settings.ttl_check_every)
+            .map_err(|_| WorkerError::Corrupt("TTL check interval out of range"))?;
+        {
+            // A poisoned lock only held a timestamp; the value is still usable.
+            let mut checked =
+                self.ttl_checked_at.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if room == 0 || checked.is_some_and(|at| at + every > now) {
+                return Ok(Vec::new());
+            }
+            *checked = Some(now);
+        }
+        let contracts = sqlx::query!(
+            r#"
+            SELECT l.seller_deployment_id, l.contract_address, l.usdc_address, l.treasury_address
+            FROM pay_stellar.ledger_contracts l
+            WHERE l.network = $1 AND l.operator_address = $2
+            ORDER BY l.seller_deployment_id
+            "#,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("read served contracts"))?;
+        let chain = self.engine.chain();
+        let mut sent = Vec::new();
+        for contract in contracts {
+            if sent.len() >= room {
+                break;
+            }
+            let pinned = deployment(
+                &contract.contract_address,
+                &contract.usdc_address,
+                &contract.treasury_address,
+            )?;
+            let instance_key = pinned.instance_key();
+            let instance = chain
+                .ledger_entries(std::slice::from_ref(&instance_key))
+                .await
+                .map_err(WorkerError::Chain)?;
+            let Some(wasm) = instance.entries.first().and_then(|entry| instance_wasm(&entry.data))
+            else {
+                tracing::warn!(contract = %contract.contract_address, "the contract instance cannot be read; skipping its life check");
+                continue;
+            };
+            let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(wasm) });
+            let read = chain
+                .ledger_entries(&[instance_key.clone(), code_key.clone()])
+                .await
+                .map_err(WorkerError::Chain)?;
+            let mut shortest = u32::MAX;
+            for entry in &read.entries {
+                let left = entry
+                    .live_until_ledger
+                    .map_or(0, |until| until.saturating_sub(read.latest_ledger));
+                let part = if entry.key == code_key { "code" } else { "instance" };
+                metrics::gauge!(
+                    "pay_stellar_contract_ttl_ledgers",
+                    "deployment" => contract.seller_deployment_id.to_string(),
+                    "entry" => part
+                )
+                .set(f64::from(left));
+                shortest = shortest.min(left);
+            }
+            if read.entries.len() < 2 || shortest >= self.settings.ttl_threshold_ledgers {
+                continue;
+            }
+            let prepared = match self
+                .engine
+                .prepare_extend(vec![instance_key, code_key], self.settings.ttl_extend_to_ledgers)
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => break,
+                Err(error) => return Err(error.into()),
+            };
+            let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
+            match self.engine.record(&mut conn, &prepared).await {
+                Ok(_) => {}
+                Err(EngineError::SourceBusy { .. }) => break,
+                Err(error) => return Err(error.into()),
+            }
+            tracing::info!(
+                seller_deployment_id = %contract.seller_deployment_id,
+                ledgers_left = shortest,
+                extend_to = self.settings.ttl_extend_to_ledgers,
+                submission_id = %prepared.id,
+                "extending the contract's life"
+            );
+            sent.push(prepared.id);
+        }
+        Ok(sent)
     }
 
     /// Charges waiting for a batch on this operator's deployments, and how
