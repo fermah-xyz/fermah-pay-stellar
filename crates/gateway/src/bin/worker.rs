@@ -9,10 +9,10 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use fermah_pay_stellar_chain::prepaid::MAX_BATCH;
 use fermah_pay_stellar_chain::rpc::{FeePercentile, RpcClient};
-use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::lease::{self, Lease};
 use fermah_pay_stellar_gateway::submission::{Engine, FeePolicy, Keys, Policy, SystemClock};
-use fermah_pay_stellar_gateway::worker::{Settings, Worker};
+use fermah_pay_stellar_gateway::worker::{Reserve, Settings, Worker};
 use fermah_pay_stellar_gateway::{shutdown, signing, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
 
@@ -51,6 +51,22 @@ struct Config {
     /// without it, withdrawals wait and lapse.
     #[arg(long, env = "PAY_STELLAR_TREASURY_KEY_FILE")]
     treasury_key_file: Option<String>,
+    /// `G...` account of the cold reserve. With the treasury key, the worker
+    /// moves what the treasury holds above the ceiling there; the worker
+    /// never holds the reserve's keys.
+    #[arg(long, env = "PAY_STELLAR_COLD_RESERVE", requires = "treasury_key_file")]
+    cold_reserve: Option<AccountAddress>,
+    /// USDC base units below which the treasury needs topping up from the
+    /// reserve (reported, not acted on).
+    #[arg(long, env = "PAY_STELLAR_HOT_TREASURY_FLOOR", requires = "cold_reserve")]
+    hot_treasury_floor: Option<i64>,
+    /// USDC base units a sweep leaves in the treasury, or more while held
+    /// withdrawals need it.
+    #[arg(long, env = "PAY_STELLAR_HOT_TREASURY_TARGET", requires = "cold_reserve")]
+    hot_treasury_target: Option<i64>,
+    /// USDC base units above which the treasury is swept.
+    #[arg(long, env = "PAY_STELLAR_HOT_TREASURY_CEILING", requires = "cold_reserve")]
+    hot_treasury_ceiling: Option<i64>,
     /// Lowest inclusion bid per operation, in stroops. An envelope bids more
     /// when recent fees, or the expiry of the previous envelope, call for it.
     #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE", default_value = "10000")]
@@ -132,6 +148,19 @@ async fn main() -> anyhow::Result<()> {
     let keys = Keys::new(sources, fee_source).context("source account settings")?;
     let operator =
         signing::open(&config.operator_key_file).await.context("opening the operator key")?;
+    let reserve = match config.cold_reserve.clone() {
+        Some(cold) => {
+            let (Some(floor), Some(target), Some(ceiling)) = (
+                config.hot_treasury_floor,
+                config.hot_treasury_target,
+                config.hot_treasury_ceiling,
+            ) else {
+                bail!("a cold reserve needs the hot treasury's floor, target and ceiling");
+            };
+            Some(Reserve::new(cold, floor, target, ceiling).context("hot treasury settings")?)
+        }
+        None => None,
+    };
     let treasury = match &config.treasury_key_file {
         Some(reference) => {
             Some(signing::open(reference).await.context("opening the treasury key")?)
@@ -158,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         fee_source = %keys.fee_source_address(),
         operator = %operator.address(),
         treasury = ?treasury.as_ref().map(|t| t.address().to_string()),
+        cold_reserve = ?reserve.as_ref().map(|r| r.cold().to_string()),
         lease_holder = %lease.holder(),
         inclusion_fee_floor = fees.floor,
         inclusion_fee_cap = fees.cap,
@@ -193,6 +223,9 @@ async fn main() -> anyhow::Result<()> {
     );
     if let Some(treasury) = treasury {
         worker = worker.with_treasury(treasury);
+    }
+    if let Some(reserve) = reserve {
+        worker = worker.with_reserve(reserve);
     }
     lease::lead(&lease, "worker", shutdown::signal(), |stop| {
         worker.run(

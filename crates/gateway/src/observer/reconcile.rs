@@ -36,7 +36,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use fermah_pay_stellar_chain::prepaid::{InstanceState, PrepaidDeployment, instance_state};
-use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, TrustLineFlags};
+use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, LedgerKey, TrustLineFlags};
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_key};
 use fermah_pay_stellar_domain::AccountAddress;
 
@@ -53,6 +53,9 @@ struct Reading {
     /// Balance and flags of the treasury's USDC trustline; `None` when it has
     /// none, which holds nothing and can receive nothing.
     trustline: Option<(i64, u32)>,
+    /// The treasury's cold reserve, if one is configured, and its USDC
+    /// balance, read at the same ledger; `None` without a trustline.
+    reserve: Option<(AccountAddress, Option<i64>)>,
     state: InstanceState,
 }
 
@@ -153,13 +156,17 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
 
         let totals = reading.state.totals;
         let owed = totals.liabilities + totals.revenue;
-        let held = i128::from(reading.trustline.map_or(0, |(balance, _)| balance));
+        let hot = i128::from(reading.trustline.map_or(0, |(balance, _)| balance));
+        let cold = i128::from(reading.reserve.as_ref().and_then(|(_, b)| *b).unwrap_or(0));
+        let held = hot + cold;
         // Base units as floats: exact below 2^53, far above any balance here.
         #[allow(clippy::cast_precision_loss)]
         {
             let id = deployment.id.to_string();
             metrics::gauge!("pay_stellar_treasury_usdc", "deployment" => id.clone())
-                .set(held as f64);
+                .set(hot as f64);
+            metrics::gauge!("pay_stellar_cold_reserve_usdc", "deployment" => id.clone())
+                .set(cold as f64);
             metrics::gauge!("pay_stellar_contract_liabilities", "deployment" => id.clone())
                 .set(totals.liabilities as f64);
             metrics::gauge!("pay_stellar_contract_revenue", "deployment" => id)
@@ -168,8 +175,11 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let solvency = json!({
             "ledger": reading.ledger,
             "treasury": reading.treasury.as_str(),
-            "treasury_usdc": held.to_string(),
+            "treasury_usdc": hot.to_string(),
             "trustline": reading.trustline.is_some(),
+            "reserve": reading.reserve.as_ref().map(|(account, _)| account.as_str()),
+            "reserve_usdc": cold.to_string(),
+            "held": held.to_string(),
             "liabilities": totals.liabilities.to_string(),
             "revenue": totals.revenue.to_string(),
             "owed": owed.to_string(),
@@ -359,11 +369,11 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let mut treasury = deployment.treasury.clone();
         for _ in 0..3 {
             let line = trustline_key(&treasury, &usdc);
-            let read = self
-                .chain
-                .ledger_entries(&[probe.instance_key(), line.clone()])
-                .await
-                .map_err(ObserverError::Chain)?;
+            let reserve = self.reserves.get(&treasury).cloned();
+            let reserve_line = reserve.as_ref().map(|cold| trustline_key(cold, &usdc));
+            let mut keys = vec![probe.instance_key(), line.clone()];
+            keys.extend(reserve_line.clone());
+            let read = self.chain.ledger_entries(&keys).await.map_err(ObserverError::Chain)?;
             let state = read
                 .entries
                 .iter()
@@ -377,14 +387,20 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 treasury = state.config.treasury.clone();
                 continue;
             }
-            let trustline =
-                read.entries.iter().find(|record| record.key == line).and_then(|record| {
+            let trustline_of = |key: &LedgerKey| {
+                read.entries.iter().find(|record| record.key == *key).and_then(|record| {
                     match &record.data {
                         LedgerEntryData::Trustline(entry) => Some((entry.balance, entry.flags)),
                         _ => None,
                     }
-                });
-            return Ok(Reading { ledger: read.latest_ledger, treasury, trustline, state });
+                })
+            };
+            let trustline = trustline_of(&line);
+            let reserve = reserve.map(|cold| {
+                let balance = reserve_line.as_ref().and_then(trustline_of).map(|(b, _)| b);
+                (cold, balance)
+            });
+            return Ok(Reading { ledger: read.latest_ledger, treasury, trustline, reserve, state });
         }
         Err(ObserverError::Corrupt("the treasury changed on every read"))
     }

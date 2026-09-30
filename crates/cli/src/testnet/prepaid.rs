@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use anyhow::{Context as _, bail, ensure};
 use fermah_pay_stellar_chain::authorization::{sign_entry, verify_signed_entry};
 use fermah_pay_stellar_chain::keys::SecretKey;
+use fermah_pay_stellar_chain::multisig::{
+    AccountSigners, Policy as MultisigPolicy, account_signers, set_signers_transaction,
+};
 use fermah_pay_stellar_chain::onboarding::{
     MAX_BUYERS_PER_TRANSACTION, SubmissionPolicy, onboard_buyers,
 };
@@ -44,6 +47,8 @@ const USDC_RESERVE: &str = "usdc-reserve";
 /// A further source account for the settlement worker, sponsored with zero
 /// XLM like the roles: fee bumps pay for everything it sends.
 const CHANNEL: &str = "channel-1";
+/// The treasury's cold reserve: two of its three keys move anything.
+const COLD_RESERVE: &str = "cold-reserve";
 const ROLES: [&str; 4] = ["admin", "operator", "seller", "treasury"];
 /// Ledgers (about 5 s each) a signer's authorization stays valid.
 const AUTH_VALIDITY_LEDGERS: u32 = 60;
@@ -272,54 +277,10 @@ impl Context {
     /// signers' reserves, so the admin still holds no XLM. Running it again
     /// on an account that already has the policy changes nothing.
     pub async fn admin_multisig(&self) -> anyhow::Result<()> {
-        use fermah_pay_stellar_chain::multisig::{
-            Policy, account_signers, set_signers_transaction,
-        };
         self.rpc.verify_network(NETWORK).await?;
-        let sponsor = self.profile.key(SPONSOR)?;
         let admin = self.profile.key("admin")?;
         let cosigners = [self.profile.key("admin-signer-1")?, self.profile.key("admin-signer-2")?];
-        let policy = Policy {
-            signers: cosigners.iter().map(|key| (key.address(), 1)).collect(),
-            master_weight: 1,
-            low: 1,
-            medium: 2,
-            high: 2,
-        };
-        let matches = |current: &fermah_pay_stellar_chain::multisig::AccountSigners| {
-            (current.master_weight, current.low, current.medium, current.high)
-                == (policy.master_weight, policy.low, policy.medium, policy.high)
-                && policy.signers.iter().all(|signer| current.signers.contains(signer))
-        };
-        let before = account_signers(&self.rpc, &admin.address())
-            .await?
-            .context("the admin account does not exist")?;
-        let transaction_hash = if matches(&before) {
-            None
-        } else {
-            let sequence = self.sequence_of(&sponsor.address()).await?;
-            let valid_until = unix_now() + self.policy.validity.as_secs();
-            let tx = set_signers_transaction(
-                &sponsor.address(),
-                sequence + 1,
-                &admin.address(),
-                &policy,
-                self.policy.inclusion_fee,
-                valid_until,
-            );
-            let hash = transaction::transaction_hash(&tx, NETWORK)?;
-            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, &admin])?;
-            submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
-                .await?;
-            Some(hex_lower(&hash))
-        };
-        let after = account_signers(&self.rpc, &admin.address())
-            .await?
-            .context("the admin account does not exist")?;
-        ensure!(matches(&after), "the admin account's policy is not the requested one: {after:?}");
-        let admin_xlm =
-            balances(&self.rpc, &admin.address(), &usdc::circle_usdc(NETWORK)).await?.xlm_stroops;
-        ensure!(admin_xlm == Some(0), "the admin account holds XLM: {admin_xlm:?}");
+        let (transaction_hash, after, xlm) = self.two_of_three(&admin, &cosigners).await?;
         evidence::write(
             &self.evidence_dir,
             "admin-multisig",
@@ -328,14 +289,161 @@ impl Context {
                 "expected": "the admin account needs two of its three keys for any contract call, payment or change of signers, and still holds no XLM",
                 "admin": admin.address().to_string(),
                 "transaction_hash": transaction_hash,
+                "observed": signers_json(&after, xlm, "admin_xlm_stroops"),
+            }),
+        )
+    }
+
+    /// Creates the treasury's cold reserve if it is missing: an account with
+    /// a Circle USDC trustline, sponsored like the roles so it holds no XLM,
+    /// that needs two of its three keys to move anything. The worker never
+    /// holds any of them.
+    pub async fn cold_reserve(&self) -> anyhow::Result<()> {
+        self.rpc.verify_network(NETWORK).await?;
+        let sponsor = self.profile.key(SPONSOR)?;
+        let reserve = self.profile.key(COLD_RESERVE)?;
+        let mut onboarding = None;
+        if !self.account_exists(&reserve.address()).await? {
+            let receipt = onboard_buyers(
+                &self.rpc,
+                NETWORK,
+                &sponsor,
+                &[&reserve],
+                &usdc::circle_usdc(NETWORK),
+                self.onboarding_policy(),
+            )
+            .await?;
+            for provenance in &receipt.provenance {
+                ensure!(
+                    provenance.violations_for_sponsor(&sponsor.address()).is_empty(),
+                    "the cold reserve is not fully sponsored"
+                );
+            }
+            onboarding = Some(hex_lower(&receipt.transaction_hash));
+        }
+        let cosigners = [self.profile.key("cold-signer-1")?, self.profile.key("cold-signer-2")?];
+        let (transaction_hash, after, xlm) = self.two_of_three(&reserve, &cosigners).await?;
+        let usdc = balances(&self.rpc, &reserve.address(), &usdc::circle_usdc(NETWORK))
+            .await?
+            .usdc
+            .context("the cold reserve has no USDC trustline")?;
+        evidence::write(
+            &self.evidence_dir,
+            "cold-reserve",
+            json!({
+                "criterion": "cold-reserve",
+                "expected": "the treasury's cold reserve holds a Circle USDC trustline, needs two of its three keys to move anything, and holds no XLM",
+                "reserve": reserve.address().to_string(),
+                "onboarding_transaction": onboarding,
+                "signers_transaction": transaction_hash,
                 "observed": {
-                    "master_weight": after.master_weight,
-                    "signers": after.signers.iter().map(|(k, w)| json!({ "key": k.to_string(), "weight": w })).collect::<Vec<_>>(),
-                    "thresholds": { "low": after.low, "medium": after.medium, "high": after.high },
-                    "admin_xlm_stroops": admin_xlm,
+                    "usdc": usdc,
+                    "policy": signers_json(&after, xlm, "reserve_xlm_stroops"),
                 },
             }),
         )
+    }
+
+    /// Gives `account` its own key and `cosigners` one weight each, and
+    /// requires two of the three for anything medium or high; the sponsor
+    /// pays for the signers' reserves. Returns the transaction's hash (none
+    /// if the policy was in place already), the policy as the ledger holds
+    /// it, and the account's XLM, which must be zero.
+    async fn two_of_three(
+        &self,
+        account: &SecretKey,
+        cosigners: &[SecretKey; 2],
+    ) -> anyhow::Result<(Option<String>, AccountSigners, Option<i64>)> {
+        let sponsor = self.profile.key(SPONSOR)?;
+        let policy = MultisigPolicy {
+            signers: cosigners.iter().map(|key| (key.address(), 1)).collect(),
+            master_weight: 1,
+            low: 1,
+            medium: 2,
+            high: 2,
+        };
+        let matches = |current: &AccountSigners| {
+            (current.master_weight, current.low, current.medium, current.high)
+                == (policy.master_weight, policy.low, policy.medium, policy.high)
+                && policy.signers.iter().all(|signer| current.signers.contains(signer))
+        };
+        let before = account_signers(&self.rpc, &account.address())
+            .await?
+            .with_context(|| format!("{} does not exist", account.address()))?;
+        let transaction_hash = if matches(&before) {
+            None
+        } else {
+            let sequence = self.sequence_of(&sponsor.address()).await?;
+            let valid_until = unix_now() + self.policy.validity.as_secs();
+            let tx = set_signers_transaction(
+                &sponsor.address(),
+                sequence + 1,
+                &account.address(),
+                &policy,
+                self.policy.inclusion_fee,
+                valid_until,
+            );
+            let hash = transaction::transaction_hash(&tx, NETWORK)?;
+            let envelope = transaction::sign(tx, NETWORK, &[&sponsor, account])?;
+            submit_and_wait(&self.rpc, &envelope, hash, valid_until, self.policy.poll_interval)
+                .await?;
+            Some(hex_lower(&hash))
+        };
+        let after = account_signers(&self.rpc, &account.address())
+            .await?
+            .with_context(|| format!("{} does not exist", account.address()))?;
+        ensure!(matches(&after), "the account's policy is not the requested one: {after:?}");
+        let xlm =
+            balances(&self.rpc, &account.address(), &usdc::circle_usdc(NETWORK)).await?.xlm_stroops;
+        ensure!(xlm == Some(0), "{} holds XLM: {xlm:?}", account.address());
+        Ok((transaction_hash, after, xlm))
+    }
+
+    /// Moves `amount` of the treasury's USDC to the cold reserve with the
+    /// same call and treasury authorization the settlement worker's sweep
+    /// builds.
+    pub async fn sweep(&self, amount: i128) -> anyhow::Result<()> {
+        self.rpc.verify_network(NETWORK).await?;
+        let (recorded, pinned) = self.deployment()?;
+        let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
+        let treasury = self.profile.key("treasury")?;
+        let reserve = self.profile.key(COLD_RESERVE)?.address();
+        let submitter = self.submitter(&source, &fee_source);
+        let asset = usdc::circle_usdc(NETWORK);
+        let hot_before = balances(&self.rpc, &treasury.address(), &asset).await?.usdc;
+        let cold_before = balances(&self.rpc, &reserve, &asset).await?.usdc;
+        let function =
+            HostFunction::InvokeContract(pinned.treasury_transfer_call(&reserve, amount));
+        let auth = self
+            .authorize(
+                &submitter,
+                &function,
+                &[(&treasury, pinned.treasury_transfer_authorization(&reserve, amount))],
+            )
+            .await?;
+        let receipt = submitter.submit(function, auth).await?;
+        let hot_after = balances(&self.rpc, &treasury.address(), &asset).await?.usdc;
+        let cold_after = balances(&self.rpc, &reserve, &asset).await?.usdc;
+        let moved = |before: Option<i64>, after: Option<i64>| after.zip(before).map(|(a, b)| a - b);
+        ensure!(
+            moved(cold_before, cold_after) == Some(i64::try_from(amount)?),
+            "the reserve's USDC went from {cold_before:?} to {cold_after:?}"
+        );
+        let mut record = receipt_json(&receipt);
+        record["criterion"] = json!("treasury-sweep");
+        record["expected"] =
+            json!("the treasury's key alone moves USDC from the treasury to its cold reserve");
+        record["contract"] = json!(recorded.contract);
+        record["treasury"] = json!(treasury.address().to_string());
+        record["reserve"] = json!(reserve.to_string());
+        record["amount"] = json!(amount.to_string());
+        record["observed"] = json!({
+            "treasury_usdc_before": hot_before,
+            "treasury_usdc_after": hot_after,
+            "reserve_usdc_before": cold_before,
+            "reserve_usdc_after": cold_after,
+        });
+        evidence::write(&self.evidence_dir, "treasury-sweep", record)
     }
 
     /// Replaces the recorded contract's code with `wasm`, authorized by the
@@ -776,21 +884,31 @@ impl Context {
             .context("get_totals returned nothing")?;
         let Totals { liabilities, revenue } =
             contract_totals(&totals).with_context(|| format!("unexpected totals {totals:?}"))?;
-        let held = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(NETWORK))
+        let hot = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(NETWORK))
             .await?
             .usdc
             .context("treasury has no USDC trustline")?;
+        // Swept to the cold reserve, it is still the treasury's.
+        let cold = if self.profile.has_key(COLD_RESERVE) {
+            let reserve = self.profile.key(COLD_RESERVE)?.address();
+            balances(&self.rpc, &reserve, &usdc::circle_usdc(NETWORK)).await?.usdc.unwrap_or(0)
+        } else {
+            0
+        };
+        let held = hot + cold;
         let owed = liabilities + revenue;
         evidence::write(
             &self.evidence_dir,
             "treasury-solvency",
             json!({
                 "criterion": "treasury-solvency",
-                "expected": "treasury USDC balance equals buyer liabilities plus unwithdrawn revenue when no USDC left the treasury outside the contract",
+                "expected": "the USDC of the treasury and its cold reserve equals buyer liabilities plus unwithdrawn revenue when no USDC left them outside the contract",
                 "contract": recorded.contract,
                 "treasury": recorded.treasury,
                 "observed": {
-                    "treasury_usdc": held.to_string(),
+                    "treasury_usdc": hot.to_string(),
+                    "reserve_usdc": cold.to_string(),
+                    "held": held.to_string(),
                     "liabilities": liabilities.to_string(),
                     "revenue": revenue.to_string(),
                     "owed": owed.to_string(),
@@ -855,6 +973,16 @@ impl Context {
         });
         evidence::write(&self.evidence_dir, &format!("withdraw-buyer-{buyer}"), record)
     }
+}
+
+fn signers_json(policy: &AccountSigners, xlm: Option<i64>, xlm_field: &str) -> serde_json::Value {
+    let mut observed = json!({
+        "master_weight": policy.master_weight,
+        "signers": policy.signers.iter().map(|(k, w)| json!({ "key": k.to_string(), "weight": w })).collect::<Vec<_>>(),
+        "thresholds": { "low": policy.low, "medium": policy.medium, "high": policy.high },
+    });
+    observed[xlm_field] = json!(xlm);
+    observed
 }
 
 fn unix_now() -> u64 {

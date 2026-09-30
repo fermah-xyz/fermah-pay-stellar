@@ -22,6 +22,7 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_oldest_waiting_charge_seconds` | worker | how long the oldest of them has waited |
 | `pay_stellar_charges_settled_total{result}` | worker | charges settled by result: `charged`, a refusal outcome, `quarantined`, `requeued` |
 | `pay_stellar_deposits_closed_total{state}` | worker | deposits closed: `confirmed`, `expired`, `failed` |
+| `pay_stellar_hot_treasury_usdc`, `pay_stellar_hot_treasury_floor_usdc` | worker | the treasury's USDC and its floor, when a [cold reserve](treasury.md) is configured |
 | `pay_stellar_withdrawals_closed_total{state}` | worker | withdrawals closed: `confirmed`, `expired`, `failed` |
 | `pay_stellar_withdrawals_waiting` | worker | signed withdrawals not yet sent |
 | `pay_stellar_oldest_waiting_withdrawal_seconds` | worker | how long the oldest of them has waited since it was signed |
@@ -33,6 +34,7 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_findings_total{kind,severity}` | observer | findings recorded, as listed in [the observer guide](observer.md) |
 | `pay_stellar_observer_lag_ledgers{deployment}` | observer | ledgers between the observer's position and the node's latest |
 | `pay_stellar_treasury_usdc{deployment}` | observer | the treasury's USDC, in base units |
+| `pay_stellar_cold_reserve_usdc{deployment}` | observer | the USDC of the treasury's cold reserve, 0 without one |
 | `pay_stellar_contract_liabilities{deployment}`, `pay_stellar_contract_revenue{deployment}` | observer | what the contract owes buyers and the seller |
 | `pay_stellar_api_refusals_total{reason}` | gateway | gRPC requests refused, by reason |
 | `pay_stellar_x402_total{call,result}` | gateway | x402 verifications and settlements, by result |
@@ -44,7 +46,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | Alert | Severity | What to do |
 |---|---|---|
 | `PayStellarCriticalFinding` | critical | Read the finding in `pay_stellar.reconciliation_findings` and act as [the observer guide](observer.md) says for its kind |
-| `PayStellarTreasuryShort` | critical | The treasury holds less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
+| `PayStellarTreasuryShort` | critical | The treasury and its cold reserve hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
 | `PayStellarChargeQuarantined` | critical | A charge's amount is held from its buyer until resolved; see [quarantine](quarantine.md) |
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |
 | `PayStellarFeeAccountLow` | warning | Fund the fee account before it reaches the floor. The rule assumes the default floor of 10 XLM; adjust it if `PAY_STELLAR_FEE_FLOOR_STROOPS` differs |
@@ -52,6 +54,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarContractLifeShort` | critical | The worker extends a contract below about 7 days of life; at half that it has failed to. Check its logs, its source accounts and the fee account |
 | `PayStellarChargesWaiting` | warning | Batches are not going out. Check the worker's logs, its source accounts and the fee account's balance |
 | `PayStellarSubmissionsNotLanding` | warning | Transactions keep expiring or failing. Check the inclusion bid against network fees and the RPC node's health |
+| `PayStellarHotTreasuryLow` | warning | The treasury has been below its floor for ten minutes. Top it up from the [cold reserve](treasury.md#topping-the-treasury-up) before withdrawals wait |
 | `PayStellarWithdrawalsWaiting` | warning | A signed withdrawal has not gone out for ten minutes while its amount is held. Check that a worker holds the treasury key, that the treasury holds enough USDC, and the withdrawal's `last_error` |
 | `PayStellarWorkerFailing` | warning | Settlement rounds keep failing; read the worker's error logs |
 | `PayStellarObserverLagging` | warning | The observer is more than an hour behind. Fix it before the events it has not read leave the RPC node's retention |

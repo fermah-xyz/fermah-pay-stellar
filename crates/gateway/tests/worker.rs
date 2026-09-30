@@ -40,7 +40,8 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     SorobanTransactionData, SorobanTransactionDataExt, SorobanTransactionMetaExt,
     SorobanTransactionMetaV2, String32, Thresholds, Transaction, TransactionEnvelope,
     TransactionExt, TransactionMeta, TransactionMetaV4, TransactionResult, TransactionResultExt,
-    TransactionResultResult, TransactionV1Envelope, Uint256, VecM, WriteXdr,
+    TransactionResultResult, TransactionV1Envelope, TrustLineEntry, TrustLineEntryExt, Uint256,
+    VecM, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::{account_id, address_of};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
@@ -54,7 +55,7 @@ use fermah_pay_stellar_gateway::quarantine::{
 use fermah_pay_stellar_gateway::submission::{
     Chain, Clock, Engine, FeePolicy, Keys, Policy, SourceSequence,
 };
-use fermah_pay_stellar_gateway::worker::{Settings, Step, Worker};
+use fermah_pay_stellar_gateway::worker::{Reserve, Settings, Step, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
@@ -97,6 +98,9 @@ struct ContractState {
     /// a withdrawal moves back out.
     usdc: HashMap<AccountAddress, i128>,
     treasury_usdc: i128,
+    /// Accounts other than the treasury holding a USDC trustline, which a
+    /// plain USDC transfer needs at its destination.
+    lines: HashSet<AccountAddress>,
     used_nonces: HashSet<(AccountAddress, i64)>,
 }
 
@@ -276,6 +280,24 @@ impl Net {
                 *held -= amount;
                 state.treasury_usdc += amount;
                 *state.accounts.entry(owner).or_insert(0) += amount;
+                Ok((state, ScVal::Void, None))
+            }
+            // The USDC asset contract's own transfer, out of the treasury.
+            b"transfer" => {
+                let from = owner_of(&args[0]);
+                let to = owner_of(&args[1]);
+                let amount = i128_of(&args[2]);
+                if from != treasury() || !authorized.contains(&from) {
+                    return Err("sender did not authorize".to_owned());
+                }
+                if !state.lines.contains(&to) {
+                    return Err("trustline missing".to_owned());
+                }
+                if state.treasury_usdc < amount {
+                    return Err("USDC balance too low".to_owned());
+                }
+                state.treasury_usdc -= amount;
+                *state.usdc.entry(to).or_default() += amount;
                 Ok((state, ScVal::Void, None))
             }
             b"withdraw" => {
@@ -802,11 +824,37 @@ impl Chain for Stellar {
                 live_until_ledger: None,
             })
         };
+        let trustline = |key: &LedgerKey| {
+            let LedgerKey::Trustline(line) = key else { return None };
+            let holder = address_of(&line.account_id);
+            let balance = if holder == treasury() {
+                state.treasury_usdc
+            } else if state.lines.contains(&holder) {
+                state.usdc.get(&holder).copied().unwrap_or(0)
+            } else {
+                return None;
+            };
+            Some(LedgerEntryRecord {
+                key: key.clone(),
+                data: LedgerEntryData::Trustline(TrustLineEntry {
+                    account_id: line.account_id.clone(),
+                    asset: line.asset.clone(),
+                    balance: i64::try_from(balance).unwrap(),
+                    limit: i64::MAX,
+                    flags: 1,
+                    ext: TrustLineEntryExt::V0,
+                }),
+                ext: LedgerEntryExt::V0,
+                last_modified_ledger: 1,
+                live_until_ledger: None,
+            })
+        };
         Ok(LedgerEntries {
             entries: keys
                 .iter()
                 .filter_map(|key| {
                     account(key)
+                        .or_else(|| trustline(key))
                         .or_else(|| contract_entry(key))
                         .or_else(|| existing.get(key).map(|val| contract_data(key, val.clone())))
                 })
@@ -2955,4 +3003,115 @@ async fn test_withdrawal_requests_repeat_by_key_and_refuse_what_they_cannot_hono
     assert_refused(&missing, tonic::Code::NotFound, "withdrawal_not_found");
     // Nothing prepared holds anything.
     assert_eq!(w.balance(&x).await, (100, 0));
+}
+
+// ---- the cold reserve ---------------------------------------------------------
+
+/// A reserve account with a USDC trustline.
+fn reserve_account(w: &World) -> AccountAddress {
+    let cold = SecretKey::generate().unwrap().address();
+    w.stellar.with(|n| n.state.lines.insert(cold.clone()));
+    cold
+}
+
+/// Sweeps above 60 down to 30; below 10 the treasury needs topping up.
+fn sweeping_worker(w: &World, cold: &AccountAddress) -> Worker<Stellar, ManualClock> {
+    w.paying_worker().with_reserve(Reserve::new(cold.clone(), 10, 30, 60).unwrap())
+}
+
+async fn sweeps(w: &World) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM pay_stellar.submissions WHERE kind = 'sweep'")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+fn treasury_usdc(w: &World) -> i128 {
+    w.stellar.with(|n| n.state.treasury_usdc)
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_surplus_above_the_ceiling_is_swept_down_to_the_target(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.funded("x", 100).await;
+    assert_eq!(treasury_usdc(&w), 100);
+    let cold = reserve_account(&w);
+    let worker = sweeping_worker(&w, &cold);
+    w.settle(&worker).await;
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 70));
+    assert_eq!(sweeps(&w).await, 1);
+
+    // At or below the ceiling nothing more moves, however often it is read,
+    // once the first sweep's authorization no longer holds anything back.
+    w.funded("y", 30).await;
+    w.stellar.set_latest(w.stellar.latest() + OPERATOR_LEDGERS + 1);
+    w.clock.advance(Duration::from_secs(61));
+    w.settle(&worker).await;
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (60, 70));
+    assert_eq!(sweeps(&w).await, 1);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_sweep_leaves_what_held_withdrawals_need(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let held = w.withdraw(&x, 50, "w-1").await;
+    let cold = reserve_account(&w);
+    w.settle(&sweeping_worker(&w, &cold)).await;
+    // 50 stays for the withdrawal, more than the target of 30.
+    assert_eq!(usdc_of(&w, &cold), 50);
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+    assert_eq!(usdc_of(&w, &x.key.address()), 50);
+    assert_eq!(treasury_usdc(&w), 0);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_reserve_without_a_trustline_receives_nothing_until_it_has_one(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.funded("x", 100).await;
+    let cold = SecretKey::generate().unwrap().address();
+    let worker = sweeping_worker(&w, &cold);
+    w.settle(&worker).await;
+    assert_eq!((treasury_usdc(&w), sweeps(&w).await), (100, 0));
+
+    w.stellar.with(|n| n.state.lines.insert(cold.clone()));
+    w.settle(&worker).await;
+    assert_eq!(sweeps(&w).await, 0, "read again only after the check interval");
+    w.clock.advance(Duration::from_secs(61));
+    w.settle(&worker).await;
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 70));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_sweep_not_included_is_followed_only_once_its_authorization_lapses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.funded("x", 100).await;
+    let cold = reserve_account(&w);
+    let worker = sweeping_worker(&w, &cold);
+    w.stellar.with(|n| n.drop_sends = 1);
+    worker.step().await.unwrap();
+    assert_eq!(sweeps(&w).await, 1);
+    // The envelope expires unincluded, but its treasury authorization could
+    // still be included by someone else: no new sweep yet.
+    w.clock.advance(VALIDITY + Duration::from_secs(61));
+    w.settle(&worker).await;
+    assert_eq!((sweeps(&w).await, treasury_usdc(&w)), (1, 100));
+
+    w.stellar.set_latest(w.stellar.latest() + OPERATOR_LEDGERS + 1);
+    w.clock.advance(Duration::from_secs(61));
+    w.settle(&worker).await;
+    assert_eq!(sweeps(&w).await, 2);
+    assert_eq!((treasury_usdc(&w), usdc_of(&w, &cold)), (30, 70));
 }

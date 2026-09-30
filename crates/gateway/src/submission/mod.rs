@@ -75,6 +75,8 @@ pub enum Kind {
     Restore,
     /// Extends the life of contract entries before they would be archived.
     Extend,
+    /// Moves the treasury's USDC above its ceiling to the cold reserve.
+    Sweep,
 }
 
 impl Kind {
@@ -85,6 +87,7 @@ impl Kind {
             Self::Withdrawal => "withdrawal",
             Self::Restore => "restore",
             Self::Extend => "extend",
+            Self::Sweep => "sweep",
         }
     }
 }

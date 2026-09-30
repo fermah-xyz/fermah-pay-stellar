@@ -113,7 +113,9 @@ acts as a seller would, only through the gRPC API:
    original charge, and reuses the key with another amount, which is refused;
    then sends the first charge straight to the contract again, which
    refuses it as a duplicate before anything is submitted;
-5. checks that the gateway's balance equals the contract's and that the buyer
+5. withdraws 0.01 USDC back to the buyer's wallet: the buyer signs the
+   prepared entry, and the worker adds the treasury's signature;
+6. checks that the gateway's balance equals the contract's and that the buyer
    still holds 0 XLM.
 
 The command exits non-zero if any step does not hold, and writes an
@@ -123,3 +125,19 @@ The `testnet` workflow runs the same command in CI: on changes to main, on
 demand, and on pull requests labelled `testnet`. Its job summary lists every
 transaction with an explorer link, and the evidence record is attached to the
 run.
+
+## 7. Cold reserve
+
+```bash
+testnet cold-reserve
+testnet sweep --amount 500000
+testnet solvency
+```
+
+`cold-reserve` creates the treasury's reserve: a Circle USDC trustline, 0 XLM,
+and two of three keys (its own and two co-signers kept in the profile) to move
+anything. `sweep` moves USDC from the treasury to it with the call and
+treasury authorization the worker's sweep builds, and `solvency` counts the
+reserve with the treasury. Top the treasury up again with `propose-transfer`,
+two `sign` calls and `submit`, as in
+[the treasury guide](../self-hosting/treasury.md#topping-the-treasury-up).

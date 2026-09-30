@@ -7,7 +7,8 @@
 | Operator | the settlement worker | charges to any buyer of the operator's deployments, within each buyer's balance and the per-charge limit |
 | Fee account | the settlement worker | its XLM can be spent |
 | Source (channel) accounts | the settlement worker | their sequence numbers can be consumed; they hold no XLM and authorize nothing |
-| Treasury | the settlement worker, only if it pays withdrawals (`PAY_STELLAR_TREASURY_KEY_FILE`) | everything the treasury holds can be moved |
+| Treasury | the settlement worker, only if it pays withdrawals (`PAY_STELLAR_TREASURY_KEY_FILE`) | everything the treasury holds can be moved: up to the sweep ceiling with a [cold reserve](treasury.md) |
+| Cold reserve | its signers, never the worker | one key alone moves nothing; the reserve's threshold needs several |
 | Admin | not the worker | the contract's code and roles can be replaced |
 
 The worker never needs the admin's key: the admin signs upgrades, limit
@@ -17,7 +18,7 @@ The treasury signs each withdrawal together with the buyer. A worker given
 the treasury's key pays withdrawals as soon as they are signed; without it,
 withdrawals wait in `SIGNED` until they lapse. A worker holding the key can
 move everything the treasury holds, so on such a host the treasury key is the
-most valuable key.
+most valuable key. A [cold reserve](treasury.md) bounds what it can reach.
 
 ## Key references
 

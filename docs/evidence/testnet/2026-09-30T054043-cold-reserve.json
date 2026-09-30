@@ -1,0 +1,31 @@
+{
+  "criterion": "cold-reserve",
+  "expected": "the treasury's cold reserve holds a Circle USDC trustline, needs two of its three keys to move anything, and holds no XLM",
+  "network": "stellar:testnet",
+  "observed": {
+    "policy": {
+      "master_weight": 1,
+      "reserve_xlm_stroops": 0,
+      "signers": [
+        {
+          "key": "GC36H4A45SJDY6QNX5Z3KXBPZN66S3DQWDON5YSRSFTP7M56NTLJ5XE6",
+          "weight": 1
+        },
+        {
+          "key": "GC77EZDNU5TNOKLZ27GEDUM2U2CKNZ4H5WCGZPRJMLEQBL5LL5AYFQMU",
+          "weight": 1
+        }
+      ],
+      "thresholds": {
+        "high": 2,
+        "low": 1,
+        "medium": 2
+      }
+    },
+    "usdc": 0
+  },
+  "onboarding_transaction": "42712686bb996817e495d85fb1ef0b97e7a59635fbaeee5a45eefa749f561c6a",
+  "recorded_at": "2026-09-30T05:40:43.469393996Z",
+  "reserve": "GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC",
+  "signers_transaction": "2c2ebf610eeac8c571f0798d6bf917f63dc6db9f9e5d26893d2325cd06619e66"
+}

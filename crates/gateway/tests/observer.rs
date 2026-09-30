@@ -160,6 +160,8 @@ struct Net {
     config_treasury: AccountAddress,
     /// Treasury trustline balance and flags; `None` for no trustline.
     trustline: Option<(i64, u32)>,
+    /// A cold reserve and its USDC balance.
+    reserve: Option<(AccountAddress, i64)>,
     base_time: OffsetDateTime,
 }
 
@@ -267,6 +269,24 @@ impl ChainReader for Chain {
                             ext: TrustLineEntryExt::V0,
                         })
                     })
+                } else if let Some((cold, balance)) = net
+                    .reserve
+                    .as_ref()
+                    .filter(|(cold, _)| *key == trustline_key(cold, &circle_usdc(Network::Testnet)))
+                {
+                    let LedgerKey::Trustline(line) =
+                        trustline_key(cold, &circle_usdc(Network::Testnet))
+                    else {
+                        unreachable!()
+                    };
+                    Some(LedgerEntryData::Trustline(TrustLineEntry {
+                        account_id: line.account_id,
+                        asset: line.asset,
+                        balance: *balance,
+                        limit: i64::MAX,
+                        flags: 1,
+                        ext: TrustLineEntryExt::V0,
+                    }))
                 } else {
                     None
                 };
@@ -337,6 +357,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         revenue: 0,
         config_treasury: treasury(),
         trustline: Some((0, 1)),
+        reserve: None,
         base_time,
     })));
     let submission = Uuid::now_v7();
@@ -1088,6 +1109,32 @@ async fn test_a_restarted_observer_neither_repeats_nor_forgets_a_streak(
     w.chain.with(|n| n.trustline = Some((89, 1)));
     reconcile_times(&w.observer(), CONFIRMATIONS).await;
     assert_eq!(w.findings().await.len(), 2);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_cold_reserve_counts_towards_what_the_treasury_owes(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    agreeing(&w).await;
+    // 60 of the 90 the contract owes was swept to the reserve.
+    let cold = account(42);
+    w.chain.with(|n| {
+        n.trustline = Some((30, 1));
+        n.reserve = Some((cold.clone(), 60));
+    });
+    let reserves = std::collections::HashMap::from([(treasury(), cold)]);
+    reconcile_times(&w.observer().with_reserves(reserves), CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+    let (hot, reserve) = w.chain.with(|n| (n.trustline, n.reserve.clone()));
+    assert_eq!((hot.unwrap().0, reserve.unwrap().1), (30, 60));
+
+    // An observer not told about the reserve sees only the treasury.
+    reconcile_times(&w.observer(), CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("treasury_deficit", "critical")]);
+    let detail = w.finding_detail("treasury_deficit").await;
+    assert_eq!((detail["held"].as_str(), detail["owed"].as_str()), (Some("30"), Some("90")));
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
