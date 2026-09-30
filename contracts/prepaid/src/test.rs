@@ -2177,3 +2177,5 @@ fn test_solvency_tooling_reads_get_totals() {
         })
     );
 }
+
+mod properties;
