@@ -780,6 +780,31 @@ async fn test_a_charge_refused_past_the_daily_limit_is_matched_with_its_refusal(
     assert_eq!(w.findings().await, []);
 }
 
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_daily_limit_refusal_observed_before_the_worker_settles_is_matched_on_recheck(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 100).await;
+    let charge = w.charge(alice, [1; 32], 30, "submitted", None).await;
+    w.chain.emit(1010, charges_event(&[(&account(1), [1; 32], 30, 6)]));
+    let observer = w.observer();
+    observer.observe().await.unwrap();
+    assert_eq!(w.verdicts().await, [], "waiting for the worker");
+    sqlx::query(
+        "UPDATE pay_stellar.charges
+         SET state = 'refused', outcome = 'above_daily_limit', settled_at = now()
+         WHERE id = $1",
+    )
+    .bind(charge)
+    .execute(&w.owner)
+    .await
+    .unwrap();
+    observer.recheck().await.unwrap();
+    assert_eq!((w.findings().await, w.verdicts().await.len()), (vec![], 1));
+}
+
 // ---- withdrawals ----------------------------------------------------------
 
 #[sqlx::test(migrations = "../../db/migrations")]

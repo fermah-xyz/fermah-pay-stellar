@@ -1184,8 +1184,9 @@ fn chain_address(text: &str) -> Result<ChainAddress, ObserverError> {
 
 fn outcome_of(token: &str) -> Result<fermah_pay_stellar_chain::prepaid::Outcome, ObserverError> {
     use fermah_pay_stellar_chain::prepaid::Outcome;
-    (0..=5)
-        .filter_map(Outcome::from_code)
+    // Every outcome the contract has, whatever it was when this was written.
+    (0..)
+        .map_while(Outcome::from_code)
         .find(|outcome| outcome.token() == token)
         .ok_or(ObserverError::Corrupt("stored outcome"))
 }
