@@ -854,16 +854,25 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                             .await?;
                     }
                 }
+                // A mandate or revocation moves nothing by itself, but one the
+                // gateway did not prepare means the buyer's wallet acted
+                // through another client: the gateway's view of the mandate
+                // is out of date until the next charge is refused.
+                Some(LedgerEvent::MandateAuthorized { owner, mandate }) => {
+                    let known =
+                        prepared_mandate(&mut tx, deployment.id, owner, &mandate.mandate_id)
+                            .await?;
+                    let verdict = changed_elsewhere(known, &described.payload);
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
+                Some(LedgerEvent::MandateRevoked { owner, .. }) => {
+                    let known = prepared_revocation(&mut tx, deployment.id, owner, ledger).await?;
+                    let verdict = changed_elsewhere(known, &described.payload);
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
                 // Recorded for reconciliation; the gateway keeps no record of
-                // the seller's revenue withdrawals to match them against. A
-                // mandate or revocation moves nothing by itself: only the
-                // recurring charges made under a mandate do, and each of those
-                // is matched.
-                Some(
-                    LedgerEvent::RevenueWithdrawn { .. }
-                    | LedgerEvent::MandateAuthorized { .. }
-                    | LedgerEvent::MandateRevoked { .. },
-                ) => {}
+                // the seller's revenue withdrawals to match them against.
+                Some(LedgerEvent::RevenueWithdrawn { .. }) => {}
             }
         }
         tx.commit().await.map_err(store("commit page"))?;
@@ -1323,6 +1332,72 @@ async fn withdrawal_row(
         destination: r.destination_address,
         state: r.state,
     }))
+}
+
+fn changed_elsewhere(known: bool, payload: &serde_json::Value) -> Verdict {
+    if known {
+        Verdict::Matched
+    } else {
+        Verdict::Finding(Finding::new(
+            FindingKind::MandateChangedElsewhere,
+            Severity::Warning,
+            payload.clone(),
+        ))
+    }
+}
+
+/// Whether the gateway prepared `owner`'s mandate `mandate_id`: the buyer's
+/// signature covers that identifier, so it names exactly one mandate.
+async fn prepared_mandate(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    mandate_id: &[u8; 32],
+) -> Result<bool, ObserverError> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pay_stellar.mandates m
+            JOIN pay_stellar.buyers b ON b.id = m.buyer_id
+            WHERE m.seller_deployment_id = $1 AND b.wallet_address = $2 AND m.mandate_id = $3
+              AND m.state <> 'awaiting_signature'
+        ) AS "known!"
+        "#,
+        deployment,
+        owner.to_string(),
+        mandate_id.as_slice(),
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(store("read mandate"))
+}
+
+/// Whether a revocation the gateway prepared for `owner` can be the one
+/// included at `ledger`: the buyer signed it and its signature was still
+/// valid then. The worker sends a revocation only within that window, and
+/// anyone holding the signed entry could include it within it too.
+async fn prepared_revocation(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    ledger: i64,
+) -> Result<bool, ObserverError> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pay_stellar.revocations r
+            JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+            WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2
+              AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $3
+        ) AS "known!"
+        "#,
+        deployment,
+        owner.to_string(),
+        ledger,
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(store("read revocation"))
 }
 
 /// The account the binding names for `role`, for the roles it names.

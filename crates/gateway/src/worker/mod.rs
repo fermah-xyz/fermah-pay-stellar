@@ -695,6 +695,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
         if !from_records.is_empty() {
             let applied = resolution.state == State::Succeeded;
+            let included = resolution.ledger.map_or(i64::MAX, i64::from);
             let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
             let owners = from_records
                 .iter()
@@ -711,6 +712,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                             .ok_or(WorkerError::Corrupt("charge record does not decode"))?;
                         settled(outcome).ok_or(WorkerError::Corrupt("a record holds duplicate"))?
                     }
+                    // A node behind the inclusion cannot show its records yet.
+                    None if applied && snapshot.ledger < included => continue,
                     // Applied, per the network, yet no record: contradiction.
                     None if applied => ChargeDecision::Quarantine {
                         outcome: Some(Outcome::Duplicate),

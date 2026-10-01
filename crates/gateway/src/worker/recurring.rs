@@ -548,9 +548,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             let held = held_mandate(&snapshot, revocation);
             match decide {
                 Decide::Included(ledger) if snapshot.ledger < ledger => {}
-                Decide::Included(_) => self.confirm_revocation(revocation.id, held).await?,
+                Decide::Included(_) => {
+                    self.confirm_revocation(revocation.id, held, snapshot.ledger).await?;
+                }
                 Decide::Lapsing(_) if held.is_none() => {
-                    self.confirm_revocation(revocation.id, None).await?;
+                    self.confirm_revocation(revocation.id, None, snapshot.ledger).await?;
                 }
                 Decide::Lapsing(closing) if snapshot.ledger > revocation.expiration_ledger => {
                     self.close_revocation(revocation.id, closing).await?;
@@ -561,13 +563,41 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         Ok(())
     }
 
+    /// Confirms a revocation from a read at ledger `seen_at` that found the
+    /// buyer's mandate entry empty, or holding `held`. An empty entry is
+    /// evidence only as of that ledger: a mandate the database holds active
+    /// may have been recorded after it, by a later inclusion than the node
+    /// read has reached. So nothing is decided until the read has reached
+    /// every such mandate: its inclusion, or, for one included by someone
+    /// else, the lapse of its authorization, by which it was included.
     async fn confirm_revocation(
         &self,
         id: Uuid,
         held: Option<MandateTerms>,
+        seen_at: i64,
     ) -> Result<(), WorkerError> {
         let held_id = held.map(|h| h.mandate_id.to_vec());
         let mut tx = self.pool.begin().await.map_err(store("begin confirming a revocation"))?;
+        let ahead = sqlx::query_scalar!(
+            r#"
+            SELECT count(*) AS "ahead!"
+            FROM pay_stellar.revocations r
+            JOIN pay_stellar.mandates m ON m.buyer_id = r.buyer_id
+            LEFT JOIN pay_stellar.submissions s ON s.id = m.submission_id
+            WHERE r.id = $1 AND m.state = 'active' AND m.mandate_id IS DISTINCT FROM $2
+              AND COALESCE(CASE WHEN s.state = 'succeeded' THEN s.ledger::bigint END,
+                           m.expiration_ledger + 1) > $3
+            "#,
+            id,
+            held_id,
+            seen_at,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store("check the read against active mandates"))?;
+        if ahead > 0 {
+            return Ok(());
+        }
         let buyer = sqlx::query_scalar!(
             r#"
             UPDATE pay_stellar.revocations SET state = 'confirmed', resolved_at = now()
@@ -760,6 +790,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
         if !from_records.is_empty() {
             let applied = resolution.state == State::Succeeded;
+            let included = resolution.ledger.map_or(i64::MAX, i64::from);
             let horizon = i64::from(self.engine.authorization_horizon(submission).await?);
             let owners = from_records
                 .iter()
@@ -778,6 +809,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                             .ok_or(WorkerError::Corrupt("recurring record does not decode"))?;
                         settled(outcome).ok_or(WorkerError::Corrupt("a record holds duplicate"))?
                     }
+                    // A node behind the inclusion cannot show its records yet.
+                    None if applied && snapshot.ledger < included => continue,
                     None if applied => RecurringDecision::Quarantine {
                         outcome: Some(RecurringOutcome::Duplicate),
                         reason: format!(
