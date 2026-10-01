@@ -301,6 +301,16 @@ fn run(ops: &[Op]) {
                     cycles: *cycles,
                     live_until: w.env.ledger().sequence() + 1_000,
                 };
+                // Refused above the largest charge, and for the identifier
+                // of the buyer's current mandate.
+                let current = model.mandates[*buyer].as_ref().map(|m| m.id);
+                if *amount > MAX_CHARGE || current == Some(*mandate) {
+                    assert_eq!(
+                        authorize(&w, &buyers[*buyer], &intent),
+                        Err(contract_error(Error::InvalidMandate))
+                    );
+                    continue;
+                }
                 authorize(&w, &buyers[*buyer], &intent).unwrap();
                 model.mandates[*buyer] = Some(ModelMandate {
                     id: *mandate,

@@ -609,6 +609,19 @@ impl PrepaidLedger {
         if period_secs == 0 || cycles == 0 || live_until < env.ledger().sequence() {
             panic_with_error!(&env, Error::InvalidMandate);
         }
+        // Above the largest charge, no period could ever be charged in full
+        // while the buyer's whole approval stayed open.
+        if amount > config.limits.max_charge {
+            panic_with_error!(&env, Error::InvalidMandate);
+        }
+        let key = Key::Mandate(owner.clone());
+        // Authorizing the current mandate again would start its periods over
+        // under the same identifier, indistinguishable in the events from a
+        // second charge of a period. A changed mandate takes a new one.
+        let current: Option<Mandate> = env.storage().persistent().get(&key);
+        if current.is_some_and(|current| current.mandate_id == mandate_id) {
+            panic_with_error!(&env, Error::InvalidMandate);
+        }
         let allowance = checked_mul(&env, amount, i128::from(cycles));
         let mandate = Mandate {
             mandate_id,
@@ -619,7 +632,15 @@ impl PrepaidLedger {
             live_until,
             next_cycle: 0,
         };
-        put_persistent(&env, &Key::Mandate(owner.clone()), &mandate);
+        put_persistent(&env, &key, &mandate);
+        // Charged about once a period, which for a monthly mandate is as long
+        // as a write keeps an entry: it lives until its last ledger instead,
+        // so it cannot be archived between charges. The USDC contract below
+        // refuses a `live_until` beyond what an entry may live.
+        let lifetime = live_until.saturating_sub(env.ledger().sequence());
+        if lifetime > TTL_EXTEND_TO {
+            env.storage().persistent().extend_ttl(&key, lifetime, lifetime);
+        }
         extend_instance(&env);
         // The USDC contract refuses a last ledger beyond what the network
         // lets an entry live, so that bound needs no check here.

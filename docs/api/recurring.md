@@ -15,7 +15,11 @@ balance. How the contract enforces each rule is in
 ## Mandates
 
 A mandate is up to `amount` per period of `period_secs`, for `cycles`
-periods. The first period starts when the contract records the mandate.
+periods. The first period starts when the contract records the mandate. The
+contract refuses a mandate whose `amount` is above its largest charge
+(`max_charge`, see [charges](../architecture/prepaid-contract.md#charges-and-replay-protection)): the gateway does
+not read that limit, so such a mandate is retried, without a fee, until the
+buyer's signature lapses and ends `EXPIRED`.
 
 1. `PrepareMandate { buyer_id, amount, period_secs, cycles, idempotency_key }`
    returns the mandate in `MANDATE_STATE_AWAITING_SIGNATURE` with an

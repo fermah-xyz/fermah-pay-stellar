@@ -183,6 +183,14 @@ network bounds how far ahead `live_until` can be (about six months on
 testnet and mainnet today); a longer subscription needs a new mandate before
 then.
 
+`authorize_recurring` refuses, as `InvalidMandate`, a mandate whose amount
+is above the largest charge (no period could be charged in full), and one
+with the identifier of the buyer's current mandate: that would start its
+periods over under the same identifier, indistinguishable in the events from
+charging a period twice. A changed mandate takes a new identifier. The
+mandate is kept until its `live_until`, not only the usual 30 days a write
+extends an entry by, so a monthly mandate is not archived between charges.
+
 A recurring charge is `{owner, charge_id, mandate_id, cycle, amount,
 last_ledger}`: an identifier for this attempt, the mandate and the period it
 charges for. Each entry's outcome:
@@ -196,7 +204,7 @@ charges for. Each entry's outcome:
 | `NotDue` | the period has not started | yes |
 | `PeriodOver` | the period ended without a charge; it is not charged late | yes |
 | `AboveMandate` | above the mandate's amount per period | yes |
-| `AboveLimit` | above the per-charge limit | yes |
+| `AboveLimit` | above the per-charge limit, which the admin lowered below the mandate's amount after it was recorded | yes |
 | `AboveDailyLimit` | would take the seller past its daily limit | yes |
 | `AllowanceShort` | the allowance no longer covers it, e.g. the buyer lowered it in the USDC contract | yes |
 | `WalletShort` | the wallet holds less USDC than the amount | yes |

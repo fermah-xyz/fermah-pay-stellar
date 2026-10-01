@@ -7,6 +7,7 @@ use fermah_pay_stellar_chain::prepaid::{
     ChainAddress, LedgerEvent, MandateIntent, MandateTerms, RecurringChargeRequest, RecurringEntry,
     allowance_of, ledger_event, recurring_outcomes, recurring_record, stored_mandate,
 };
+use soroban_sdk::testutils::storage::Persistent as _;
 
 use super::*;
 
@@ -224,12 +225,15 @@ fn test_no_charge_after_the_last_period() {
 fn test_a_charge_is_bounded_by_the_mandate_the_largest_charge_and_the_seller_daily_limit() {
     let w = new_world();
     let buyer = w.party(100 * USDC);
-    authorize(&w, &buyer, &mandate(&w, &buyer, 1, 2 * MAX_CHARGE, 3)).unwrap();
+    authorize(&w, &buyer, &mandate(&w, &buyer, 1, MAX_CHARGE, 3)).unwrap();
     assert_eq!(
-        one(&w, attempt(&w, &buyer, 1, 1, 0, 2 * MAX_CHARGE + 1)),
+        one(&w, attempt(&w, &buyer, 1, 1, 0, MAX_CHARGE + 1)),
         RecurringOutcome::AboveMandate
     );
-    assert_eq!(one(&w, attempt(&w, &buyer, 2, 1, 0, MAX_CHARGE + 1)), RecurringOutcome::AboveLimit);
+    // The admin lowers the largest charge below the mandate's amount.
+    let lower = Limits { min_deposit: MIN_DEPOSIT, max_charge: MAX_CHARGE - 1 };
+    admin_call(&w, &w.admin, "set_limits", (lower,).into_val(&w.env)).unwrap();
+    assert_eq!(one(&w, attempt(&w, &buyer, 2, 1, 0, MAX_CHARGE)), RecurringOutcome::AboveLimit);
     set_daily(&w, USDC, 3 * USDC).unwrap();
     // The buyer's own daily limit counts prepaid charges only; the seller's
     // counts both kinds.
@@ -638,4 +642,53 @@ fn test_full_recurring_batch_fits_one_transaction() {
     let (outcomes, measured) = measure_recurring_batch(n);
     assert_eq!(outcomes, std::vec![RecurringOutcome::Charged; n as usize]);
     assert_within_limits(&measured);
+}
+
+// ---- mandate terms the contract refuses or keeps ---------------------------
+
+#[test]
+fn test_a_mandate_above_the_largest_charge_is_refused() {
+    let w = new_world();
+    let buyer = w.party(10 * USDC);
+    // Never chargeable in full: every period would be refused as above the
+    // limit while the buyer's whole approval stayed open.
+    let above = mandate(&w, &buyer, 1, MAX_CHARGE + 1, 3);
+    assert_eq!(authorize(&w, &buyer, &above), Err(contract_error(Error::InvalidMandate)));
+    assert_eq!(allowance(&w, &buyer), 0);
+    authorize(&w, &buyer, &mandate(&w, &buyer, 1, MAX_CHARGE, 3)).unwrap();
+}
+
+#[test]
+fn test_the_current_mandate_cannot_be_authorized_again_to_restart_its_periods() {
+    let w = new_world();
+    let buyer = w.party(10 * USDC);
+    let first = mandate(&w, &buyer, 1, USDC, 3);
+    authorize(&w, &buyer, &first).unwrap();
+    assert_eq!(one(&w, attempt(&w, &buyer, 1, 1, 0, USDC)), RecurringOutcome::Charged);
+    // The same identifier again would start its periods over.
+    assert_eq!(authorize(&w, &buyer, &first), Err(contract_error(Error::InvalidMandate)));
+    assert_eq!(one(&w, attempt(&w, &buyer, 2, 1, 0, USDC)), RecurringOutcome::AlreadyCharged);
+    // A new identifier replaces it, as a new mandate.
+    authorize(&w, &buyer, &mandate(&w, &buyer, 2, USDC, 3)).unwrap();
+    assert_eq!(one(&w, attempt(&w, &buyer, 3, 2, 0, USDC)), RecurringOutcome::Charged);
+}
+
+#[test]
+fn test_a_mandate_lives_until_its_last_ledger_without_being_charged() {
+    let w = new_world();
+    let buyer = w.party(10 * USDC);
+    // Longer than an entry written by any call lives: a monthly mandate is
+    // charged about once per that span.
+    let lasting = MandateIntent {
+        live_until: w.env.ledger().sequence() + 1_000_000,
+        ..mandate(&w, &buyer, 1, USDC, 6)
+    };
+    authorize(&w, &buyer, &lasting).unwrap();
+    let left = w.env.as_contract(&w.contract, || {
+        w.env.storage().persistent().get_ttl(&Key::Mandate(buyer.address.clone()))
+    });
+    assert!(
+        left >= lasting.live_until - w.env.ledger().sequence(),
+        "the mandate lives {left} ledgers"
+    );
 }
