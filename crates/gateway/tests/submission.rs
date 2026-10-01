@@ -806,6 +806,63 @@ async fn test_unseen_envelope_whose_sequence_was_consumed_is_quarantined(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_source_whose_sequence_was_taken_is_left_out_while_another_is_free(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = harness(opts, connect).await;
+    let first = SecretKey::from_strkey(&h.source_seed).unwrap().address();
+    let second_key = SecretKey::generate().unwrap();
+    let second = second_key.address();
+    let engine = Engine::new(
+        h.worker.clone(),
+        h.chain.clone(),
+        h.clock.clone(),
+        Network::Testnet,
+        Keys::new(
+            vec![
+                LocalSigner::arc(SecretKey::from_strkey(&h.source_seed).unwrap()),
+                LocalSigner::arc(second_key),
+            ],
+            LocalSigner::arc(SecretKey::from_strkey(&h.fee_seed).unwrap()),
+        )
+        .unwrap(),
+        Policy {
+            fees: FeePolicy::new(FLOOR, CAP, FeePercentile::P90).unwrap(),
+            resource_fee_margin_percent: 15,
+            validity: VALIDITY,
+            max_clock_skew: MAX_SKEW,
+        },
+    );
+    let owner = h.owner.clone();
+    let source_of = |id: uuid::Uuid| {
+        let owner = owner.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT source_address FROM pay_stellar.submissions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&owner)
+            .await
+            .unwrap()
+        }
+    };
+    // Positive control: with both free, the first source is used.
+    let taken = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    assert_eq!(source_of(taken.id).await, first.to_string());
+    h.chain.with(|n| n.sequence = Some(taken.sequence));
+    h.clock.advance(closed_window());
+    assert_eq!(engine.resolve(taken.id).await.unwrap().state, State::Quarantined);
+
+    // The first source is held: the second sends, although listed after it.
+    let next = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    assert_eq!(source_of(next.id).await, second.to_string());
+    // With the second busy, the held source is still used rather than none.
+    let last = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
+    assert_eq!(source_of(last.id).await, first.to_string());
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
 async fn test_failed_inclusion_is_recorded_with_its_fee(
     opts: PgPoolOptions,
     connect: PgConnectOptions,

@@ -34,6 +34,12 @@ pub struct Quotas {
     pub min_withdrawal: i64,
     /// Mandates and revocations prepared per buyer.
     pub mandate_changes_per_buyer: u32,
+    /// Deposits prepared across a seller deployment. Each one the worker
+    /// sends costs the operator a fee whatever its amount; the per-buyer
+    /// quota alone lets the deployment's new buyers multiply it.
+    pub deposits_per_deployment: u32,
+    /// Mandates and revocations prepared across a seller deployment.
+    pub mandate_changes_per_deployment: u32,
 }
 
 impl Default for Quotas {
@@ -44,6 +50,8 @@ impl Default for Quotas {
             withdrawals_per_buyer: 5,
             min_withdrawal: 100_000,
             mandate_changes_per_buyer: 5,
+            deposits_per_deployment: 2_000,
+            mandate_changes_per_deployment: 2_000,
         }
     }
 }

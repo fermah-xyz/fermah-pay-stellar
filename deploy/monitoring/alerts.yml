@@ -23,6 +23,40 @@ groups:
         annotations:
           summary: "A charge was quarantined; its amount stays held from the buyer"
           action: "Resolve it with docs/self-hosting/quarantine.md"
+      - alert: PayStellarRecurringChargeQuarantined
+        expr: increase(pay_stellar_recurring_settled_total{result="quarantined"}[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A recurring charge was quarantined; its period stays taken"
+          action: "Resolve it with docs/self-hosting/quarantine.md"
+      - alert: PayStellarChargeVolumeUnusual
+        expr: >-
+          sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[1h]))
+            > 3 * sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[7d])) / 168
+          and sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[1h])) > 10000000
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Deployment {{ $labels.seller_deployment_id }} admitted more than three times its usual hourly charge volume"
+          action: "Confirm with the seller; if unexpected, revoke the deployment's API key and lower its daily limits on the contract"
+      - alert: PayStellarWithdrawalsToOtherAccounts
+        expr: increase(pay_stellar_withdrawals_prepared_total{destination="other"}[1h]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A withdrawal to an account other than the buyer's wallet was prepared"
+          action: "Expected only if PAY_STELLAR_WITHDRAWALS_TO_OTHER_ACCOUNTS is on for a reason; confirm with the seller"
+      - alert: PayStellarDeploymentQuotaReached
+        expr: sum by (reason) (increase(pay_stellar_api_refusals_total{reason=~"deployment_.*_quota_exceeded|buyer_quota_exceeded"}[1h])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A deployment reached its daily quota ({{ $labels.reason }})"
+          action: "A burst of small deposits, mandates or buyers costs the operator fees: check the deployment's traffic before raising the quota"
+      - alert: PayStellarSourceSequenceTaken
+        expr: sum by (source) (increase(pay_stellar_source_sequence_taken_total[1h])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A transaction the worker did not send used the sequence of source {{ $labels.source }}"
+          action: "Treat that source's key as exposed and rotate it; docs/self-hosting/limits.md"
       - alert: PayStellarSigningFailing
         expr: sum by (role) (increase(pay_stellar_signing_failures_total[10m])) > 0
         labels: { severity: critical }

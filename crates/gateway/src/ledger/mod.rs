@@ -92,6 +92,10 @@ pub struct LedgerPolicy {
     /// network refuses an allowance beyond its longest entry lifetime, about
     /// six months on testnet and mainnet.
     pub max_mandate_ledgers: u32,
+    /// Whether a withdrawal may pay an account other than the buyer's
+    /// wallet. Off, a stolen buyer key can only return the buyer's own
+    /// credit to the buyer's own wallet.
+    pub withdrawals_to_other_accounts: bool,
 }
 
 pub struct LedgerApi<L> {
@@ -276,6 +280,24 @@ fn charge_to_wire(record: ChargeRecord) -> Result<Charge, Status> {
     })
 }
 
+/// Counts an admitted charge of `kind` and its amount by deployment, the
+/// series against which an unusual charge pattern shows.
+fn record_admission(kind: &'static str, scope: &Scope, amount: i64) {
+    let deployment = scope.seller_deployment_id().to_string();
+    metrics::counter!(
+        "pay_stellar_charges_admitted_total",
+        "kind" => kind,
+        "seller_deployment_id" => deployment.clone()
+    )
+    .increment(1);
+    metrics::counter!(
+        "pay_stellar_charges_admitted_usdc_total",
+        "kind" => kind,
+        "seller_deployment_id" => deployment
+    )
+    .increment(u64::try_from(amount).unwrap_or(0));
+}
+
 fn record_scope(scope: &Scope) {
     tracing::Span::current()
         .record("seller_deployment_id", tracing::field::display(scope.seller_deployment_id()));
@@ -318,7 +340,10 @@ impl<L: LatestLedger> LedgerApi<L> {
             }
         };
         match admission {
-            Admission::Admitted(record) => Ok((record, true)),
+            Admission::Admitted(record) => {
+                record_admission("charge", scope, amount);
+                Ok((record, true))
+            }
             Admission::Replayed(record) => Ok((record, false)),
             Admission::Conflict => Err(Refusal::IdempotencyConflict),
             Admission::BuyerNotFound => Err(Refusal::BuyerNotFound),
@@ -431,6 +456,9 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         let id = match inserted {
             Insertion::Created(id) => id,
             Insertion::QuotaExceeded => return Err(Refusal::DepositQuotaExceeded.into()),
+            Insertion::DeploymentQuotaExceeded => {
+                return Err(Refusal::DeploymentDepositQuotaExceeded.into());
+            }
             // A concurrent request with the same key committed first.
             Insertion::KeyTaken => {
                 let existing = self

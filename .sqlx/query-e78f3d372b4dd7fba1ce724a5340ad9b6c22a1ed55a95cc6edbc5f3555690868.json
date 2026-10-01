@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT count(*) AS \"recent!\" FROM pay_stellar.deposits\n                WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day'\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recent!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e78f3d372b4dd7fba1ce724a5340ad9b6c22a1ed55a95cc6edbc5f3555690868"
+}

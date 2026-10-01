@@ -59,6 +59,7 @@ pub enum FindingKind {
     TreasuryDeauthorized,
     EventTotalsMismatch,
     LedgerTotalsMismatch,
+    CodeChanged,
 }
 
 impl FindingKind {
@@ -90,6 +91,7 @@ impl FindingKind {
             Self::TreasuryDeauthorized => "treasury_deauthorized",
             Self::EventTotalsMismatch => "event_totals_mismatch",
             Self::LedgerTotalsMismatch => "ledger_totals_mismatch",
+            Self::CodeChanged => "code_changed",
         }
     }
 }

@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use common::{EventStream, Harness, Ledger, Tenant, assert_refused, authed, pool_as, start_with};
+use common::{
+    EventStream, Harness, Ledger, Tenant, assert_refused, authed, pool_as, start_with_options,
+};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
@@ -52,6 +54,7 @@ use fermah_pay_stellar_gateway::ledger::LatestLedger;
 use fermah_pay_stellar_gateway::quarantine::{
     self, QuarantineError, QuarantinedCharge, Resolution,
 };
+use fermah_pay_stellar_gateway::store::Quotas;
 use fermah_pay_stellar_gateway::submission::{
     Chain, Clock, Engine, FeePolicy, Keys, Policy, SourceSequence,
 };
@@ -1157,6 +1160,16 @@ fn treasury() -> AccountAddress {
 }
 
 async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
+    world_with(opts, connect, false).await
+}
+
+/// A world whose gateway lets withdrawals pay other accounts when
+/// `other_destinations`, which production refuses by default.
+async fn world_with(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+    other_destinations: bool,
+) -> World {
     let operator = SecretKey::generate().unwrap();
     let clock =
         ManualClock(Arc::new(Mutex::new(OffsetDateTime::now_utc().replace_nanosecond(0).unwrap())));
@@ -1192,8 +1205,16 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         deployment: PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() },
         operator: operator.address(),
     };
-    let h = start_with(opts, connect.clone(), Network::Testnet, stellar.clone(), Ledger::default())
-        .await;
+    let h = start_with_options(
+        opts,
+        connect.clone(),
+        Network::Testnet,
+        stellar.clone(),
+        Ledger::default(),
+        Quotas { min_withdrawal: 1, ..Quotas::default() },
+        other_destinations,
+    )
+    .await;
     let tenant = h.tenant("shop", "main", Network::Testnet).await;
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract(CONTRACT).to_string().to_string(),
@@ -3177,7 +3198,7 @@ async fn test_withdrawal_requests_repeat_by_key_and_refuse_what_they_cannot_hono
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
-    let w = world(opts, connect).await;
+    let w = world_with(opts, connect, true).await;
     let x = w.funded("x", 100).await;
     let world = &w;
     let prepare = |amount: i64, destination: String, key: &str| {
@@ -4216,4 +4237,38 @@ async fn test_a_quarantined_recurring_charge_is_resolved_from_the_contract_event
         (RecurringChargeState::Charged, "charged")
     );
     assert!(resolve_recurring(&w.operator_pool, q.id, outcome, &evidence).await.is_err());
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_withdrawals_pay_only_the_buyers_wallet_unless_the_operator_allows_others(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let request = |destination: String, key: &str| PrepareWithdrawalRequest {
+        buyer_id: x.id.clone(),
+        amount: 10,
+        destination,
+        idempotency_key: key.to_owned(),
+    };
+    let other = SecretKey::generate().unwrap().address();
+    let refused = w
+        .ledger()
+        .await
+        .prepare_withdrawal(authed(request(other.to_string(), "w-1"), &w.tenant.token))
+        .await
+        .unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "destination_not_allowed");
+    // The wallet itself, named or implied, is always allowed.
+    for (destination, key) in [(x.key.address().to_string(), "w-2"), (String::new(), "w-3")] {
+        let prepared = w
+            .ledger()
+            .await
+            .prepare_withdrawal(authed(request(destination, key), &w.tenant.token))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(prepared.withdrawal.unwrap().destination, x.key.address().to_string());
+    }
 }

@@ -33,6 +33,7 @@ pub enum Refusal {
     WithdrawalExpired,
     WithdrawalAlreadySigned,
     InvalidDestination,
+    DestinationNotAllowed,
     WithdrawalBelowMinimum,
     BuyerQuotaExceeded,
     DepositQuotaExceeded,
@@ -45,6 +46,8 @@ pub enum Refusal {
     InvalidCycles,
     MandateTooLong,
     MandateQuotaExceeded,
+    DeploymentDepositQuotaExceeded,
+    DeploymentMandateQuotaExceeded,
     InvalidRevocationId,
     RevocationNotFound,
     RevocationExpired,
@@ -90,6 +93,7 @@ impl Refusal {
             Self::WithdrawalExpired => "withdrawal_expired",
             Self::WithdrawalAlreadySigned => "withdrawal_already_signed",
             Self::InvalidDestination => "invalid_destination",
+            Self::DestinationNotAllowed => "destination_not_allowed",
             Self::WithdrawalBelowMinimum => "withdrawal_below_minimum",
             Self::BuyerQuotaExceeded => "buyer_quota_exceeded",
             Self::DepositQuotaExceeded => "deposit_quota_exceeded",
@@ -102,6 +106,8 @@ impl Refusal {
             Self::InvalidCycles => "invalid_cycles",
             Self::MandateTooLong => "mandate_too_long",
             Self::MandateQuotaExceeded => "mandate_quota_exceeded",
+            Self::DeploymentDepositQuotaExceeded => "deployment_deposit_quota_exceeded",
+            Self::DeploymentMandateQuotaExceeded => "deployment_mandate_quota_exceeded",
             Self::InvalidRevocationId => "invalid_revocation_id",
             Self::RevocationNotFound => "revocation_not_found",
             Self::RevocationExpired => "revocation_expired",
@@ -146,7 +152,9 @@ impl Refusal {
             Self::BuyerQuotaExceeded
             | Self::DepositQuotaExceeded
             | Self::WithdrawalQuotaExceeded
-            | Self::MandateQuotaExceeded => Code::ResourceExhausted,
+            | Self::MandateQuotaExceeded
+            | Self::DeploymentDepositQuotaExceeded
+            | Self::DeploymentMandateQuotaExceeded => Code::ResourceExhausted,
             Self::BuyerConflict | Self::IdempotencyConflict | Self::PeriodAlreadyCharged => {
                 Code::AlreadyExists
             }
@@ -168,7 +176,8 @@ impl Refusal {
             | Self::RevocationExpired
             | Self::RevocationAlreadySigned
             | Self::MandateNotActive
-            | Self::MandateEnded => Code::FailedPrecondition,
+            | Self::MandateEnded
+            | Self::DestinationNotAllowed => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

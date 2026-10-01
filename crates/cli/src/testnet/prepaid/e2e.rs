@@ -262,6 +262,7 @@ impl Context {
                 // Short periods, so a run can show several within minutes.
                 min_mandate_period_secs: 60,
                 max_mandate_ledgers: 3_000_000,
+                withdrawals_to_other_accounts: false,
             },
         );
         let mut gateway_stop = stopped.clone();

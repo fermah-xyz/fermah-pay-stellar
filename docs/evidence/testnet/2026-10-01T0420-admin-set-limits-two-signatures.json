@@ -1,0 +1,43 @@
+{
+  "criterion": "admin-multisig-set-limits",
+  "network": "stellar:testnet",
+  "expected": "the minimum deposit is raised from 0.01 to 0.1 USDC, so a deposit cannot cost the operator more in fees than a small share of what it brings in; the change runs only with two of the admin account's three keys",
+  "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+  "summary": "call set_limits on CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI with {max_charge: 10000000, min_deposit: 1000000}",
+  "transaction_hash": "bad5759ada38ae3a326a6ae516cc8dc99fcb149b90147f3edcb6f1b531ae3ff1",
+  "ledger": 4960834,
+  "fee_charged_stroops": 21289,
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/bad5759ada38ae3a326a6ae516cc8dc99fcb149b90147f3edcb6f1b531ae3ff1",
+  "signers": [
+    {
+      "account": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+      "signed_by": [
+        "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW",
+        "GBF6WBNCWSNXFEIXDRBOWL4IATLTS5EYICIXTT4GFOKJWSIM2ZMLINUI"
+      ]
+    }
+  ],
+  "proposal": {
+    "network": "stellar:testnet",
+    "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+    "summary": "call set_limits on CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI with {max_charge: 10000000, min_deposit: 1000000}",
+    "function": "AAAAAAAAAAH2YkmYYnbG2bJUvP/Mgzr6fBLSNMt/g2Row9ZecOzIPwAAAApzZXRfbGltaXRzAAAAAAABAAAAEQAAAAEAAAACAAAADwAAAAptYXhfY2hhcmdlAAAAAAAKAAAAAAAAAAAAAAAAAJiWgAAAAA8AAAALbWluX2RlcG9zaXQAAAAACgAAAAAAAAAAAAAAAAAPQkA=",
+    "expiration_ledger": 4978113,
+    "authorizations": [
+      {
+        "account": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+        "entry": "AAAAAgAAAAAAAAAAWbNXNKmk1KoHMQZhNFakZM8H+uafHvOC4Jm+AxrBBw1fTNp3GkSxHwBL9cEAAAABAAAAAAAAAAH2YkmYYnbG2bJUvP/Mgzr6fBLSNMt/g2Row9ZecOzIPwAAAApzZXRfbGltaXRzAAAAAAABAAAAEQAAAAEAAAACAAAADwAAAAptYXhfY2hhcmdlAAAAAAAKAAAAAAAAAAAAAAAAAJiWgAAAAA8AAAALbWluX2RlcG9zaXQAAAAACgAAAAAAAAAAAAAAAAAPQkAAAAAA",
+        "signatures": [
+          {
+            "signer": "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW",
+            "signature": "/aIvlV3VcgpXdgseMosIZ9QUzPMsF54CP+6G1dVredJiiHlvXElH68baWnTsOiphp0LatqgKD7SZplfFhTB7BA=="
+          },
+          {
+            "signer": "GBF6WBNCWSNXFEIXDRBOWL4IATLTS5EYICIXTT4GFOKJWSIM2ZMLINUI",
+            "signature": "3g8SYw7Gx8+TFmNdGAKvhLindv2+kUxlFkVb/DIERNcCG5uAXs/zXKsprywNrgu/LXL68akD2IHDK8bS/pagBA=="
+          }
+        ]
+      }
+    ]
+  }
+}

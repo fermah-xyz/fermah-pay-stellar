@@ -342,10 +342,19 @@ pub struct Engine<C, K = SystemClock> {
     policy: Policy,
     /// The last measurement of the local clock against the ledger.
     clock_check: std::sync::Mutex<Option<ClockCheck>>,
+    /// Sources whose sequence was taken by a transaction this engine did not
+    /// send, and until when they are left out. In memory: after a restart a
+    /// source is tried again, and held again if it is still being taken.
+    held: std::sync::Mutex<std::collections::HashMap<AccountAddress, OffsetDateTime>>,
 }
 
 /// How often the local clock is measured against the latest ledger.
 const CLOCK_CHECK_EVERY: time::Duration = time::Duration::seconds(60);
+
+/// How long a source whose sequence someone else took is left out while
+/// another source is free. Whoever holds its key can take it again, and each
+/// time it costs one envelope's fate, so the key is the thing to rotate.
+const SOURCE_HOLD: time::Duration = time::Duration::minutes(30);
 
 #[derive(Clone, Copy)]
 struct ClockCheck {
@@ -379,7 +388,16 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         keys: Keys,
         policy: Policy,
     ) -> Self {
-        Self { pool, chain, clock, network, keys, policy, clock_check: std::sync::Mutex::new(None) }
+        Self {
+            pool,
+            chain,
+            clock,
+            network,
+            keys,
+            policy,
+            clock_check: std::sync::Mutex::new(None),
+            held: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     pub const fn chain(&self) -> &C {
@@ -657,17 +675,45 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         }
     }
 
-    /// The first source with no envelope in flight. Callers in one process
-    /// prepare one envelope at a time, and `record` refuses a second envelope
-    /// for a source in any case.
+    /// The first source with no envelope in flight, preferring one that is
+    /// not held. Callers in one process prepare one envelope at a time, and
+    /// `record` refuses a second envelope for a source in any case. A held
+    /// source is used when it is the only free one: holding the last one
+    /// would let whoever took its sequence stop all sending.
     async fn free_source(&self) -> Result<AccountAddress, EngineError> {
+        let now = self.clock.now();
+        let held: Vec<AccountAddress> = self
+            .held
+            .lock()
+            .map(|map| {
+                map.iter().filter(|(_, until)| **until > now).map(|(s, _)| s.clone()).collect()
+            })
+            .unwrap_or_default();
+        let mut fallback = None;
         for signer in &self.keys.sources {
             let source = signer.address();
-            if self.in_flight(&source).await?.is_none() {
+            if self.in_flight(&source).await?.is_some() {
+                continue;
+            }
+            if !held.contains(&source) {
                 return Ok(source);
             }
+            fallback.get_or_insert(source);
         }
-        Err(EngineError::NoFreeSource)
+        fallback.ok_or(EngineError::NoFreeSource)
+    }
+
+    /// Records that `source`'s sequence was taken outside this engine.
+    fn hold(&self, source: &AccountAddress) {
+        metrics::counter!("pay_stellar_source_sequence_taken_total", "source" => source.to_string())
+            .increment(1);
+        tracing::error!(
+            source = %source,
+            "a transaction this gateway did not send used the source's sequence; its key may be exposed"
+        );
+        if let Ok(mut map) = self.held.lock() {
+            map.insert(source.clone(), self.clock.now() + SOURCE_HOLD);
+        }
     }
 
     /// Signs the envelope for `slot`. Nothing is recorded or sent yet, so a
@@ -858,6 +904,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                             read.sequence,
                             row.sequence
                         );
+                        self.hold(&row.source);
                         self.close(id, State::Quarantined, Some(&reason)).await
                     }
                 }

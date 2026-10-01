@@ -126,6 +126,21 @@ pub async fn start_with_quotas<L: LatestLedger>(
     ledger: Ledger,
     quotas: Quotas,
 ) -> Harness {
+    start_with_options(opts, connect, network, api_ledger, ledger, quotas, false).await
+}
+
+/// As [`start_with_quotas`]; `other_destinations` lets withdrawals go to an
+/// account other than the buyer's wallet, which the production default
+/// refuses.
+pub async fn start_with_options<L: LatestLedger>(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+    network: Network,
+    api_ledger: L,
+    ledger: Ledger,
+    quotas: Quotas,
+    other_destinations: bool,
+) -> Harness {
     let owner = opts.max_connections(1).connect_with(connect.clone()).await.unwrap();
     let api = pool_as(&connect, "SET ROLE pay_stellar_api", 3).await;
     let issuer = pool_as(&connect, "SET ROLE pay_stellar_issuer", 1).await;
@@ -142,6 +157,7 @@ pub async fn start_with_quotas<L: LatestLedger>(
             charge_validity_ledgers: CHARGE_VALIDITY_LEDGERS,
             min_mandate_period_secs: MIN_MANDATE_PERIOD_SECS,
             max_mandate_ledgers: MAX_MANDATE_LEDGERS,
+            withdrawals_to_other_accounts: other_destinations,
         },
     );
     let limits = ServerLimits {

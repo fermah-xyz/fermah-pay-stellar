@@ -37,6 +37,11 @@ Scrape each process under a job named `pay-stellar-<process>`, and load the aler
 | `pay_stellar_cold_reserve_usdc{deployment}` | observer | the USDC of the treasury's cold reserve, 0 without one |
 | `pay_stellar_contract_liabilities{deployment}`, `pay_stellar_contract_revenue{deployment}` | observer | what the contract owes buyers and the seller |
 | `pay_stellar_api_refusals_total{reason}` | gateway | gRPC requests refused, by reason |
+| `pay_stellar_charges_admitted_total{kind,seller_deployment_id}`, `pay_stellar_charges_admitted_usdc_total{kind,seller_deployment_id}` | gateway | charges admitted (`kind` is `charge` or `recurring`) and their amount, per deployment |
+| `pay_stellar_withdrawals_prepared_total{destination}` | gateway | withdrawals prepared to the buyer's wallet (`own`) or another account (`other`) |
+| `pay_stellar_recurring_settled_total{result}` | worker | recurring charges settled by result |
+| `pay_stellar_source_sequence_taken_total{source}` | worker | times a transaction the worker did not send used a source's sequence |
+| `pay_stellar_contract_code_expected{deployment}` | observer | 1 while the contract runs the Wasm `PAY_STELLAR_EXPECTED_WASM` names, 0 otherwise |
 | `pay_stellar_x402_total{call,result}` | gateway | x402 verifications and settlements, by result |
 
 Counters count each event once: a transition is counted only by the call that made it, after its transaction committed.
@@ -48,6 +53,11 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarCriticalFinding` | critical | Read the finding in `pay_stellar.reconciliation_findings` and act as [the observer guide](observer.md) says for its kind |
 | `PayStellarTreasuryShort` | critical | The treasury and its cold reserve hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
 | `PayStellarChargeQuarantined` | critical | A charge's amount is held from its buyer until resolved; see [quarantine](quarantine.md) |
+| `PayStellarRecurringChargeQuarantined` | critical | A recurring charge's period stays taken until resolved; see [quarantine](quarantine.md#recurring-charges) |
+| `PayStellarChargeVolumeUnusual` | warning | A deployment admitted more than three times its usual hourly charge amount. Confirm with the seller; if unexpected, revoke its API key and lower its daily limits ([limits](limits.md)) |
+| `PayStellarWithdrawalsToOtherAccounts` | warning | A withdrawal to an account other than the buyer's wallet was prepared; confirm it was intended |
+| `PayStellarDeploymentQuotaReached` | warning | A deployment reached a daily quota; check its traffic before raising the quota ([limits](limits.md)) |
+| `PayStellarSourceSequenceTaken` | critical | A transaction the worker did not send used a source account's sequence: its key is exposed. Rotate it ([limits](limits.md#source-accounts)) |
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |
 | `PayStellarFeeAccountLow` | warning | Fund the fee account before it reaches the floor. The rule assumes the default floor of 10 XLM; adjust it if `PAY_STELLAR_FEE_FLOOR_STROOPS` differs |
 | `PayStellarFeeAccountAtFloor` | critical | No new deposits or batches go out, while work in flight finishes. Fund the fee account; settlement resumes on its own |

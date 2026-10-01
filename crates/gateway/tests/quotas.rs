@@ -1,6 +1,6 @@
-//! Admission quotas against dust: new buyers per deployment, and deposits
-//! and withdrawals per buyer, each per day and each held under concurrent
-//! requests; and the smallest withdrawal.
+//! Admission quotas against dust: new buyers, deposits and mandates per
+//! deployment, and deposits, withdrawals and mandates per buyer, each per day
+//! and each held under concurrent requests; and the smallest withdrawal.
 
 #![allow(clippy::unwrap_used)]
 
@@ -15,7 +15,7 @@ use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
     CreateBuyerRequest, CreateBuyerResponse, PrepareDepositRequest, PrepareDepositResponse,
-    PrepareWithdrawalRequest, PrepareWithdrawalResponse,
+    PrepareMandateRequest, PrepareWithdrawalRequest, PrepareWithdrawalResponse,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection as _, Executor as _};
@@ -27,6 +27,8 @@ const QUOTAS: Quotas = Quotas {
     withdrawals_per_buyer: 1,
     min_withdrawal: 50,
     mandate_changes_per_buyer: 2,
+    deposits_per_deployment: 3,
+    mandate_changes_per_deployment: 3,
 };
 
 async fn start(opts: PgPoolOptions, connect: PgConnectOptions) -> (Harness, Tenant) {
@@ -261,4 +263,84 @@ async fn test_withdrawals_below_the_minimum_or_beyond_the_quota_are_refused(
     let refused = withdrawal(&h, &t, &alice, 60, "w-2").await.unwrap_err();
     assert_refused(&refused, Code::ResourceExhausted, "withdrawal_quota_exceeded");
     assert!(!withdrawal(&h, &t, &alice, 50, "w-1").await.unwrap().created);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_deposits_per_deployment_are_limited_across_buyers_even_when_concurrent(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (h, t) = start(opts, connect.clone()).await;
+    let mut buyers = Vec::new();
+    for name in ["a", "b", "c"] {
+        buyers.push(register(&h, &t, name, &wallet()).await.unwrap().buyer.unwrap().buyer_id);
+    }
+    assert!(deposit(&h, &t, &buyers[0], "d-a1").await.unwrap().created);
+    assert!(deposit(&h, &t, &buyers[1], "d-b1").await.unwrap().created);
+
+    // Two buyers, each within its own quota, race for the deployment's last
+    // deposit of the day.
+    let mut holder = hold_inserts(&connect, "deposits").await;
+    let channel = h.channel().await;
+    let attempts: Vec<_> = [(&buyers[0], "d-a2"), (&buyers[2], "d-c1")]
+        .into_iter()
+        .map(|(buyer, key)| {
+            let (channel, token) = (channel.clone(), t.token.clone());
+            let request = PrepareDepositRequest {
+                buyer_id: buyer.clone(),
+                amount: 100,
+                idempotency_key: key.to_owned(),
+            };
+            tokio::spawn(async move {
+                LedgerServiceClient::new(channel).prepare_deposit(authed(request, &token)).await
+            })
+        })
+        .collect();
+    blocked(&h, 2).await;
+    holder.execute("COMMIT").await.unwrap();
+    let mut created = 0;
+    for attempt in attempts {
+        match attempt.await.unwrap() {
+            Ok(_) => created += 1,
+            Err(refused) => assert_refused(
+                &refused,
+                Code::ResourceExhausted,
+                "deployment_deposit_quota_exceeded",
+            ),
+        }
+    }
+    assert_eq!(created, 1);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pay_stellar.deposits")
+        .fetch_one(&h.owner)
+        .await
+        .unwrap();
+    assert_eq!(rows, 3);
+    // A repeated request is answered from its row and counts nothing.
+    assert!(!deposit(&h, &t, &buyers[0], "d-a1").await.unwrap().created);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_mandate_changes_per_deployment_are_limited_across_buyers(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (h, t) = start(opts, connect).await;
+    let mandate = |buyer: &str, key: &str| PrepareMandateRequest {
+        buyer_id: buyer.to_owned(),
+        amount: 100,
+        period_secs: 86_400,
+        cycles: 2,
+        idempotency_key: key.to_owned(),
+    };
+    let mut buyers = Vec::new();
+    for name in ["a", "b", "c"] {
+        buyers.push(register(&h, &t, name, &wallet()).await.unwrap().buyer.unwrap().buyer_id);
+    }
+    let mut ledger = LedgerServiceClient::new(h.channel().await);
+    for (buyer, key) in [(&buyers[0], "m-a1"), (&buyers[0], "m-a2"), (&buyers[1], "m-b1")] {
+        ledger.prepare_mandate(authed(mandate(buyer, key), &t.token)).await.unwrap();
+    }
+    let refused =
+        ledger.prepare_mandate(authed(mandate(&buyers[2], "m-c1"), &t.token)).await.unwrap_err();
+    assert_refused(&refused, Code::ResourceExhausted, "deployment_mandate_quota_exceeded");
 }
