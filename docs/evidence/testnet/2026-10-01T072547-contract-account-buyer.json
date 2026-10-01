@@ -1,0 +1,93 @@
+{
+  "criterion": "contract-account-buyer",
+  "expected": "a buyer whose wallet is a contract account deposits, is charged and withdraws through the gateway API, authorizing with its own __check_auth; a deposit signed by another key is refused by the gateway after the network refuses it in simulation",
+  "flow": {
+    "charge": {
+      "amount": 1000000,
+      "transaction": {
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/e5a6028fba10136cd5f4ad41a5c2a1772b7258a4cb5a30715d74f19c5379ecdd",
+        "transaction_hash": "e5a6028fba10136cd5f4ad41a5c2a1772b7258a4cb5a30715d74f19c5379ecdd"
+      }
+    },
+    "deposit": {
+      "amount": 3000000,
+      "transaction": {
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/af34d3667c6d9472a3adaf8b143f876b3b46d16df23c1cdbc23b21360b89c90f",
+        "transaction_hash": "af34d3667c6d9472a3adaf8b143f876b3b46d16df23c1cdbc23b21360b89c90f"
+      }
+    },
+    "refused_deposit": {
+      "refusal": "authorization_refused",
+      "signed_by": "a key the account does not hold"
+    },
+    "withdrawal": {
+      "amount": 1500000,
+      "destination": "CB65QKAPPYW2JHZJHBCC7IRUPTWFH3E6LV3CQIERDBOTG3AYGMQJAEIE",
+      "transaction": {
+        "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/e306228db6a674290b09a2c8b1ef6436185388fa2bff2f40e25bd4197cfcc1d3",
+        "transaction_hash": "e306228db6a674290b09a2c8b1ef6436185388fa2bff2f40e25bd4197cfcc1d3"
+      }
+    }
+  },
+  "network": "stellar:testnet",
+  "observed": {
+    "contract_credit_after": "500000",
+    "wallet_usdc_after": "3500000",
+    "wallet_usdc_before": "5000000",
+    "wallet_xlm_before_and_after": "0"
+  },
+  "recorded_at": "2026-10-01T07:25:47.2619504Z",
+  "wallet": {
+    "address": "CB65QKAPPYW2JHZJHBCC7IRUPTWFH3E6LV3CQIERDBOTG3AYGMQJAEIE",
+    "create": {
+      "fee_charged_stroops": 29200864,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "9831b28097e3a1b379a665acddd84ecc1807abf9c9e002888b16b55320d0f072",
+      "ledger": 4963185,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/aaeb263713e92e31beab6a892db27d96de69c8ba7faf623bd6a85eb1e44e08e4",
+      "resources": {
+        "disk_read_bytes": 0,
+        "footprint_read_only": 1,
+        "footprint_read_write": 1,
+        "instructions": 677070,
+        "write_bytes": 176
+      },
+      "transaction_hash": "aaeb263713e92e31beab6a892db27d96de69c8ba7faf623bd6a85eb1e44e08e4"
+    },
+    "funded_with_circle_usdc": {
+      "fee_charged_stroops": 485910,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "19068cb528cfc388775686a6925cee23f50cd51e1124fe068cf350505906cc19",
+      "ledger": 4963186,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/e232204e1aaa6a9167be5e0374e85f083a4323e091ddb42e51d27a915c87ff24",
+      "resources": {
+        "disk_read_bytes": 504,
+        "footprint_read_only": 3,
+        "footprint_read_write": 3,
+        "instructions": 804596,
+        "write_bytes": 460
+      },
+      "transaction_hash": "e232204e1aaa6a9167be5e0374e85f083a4323e091ddb42e51d27a915c87ff24"
+    },
+    "kind": "contract account authorized by one Ed25519 key (contracts/example-account)",
+    "upload": {
+      "fee_charged_stroops": 8804267,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "ed11d45a05aff4df40b111d9e57210b38f2b13630b6e913e2ee0b27d9fe93192",
+      "ledger": 4963184,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/ffbad4b2f2885d781e2be8ba69bc15c979d0c4128d9f1f654b0b8aa4206f9ba7",
+      "resources": {
+        "disk_read_bytes": 0,
+        "footprint_read_only": 0,
+        "footprint_read_write": 1,
+        "instructions": 4330029,
+        "write_bytes": 3936
+      },
+      "transaction_hash": "ffbad4b2f2885d781e2be8ba69bc15c979d0c4128d9f1f654b0b8aa4206f9ba7"
+    },
+    "wasm_sha256": "2b35859f9267d85acd0ac3c51543b5d9fda2e92b2ff9c8f5ef9993dab7111678"
+  }
+}

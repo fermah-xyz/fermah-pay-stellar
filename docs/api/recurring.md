@@ -122,6 +122,7 @@ default); beyond that the request is refused with
 | `FAILED_PRECONDITION` | `mandate_ended` | every period of the mandate has passed |
 | `FAILED_PRECONDITION` | `mandate_authorization_expired`, `revocation_expired` | the buyer's signature has lapsed |
 | `FAILED_PRECONDITION` | `mandate_already_signed`, `revocation_already_signed` | another signed entry is already stored |
+| `INVALID_ARGUMENT` | `unsupported_wallet_address` | the buyer's wallet is a [contract account](ledger.md#contract-accounts): mandates are for classic `G...` accounts, whose signature the gateway verifies itself |
 | `RESOURCE_EXHAUSTED` | `mandate_quota_exceeded` | the buyer prepared its quota of mandates and revocations in the last 24 hours |
 | `RESOURCE_EXHAUSTED` | `deployment_mandate_quota_exceeded` | the deployment's buyers prepared its quota of mandates and revocations in the last 24 hours |
 

@@ -42,9 +42,13 @@ from the binding and the request; it never accepts a call from the caller.
 
 `SubmitDeposit` accepts the entry only if, with its signature removed, it is
 identical to the prepared entry (same account, nonce, expiration ledger and
-invocation), and if it carries one valid Ed25519 signature by the buyer's own
-account key. Accounts that authorize through additional signers or
-thresholds are not supported.
+invocation), and if the signature holds:
+
+- For a classic account (`G...`), the entry must carry one valid Ed25519
+  signature by the account's own key. Classic accounts that authorize
+  through additional signers or thresholds are not supported.
+- For a [contract account](#contract-accounts) (`C...`), the gateway asks
+  the network.
 
 The entry carries `AddressV2` credentials (network protocol 27 and later),
 whose signed payload also commits to the buyer's address. The wallet's SDK
@@ -52,6 +56,34 @@ must support them: one that knows only legacy `Address` credentials cannot
 decode the entry, or signs the legacy payload, which is refused as
 `invalid_signature`. `signature_payload` is the `AddressV2` payload, so
 signing it directly works with any Ed25519 signer.
+
+### Contract accounts
+
+A buyer's wallet may be a contract account, such as a smart wallet, that
+authorizes through its own `__check_auth`. Deposits, charges and
+withdrawals work as for a classic account; mandates and x402 do not (see
+[recurring charges](recurring.md) and [x402](x402.md)).
+
+The wallet signs `signature_payload` and puts its credential in the entry's
+`signature`, in whatever form its `__check_auth` takes; for a wallet
+authorized by one Ed25519 key, such as
+[`contracts/example-account`](../../contracts/example-account), that is the
+64-byte signature as `Bytes`. Only the account can interpret it. The gateway
+therefore checks everything else itself, then simulates the call with the
+entry in enforcing mode, as the network will run it, before accepting it.
+For a withdrawal, the simulation also carries the treasury's authorization.
+If the network refuses, the request is refused as `authorization_refused`
+and nothing is stored or held. The simulation also fails for other reasons
+the call would fail on-chain, such as a wallet holding too little USDC for
+a deposit.
+
+A contract account can change its own rules after the gateway accepts its
+entry. If the worker's own simulation is then refused, nothing is sent: the
+deposit or withdrawal is retried until its authorization lapses and ends
+`EXPIRED`, any held amount back in the available balance. If the rules
+change between that simulation and the transaction, the transaction fails
+on-chain and ends `FAILED`, with nothing credited or paid out and the fee
+paid by the operator.
 
 The entry is valid until `expiration_ledger`, about an hour after
 preparation by default. A deposit whose signature lapses before the network
@@ -104,8 +136,8 @@ debit; `pending_charges`, the sum of admitted and submitted charges; and
 ## Withdrawals
 
 A withdrawal returns unused credit from the treasury to the buyer's wallet,
-or to another `G...` account the buyer names; that account needs a USDC
-trustline. It follows the same two steps as a deposit:
+or to another account the buyer names, `G...` or `C...`; a classic account
+needs a USDC trustline. It follows the same two steps as a deposit:
 
 1. `PrepareWithdrawal(buyer_id, amount, destination, idempotency_key)`
    returns the authorization entry the buyer signs. It covers exactly this
@@ -181,11 +213,12 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `INVALID_ARGUMENT` | `invalid_amount` | amount is zero or negative | correct the input |
 | `INVALID_ARGUMENT` | `invalid_idempotency_key` | key outside the allowed alphabet or length | correct the input |
 | `INVALID_ARGUMENT` | `invalid_buyer_id`, `invalid_deposit_id`, `invalid_charge_id`, `invalid_withdrawal_id` | not a UUID | correct the input |
-| `INVALID_ARGUMENT` | `invalid_destination` | the withdrawal destination is not a `G...` account address | correct the input |
+| `INVALID_ARGUMENT` | `invalid_destination` | the withdrawal destination is not a `G...` or `C...` address | correct the input |
 | `INVALID_ARGUMENT` | `withdrawal_below_minimum` | the withdrawal is below the gateway's minimum | withdraw more |
 | `INVALID_ARGUMENT` | `invalid_authorization_entry` | not a base64 XDR authorization entry | send the entry as returned by the wallet |
 | `INVALID_ARGUMENT` | `authorization_mismatch` | the entry differs from the prepared one in more than its signature, or is for another account | sign the prepared entry unchanged |
 | `INVALID_ARGUMENT` | `invalid_signature` | the signature does not verify with the buyer's account key | sign with the buyer's wallet |
+| `INVALID_ARGUMENT` | `authorization_refused` | a contract account's entry: the network refused the call with it when simulated | sign with the account's own signer; check that the wallet holds the USDC |
 | `ALREADY_EXISTS` | `idempotency_conflict` | key already used with another buyer, amount or destination | use a new key |
 | `NOT_FOUND` | `buyer_not_found`, `deposit_not_found`, `charge_not_found`, `withdrawal_not_found` | no such resource in the caller's deployment | check the ID |
 | `FAILED_PRECONDITION` | `ledger_not_configured` | the deployment has no ledger contract bound | bind one |

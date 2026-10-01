@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address, w.state,\n                   w.authorization_xdr, w.signed_authorization_xdr, w.expiration_ledger,\n                   w.created_at, s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b\n              ON b.id = w.buyer_id AND b.seller_deployment_id = w.seller_deployment_id\n             AND b.network = w.network\n            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id\n            WHERE w.seller_deployment_id = $1 AND w.network = $2\n              AND (w.id = $3 OR w.idempotency_key = $4)\n            ",
+  "query": "\n            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address,\n                   w.withdrawal_id, w.state,\n                   w.authorization_xdr, w.signed_authorization_xdr, w.expiration_ledger,\n                   w.created_at, s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b\n              ON b.id = w.buyer_id AND b.seller_deployment_id = w.seller_deployment_id\n             AND b.network = w.network\n            LEFT JOIN pay_stellar.submissions s ON s.id = w.submission_id\n            WHERE w.seller_deployment_id = $1 AND w.network = $2\n              AND (w.id = $3 OR w.idempotency_key = $4)\n            ",
   "describe": {
     "columns": [
       {
@@ -60,6 +60,17 @@
       },
       {
         "ordinal": 5,
+        "name": "withdrawal_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.withdrawals",
+            "name": "withdrawal_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "state",
         "type_info": "Text",
         "origin": {
@@ -70,7 +81,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "authorization_xdr",
         "type_info": "Text",
         "origin": {
@@ -81,7 +92,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "signed_authorization_xdr",
         "type_info": "Text",
         "origin": {
@@ -92,7 +103,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "expiration_ledger",
         "type_info": "Int8",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "outer_hash?",
         "type_info": "Bytea",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "ledger?",
         "type_info": "Int4",
         "origin": {
@@ -152,6 +163,7 @@
       false,
       false,
       false,
+      false,
       true,
       false,
       false,
@@ -159,5 +171,5 @@
       true
     ]
   },
-  "hash": "01691cba0296b9a7776c531cd7da15e6f79dbb2001e3f2f589c3c688765cdf11"
+  "hash": "c105b46ecb1a627e9724fd4e04a079c5c26c6446c677fad085235f78d9e049f9"
 }

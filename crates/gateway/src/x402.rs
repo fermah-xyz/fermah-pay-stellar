@@ -268,7 +268,7 @@ impl<L: LatestLedger> X402<L> {
         let buyer_id = self
             .ledger
             .store()
-            .buyer_by_wallet(scope, &payer)
+            .buyer_by_wallet(scope, &payer.clone().into())
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "finding the payer");

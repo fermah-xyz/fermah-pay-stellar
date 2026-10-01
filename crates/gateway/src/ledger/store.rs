@@ -4,7 +4,7 @@
 //! deployment is indistinguishable from a missing one.
 
 use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
-use fermah_pay_stellar_domain::{AccountAddress, IdempotencyKey};
+use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -108,7 +108,7 @@ impl ChargeState {
 pub struct DepositRecord {
     pub id: Uuid,
     pub buyer_id: Uuid,
-    pub wallet: AccountAddress,
+    pub wallet: ChainAddress,
     pub amount: i64,
     pub state: DepositState,
     pub authorization_xdr: String,
@@ -146,9 +146,10 @@ pub struct NewDeposit<'a> {
 pub struct WithdrawalRecord {
     pub id: Uuid,
     pub buyer_id: Uuid,
-    pub wallet: AccountAddress,
+    pub wallet: ChainAddress,
     pub amount: i64,
-    pub destination: AccountAddress,
+    pub destination: ChainAddress,
+    pub withdrawal_id: [u8; 32],
     pub state: WithdrawalState,
     pub authorization_xdr: String,
     pub signed_authorization_xdr: Option<String>,
@@ -162,7 +163,7 @@ pub struct NewWithdrawal<'a> {
     pub buyer_id: Uuid,
     pub key: &'a IdempotencyKey,
     pub amount: i64,
-    pub destination: &'a AccountAddress,
+    pub destination: &'a ChainAddress,
     pub withdrawal_id: [u8; 32],
     pub authorization_xdr: &'a str,
     pub expiration_ledger: u32,
@@ -226,7 +227,7 @@ fn is_violation_of(error: &sqlx::Error, constraint: &str) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.constraint() == Some(constraint))
 }
 
-fn address(raw: &str) -> Result<AccountAddress, StoreError> {
+fn address<A: std::str::FromStr>(raw: &str) -> Result<A, StoreError> {
     raw.parse().map_err(|_| StoreError::Corrupt("address outside the CHECK constraint"))
 }
 
@@ -269,7 +270,7 @@ impl Store {
     pub async fn buyer_by_wallet(
         &self,
         scope: &Scope,
-        wallet: &AccountAddress,
+        wallet: &ChainAddress,
     ) -> Result<Option<Uuid>, StoreError> {
         sqlx::query_scalar!(
             r#"
@@ -277,7 +278,7 @@ impl Store {
             WHERE wallet_address = $1 AND product_id = $2 AND seller_deployment_id = $3
               AND network = $4
             "#,
-            wallet.as_str(),
+            wallet.to_string(),
             scope.product_id(),
             scope.seller_deployment_id(),
             scope.network().caip2(),
@@ -291,7 +292,7 @@ impl Store {
         &self,
         scope: &Scope,
         buyer_id: Uuid,
-    ) -> Result<Option<AccountAddress>, StoreError> {
+    ) -> Result<Option<ChainAddress>, StoreError> {
         let wallet = sqlx::query_scalar!(
             r#"
             SELECT wallet_address FROM pay_stellar.buyers
@@ -820,7 +821,7 @@ impl Store {
             scope.network().caip2(),
             withdrawal.key.as_str(),
             withdrawal.amount,
-            withdrawal.destination.as_str(),
+            withdrawal.destination.to_string(),
             withdrawal.withdrawal_id.as_slice(),
             withdrawal.authorization_xdr,
             i64::from(withdrawal.expiration_ledger),
@@ -848,7 +849,8 @@ impl Store {
     ) -> Result<Option<WithdrawalRecord>, StoreError> {
         let row = sqlx::query!(
             r#"
-            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address, w.state,
+            SELECT w.id, w.buyer_id, b.wallet_address, w.amount, w.destination_address,
+                   w.withdrawal_id, w.state,
                    w.authorization_xdr, w.signed_authorization_xdr, w.expiration_ledger,
                    w.created_at, s.outer_hash AS "outer_hash?", s.ledger AS "ledger?"
             FROM pay_stellar.withdrawals w
@@ -874,6 +876,9 @@ impl Store {
                 wallet: address(&row.wallet_address)?,
                 amount: row.amount,
                 destination: address(&row.destination_address)?,
+                withdrawal_id: row.withdrawal_id.try_into().map_err(|_| {
+                    StoreError::Corrupt("withdrawal id outside the CHECK constraint")
+                })?,
                 state: WithdrawalState::parse(&row.state)?,
                 authorization_xdr: row.authorization_xdr,
                 signed_authorization_xdr: row.signed_authorization_xdr,

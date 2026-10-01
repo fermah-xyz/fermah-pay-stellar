@@ -27,6 +27,9 @@ labels! {
         InvalidAuthorizationEntry => "invalid_authorization_entry",
         AuthorizationMismatch => "authorization_mismatch",
         InvalidSignature => "invalid_signature",
+        /// A contract account's entry: the network refused the call with it
+        /// when simulated.
+        AuthorizationRefused => "authorization_refused",
         DepositExpired => "deposit_expired",
         DepositAlreadySigned => "deposit_already_signed",
         InvalidChargeId => "invalid_charge_id",
@@ -82,6 +85,7 @@ impl Refusal {
             | Self::InvalidAuthorizationEntry
             | Self::AuthorizationMismatch
             | Self::InvalidSignature
+            | Self::AuthorizationRefused
             | Self::InvalidChargeId
             | Self::InvalidWithdrawalId
             | Self::InvalidDestination

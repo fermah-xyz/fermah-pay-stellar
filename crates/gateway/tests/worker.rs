@@ -1111,6 +1111,17 @@ impl LatestLedger for Stellar {
     async fn latest_close_time(&self) -> Result<i64, RpcError> {
         Ok(self.with(|n| n.clock.now().unix_timestamp()))
     }
+
+    // Buyers here hold classic accounts, whose entries are verified without
+    // the network.
+    async fn refusal_of(
+        &self,
+        _source: &AccountAddress,
+        _call: fermah_pay_stellar_chain::stellar_xdr::InvokeContractArgs,
+        _auth: Vec<fermah_pay_stellar_chain::stellar_xdr::SorobanAuthorizationEntry>,
+    ) -> Result<Option<String>, RpcError> {
+        unreachable!("no buyer here holds a contract account")
+    }
 }
 
 #[derive(Clone)]
@@ -2598,7 +2609,7 @@ async fn test_evidence_that_does_not_settle_the_charge_is_refused(
     // nothing either: X's charge settled for 10, not 11.
     assert_eq!(w.get_charge(&fine.charge_id).await.state(), ChargeState::Charged);
     let wrong_amount = QuarantinedCharge {
-        owner: x.key.address(),
+        owner: x.key.address().into(),
         charge_id: hash_of(&fine.contract_charge_id),
         amount: 11,
         ..q.clone()

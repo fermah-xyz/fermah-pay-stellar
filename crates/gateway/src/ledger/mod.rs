@@ -17,17 +17,17 @@ use std::future::Future;
 use std::sync::Arc;
 
 use fermah_pay_stellar_chain::authorization::{
-    SignedEntryRefusal, signature_payload, verify_signed_entry,
+    SignedEntryRefusal, signature_payload, verify_contract_entry, verify_signed_entry,
 };
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::DepositIntent;
-use fermah_pay_stellar_chain::rpc::{RpcClient, RpcError, hex_lower};
+use fermah_pay_stellar_chain::prepaid::{DepositIntent, PrepaidDeployment};
+use fermah_pay_stellar_chain::rpc::{AuthMode, RpcClient, RpcError, SimulationOutcome, hex_lower};
 use fermah_pay_stellar_chain::stellar_xdr::{
-    Limits, ReadXdr, ScAddress, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
-    SorobanCredentials, WriteXdr,
+    InvokeContractArgs, Limits, ReadXdr, ScVal, SorobanAddressCredentials,
+    SorobanAuthorizationEntry, SorobanAuthorizedFunction, SorobanCredentials, WriteXdr,
 };
-use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::{IdempotencyKey, Network};
+use fermah_pay_stellar_chain::transaction::ScAddressOf;
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, IdempotencyKey, Network};
 use fermah_pay_stellar_proto::v1::ledger_service_server::LedgerService;
 use fermah_pay_stellar_proto::v1::{
     Charge, ChargeState as WireChargeState, CreateChargeRequest, CreateChargeResponse, Deposit,
@@ -58,13 +58,25 @@ use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 
 /// The network reads the API needs: the current ledger, which bounds how
-/// long a buyer's signature stays valid, and its close time, the ledger time
-/// by which the contract decides a mandate's period.
+/// long a buyer's signature stays valid, its close time, the ledger time by
+/// which the contract decides a mandate's period, and whether the network
+/// accepts a contract account's authorization.
 pub trait LatestLedger: Send + Sync + 'static {
     fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
 
     /// Unix close time of the latest ledger.
     fn latest_close_time(&self) -> impl Future<Output = Result<i64, RpcError>> + Send;
+
+    /// Simulates `call` from `source` with the signed entries in `auth`, in
+    /// enforcing mode: each entry must satisfy its address, a contract
+    /// account through its `__check_auth`. `None` when the network accepts
+    /// the call, its reason when it does not. Nothing is sent.
+    fn refusal_of(
+        &self,
+        source: &AccountAddress,
+        call: InvokeContractArgs,
+        auth: Vec<SorobanAuthorizationEntry>,
+    ) -> impl Future<Output = Result<Option<String>, RpcError>> + Send;
 }
 
 impl LatestLedger for RpcClient {
@@ -74,6 +86,23 @@ impl LatestLedger for RpcClient {
 
     async fn latest_close_time(&self) -> Result<i64, RpcError> {
         Ok(self.get_latest_ledger_info().await?.close_time)
+    }
+
+    async fn refusal_of(
+        &self,
+        source: &AccountAddress,
+        call: InvokeContractArgs,
+        auth: Vec<SorobanAuthorizationEntry>,
+    ) -> Result<Option<String>, RpcError> {
+        match self.simulate_call(source, call, auth, AuthMode::Enforce).await? {
+            SimulationOutcome::Succeeded(_) => Ok(None),
+            SimulationOutcome::Failed { error, .. } => Ok(Some(error)),
+            // Archived state stops the simulation before any authorization is
+            // checked: no answer yet, rather than an acceptance.
+            SimulationOutcome::RestoreRequired { .. } => Err(RpcError::SimulationRefused(
+                "the call needs archived state restored first".to_owned(),
+            )),
+        }
     }
 }
 
@@ -190,6 +219,88 @@ fn unsigned(entry: &SorobanAuthorizationEntry) -> SorobanAuthorizationEntry {
         other => other.clone(),
     };
     SorobanAuthorizationEntry { credentials, root_invocation: entry.root_invocation.clone() }
+}
+
+/// Why a buyer's returned entry was refused, before the caller names what
+/// an expired one means for its kind of request.
+enum EntryRefusal {
+    Entry(SignedEntryRefusal),
+    Network(Refusal),
+    Failed(Status),
+}
+
+impl EntryRefusal {
+    fn expired_as(self, expired: Refusal) -> Status {
+        match self {
+            Self::Entry(refusal) => signature_refusal(&refusal, expired).into(),
+            Self::Network(refusal) => refusal.into(),
+            Self::Failed(status) => status,
+        }
+    }
+}
+
+impl<L: LatestLedger> LedgerApi<L> {
+    /// Checks the entry a buyer returned for `prepared`. A classic
+    /// account's is verified here, signature included. A contract account
+    /// authorizes through its own `__check_auth`, with a credential only it
+    /// interprets: its entry is checked here for everything else, then the
+    /// call is simulated with it in enforcing mode, as the network will run
+    /// it when the worker sends it. The simulation is sent from the treasury,
+    /// which gives the authorizations `treasury_entries` returns.
+    async fn verify_buyer_entry(
+        &self,
+        scope: &Scope,
+        wallet: &ChainAddress,
+        signed: &SorobanAuthorizationEntry,
+        prepared: &SorobanAuthorizationEntry,
+        treasury_entries: impl FnOnce(&PrepaidDeployment) -> Vec<SorobanAuthorizationEntry>,
+    ) -> Result<(), EntryRefusal> {
+        let latest = self
+            .ledger
+            .latest_ledger()
+            .await
+            .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
+        let validity = self.policy.authorization_validity_ledgers;
+        let contract = match wallet {
+            ChainAddress::Account(account) => {
+                return verify_signed_entry(
+                    signed,
+                    account,
+                    &prepared.root_invocation,
+                    network_id(self.network),
+                    latest,
+                    validity,
+                )
+                .map_err(EntryRefusal::Entry);
+            }
+            ChainAddress::Contract(contract) => contract,
+        };
+        verify_contract_entry(signed, contract, &prepared.root_invocation, latest, validity)
+            .map_err(EntryRefusal::Entry)?;
+        let SorobanAuthorizedFunction::ContractFn(call) = &prepared.root_invocation.function else {
+            return Err(EntryRefusal::Failed(corrupt("prepared entry is not a contract call")));
+        };
+        let deployment = self
+            .store
+            .ledger_binding(scope)
+            .await
+            .map_err(|e| EntryRefusal::Failed(internal(&e)))?
+            .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
+        let mut auth = vec![signed.clone()];
+        auth.extend(treasury_entries(&deployment));
+        let refusal = self
+            .ledger
+            .refusal_of(&deployment.treasury, call.clone(), auth)
+            .await
+            .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
+        match refusal {
+            None => Ok(()),
+            Some(reason) => {
+                tracing::info!(reason, "the network refused a contract account's authorization");
+                Err(EntryRefusal::Network(Refusal::AuthorizationRefused))
+            }
+        }
+    }
 }
 
 const fn signature_refusal(refusal: &SignedEntryRefusal, expired: Refusal) -> Refusal {
@@ -432,7 +543,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         // shares the key.
         let entry = SorobanAuthorizationEntry {
             credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
-                address: ScAddress::Account(account_id(&wallet)),
+                address: wallet.sc_address(),
                 nonce: i64::from_le_bytes(random()?),
                 signature_expiration_ledger: expiration_ledger,
                 signature: ScVal::Void,
@@ -509,16 +620,11 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         if unsigned(&signed) != prepared {
             return Err(Refusal::AuthorizationMismatch.into());
         }
-        let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
-        verify_signed_entry(
-            &signed,
-            &record.wallet,
-            &prepared.root_invocation,
-            network_id(self.network),
-            latest,
-            self.policy.authorization_validity_ledgers,
-        )
-        .map_err(|refusal| signature_refusal(&refusal, Refusal::DepositExpired))?;
+        // The deposit's transfer moves the buyer's USDC to the treasury: the
+        // buyer's entry is the only authorization the call needs.
+        self.verify_buyer_entry(&scope, &record.wallet, &signed, &prepared, |_| vec![])
+            .await
+            .map_err(|refusal| refusal.expired_as(Refusal::DepositExpired))?;
 
         let signed_xdr = signed
             .to_xdr_base64(Limits::none())

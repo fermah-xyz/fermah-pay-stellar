@@ -615,6 +615,46 @@ async fn test_charge_settled_as_recorded_is_matched_without_a_finding(
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_contract_account_buyers_charge_is_matched_and_a_strangers_is_not(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let wallet = stellar_strkey::Contract([31; 32]).to_string().to_string();
+    let buyer = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO pay_stellar.buyers
+            (id, product_id, seller_deployment_id, network, external_ref, wallet_address,
+             available)
+         VALUES ($1, $2, $3, 'stellar:testnet', 'smart-wallet', $4, 70)",
+    )
+    .bind(buyer)
+    .bind(w.product)
+    .bind(w.deployment)
+    .bind(&wallet)
+    .execute(&w.owner)
+    .await
+    .unwrap();
+    w.charge(buyer, [1; 32], 30, "charged", Some("charged")).await;
+    let contract = |id: [u8; 32]| ScVal::Address(ScAddress::Contract(ContractId(Hash(id))));
+    let entry = |owner: ScVal| vector(vec![owner, bytes(&[1; 32]), i128_val(30), ScVal::U32(0)]);
+    // The same charge identifier under the wallet, then under another
+    // contract account the gateway does not know.
+    w.chain.emit(
+        1010,
+        (
+            vec![symbol("charges")],
+            vector(vec![entry(contract([31; 32])), entry(contract([32; 32]))]),
+        ),
+    );
+    w.observer().observe().await.unwrap();
+    assert_eq!(w.verdicts().await, [(0, "matched".to_owned()), (1, "finding".to_owned())]);
+    assert_eq!(w.findings().await, [pair("unknown_charge", "critical")]);
+    let detail = w.finding_detail("unknown_charge").await;
+    assert_eq!(detail["owner"], stellar_strkey::Contract([32; 32]).to_string().to_string());
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
 async fn test_charge_the_gateway_never_admitted_is_a_critical_finding(
     opts: PgPoolOptions,
     connect: PgConnectOptions,

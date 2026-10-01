@@ -37,6 +37,10 @@ contract_out := "target/contract-wasm"
 contract-build:
     {{stellar_cli}} contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir {{contract_out}}
 
+# Build the example contract account's Wasm, a stand-in smart wallet.
+example-account-build:
+    {{stellar_cli}} contract build --package fermah-pay-stellar-example-account --profile contract --locked --out-dir {{contract_out}}
+
 # Measure a full batch of distinct buyers in one invocation against the
 # network's per-transaction limits, using the built Wasm.
 contract-resources: contract-build

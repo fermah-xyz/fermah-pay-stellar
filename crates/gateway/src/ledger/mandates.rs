@@ -12,7 +12,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     SorobanAuthorizedInvocation, SorobanCredentials, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::{AccountAddress, IdempotencyKey};
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, IdempotencyKey};
 use fermah_pay_stellar_proto::v1::{
     CreateRecurringChargeRequest, CreateRecurringChargeResponse, GetMandateRequest,
     GetMandateResponse, GetRecurringChargeRequest, GetRecurringChargeResponse,
@@ -152,6 +152,16 @@ fn mandate_live_until(
 fn current_cycle(starts_at: i64, period_secs: i64, now: i64) -> Option<u32> {
     let elapsed = now.saturating_sub(starts_at).max(0);
     u32::try_from(elapsed.checked_div(period_secs)?).ok()
+}
+
+/// The buyer's wallet as a classic account. Mandates are for those only:
+/// the gateway verifies a mandate's or revocation's signature itself, and a
+/// contract account's is only its own `__check_auth`'s to judge.
+fn classic_wallet(wallet: ChainAddress) -> Result<AccountAddress, Refusal> {
+    match wallet {
+        ChainAddress::Account(account) => Ok(account),
+        ChainAddress::Contract(_) => Err(Refusal::UnsupportedWalletAddress),
+    }
 }
 
 fn buyer_entry(
@@ -328,6 +338,7 @@ impl<L: LatestLedger> LedgerApi<L> {
             .await
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
+        let wallet = classic_wallet(wallet)?;
         let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
         let validity = self.policy.authorization_validity_ledgers;
         let expiration_ledger = latest.checked_add(validity).ok_or(Refusal::Internal)?;
@@ -480,6 +491,7 @@ impl<L: LatestLedger> LedgerApi<L> {
             .await
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
+        let wallet = classic_wallet(wallet)?;
         let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
         let expiration_ledger = latest
             .checked_add(self.policy.authorization_validity_ledgers)

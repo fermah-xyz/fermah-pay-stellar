@@ -15,7 +15,7 @@ Registers a buyer of the caller's deployment and links its Stellar wallet.
 | Field | Rule |
 |---|---|
 | `external_ref` | 1–128 characters of `[A-Za-z0-9._:@+-]`; unique within the deployment |
-| `wallet_address` | canonical classic account address (`G...`), unique within the deployment |
+| `wallet_address` | canonical classic account (`G...`) or [contract account](ledger.md#contract-accounts) (`C...`) address, unique within the deployment |
 
 Behaviour:
 
@@ -44,7 +44,7 @@ Looks up a buyer of the caller's deployment by `buyer_id` or by
 |---|---|
 | `buyer_id` | gateway-assigned UUID |
 | `external_ref` | the seller's reference |
-| `wallet_address` | canonical `G...` address |
+| `wallet_address` | canonical `G...` or `C...` address |
 | `network` | CAIP-2 network of the deployment |
 | `created_at` | RFC 3339 UTC timestamp |
 
@@ -58,7 +58,7 @@ Branch on the token, not on free text.
 | `UNAUTHENTICATED` | `unauthenticated` | missing, malformed, unknown, revoked or wrong-network key | fix the credential |
 | `INVALID_ARGUMENT` | `invalid_external_ref` | reference outside the allowed alphabet or length | correct the input |
 | `INVALID_ARGUMENT` | `invalid_wallet_address` | not a valid account address | correct the input |
-| `INVALID_ARGUMENT` | `unsupported_wallet_address` | muxed (`M...`) or contract (`C...`) address | use a classic `G...` account |
+| `INVALID_ARGUMENT` | `unsupported_wallet_address` | muxed (`M...`) address | use the underlying `G...` account |
 | `INVALID_ARGUMENT` | `invalid_buyer_id` | `buyer_id` is not a UUID | correct the input |
 | `INVALID_ARGUMENT` | `missing_lookup` | neither `buyer_id` nor `external_ref` set | set one |
 | `ALREADY_EXISTS` | `buyer_conflict` | reference or wallet already bound differently | do not retry with the same input |

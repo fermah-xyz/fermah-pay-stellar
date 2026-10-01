@@ -6,6 +6,9 @@
 //! amount and counterparty, and a changed field invalidates the signature.
 
 use fermah_pay_stellar_domain::AccountAddress;
+pub use fermah_pay_stellar_domain::ChainAddress;
+
+use crate::transaction::ScAddressOf;
 use stellar_xdr::{
     BytesM, ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody,
     ContractExecutable, ContractId, Hash, Int128Parts, InvokeContractArgs, LedgerEntryData,
@@ -13,8 +16,6 @@ use stellar_xdr::{
     ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM,
     TransactionMeta, VecM,
 };
-
-use crate::transaction::account_id;
 
 /// The contract's limits the gateway must respect, mirrored from the
 /// contract and pinned against it by the contract's tests.
@@ -150,7 +151,7 @@ fn symbol_val(name: &str) -> ScVal {
 /// charge, the amount, and the last ledger in which it may be settled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChargeRequest {
-    pub owner: AccountAddress,
+    pub owner: ChainAddress,
     pub charge_id: [u8; 32],
     pub amount: i128,
     pub last_ledger: u32,
@@ -189,7 +190,7 @@ pub struct RecurringChargeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositIntent {
-    pub owner: AccountAddress,
+    pub owner: ChainAddress,
     pub amount: i128,
     pub deposit_id: [u8; 32],
 }
@@ -203,9 +204,9 @@ pub struct RevenueWithdrawIntent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WithdrawIntent {
-    pub owner: AccountAddress,
+    pub owner: ChainAddress,
     pub amount: i128,
-    pub destination: AccountAddress,
+    pub destination: ChainAddress,
     pub withdrawal_id: [u8; 32],
 }
 
@@ -312,7 +313,7 @@ impl PrepaidDeployment {
     }
 
     #[must_use]
-    pub fn get_balance_call(&self, owner: &AccountAddress) -> InvokeContractArgs {
+    pub fn get_balance_call(&self, owner: &impl ScAddressOf) -> InvokeContractArgs {
         call(self.contract, "get_balance", vec![account_val(owner)])
     }
 
@@ -481,7 +482,7 @@ impl PrepaidDeployment {
     /// Ledger key of the owner's account entry, whose value carries the
     /// balance.
     #[must_use]
-    pub fn account_key(&self, owner: &AccountAddress) -> LedgerKey {
+    pub fn account_key(&self, owner: &impl ScAddressOf) -> LedgerKey {
         self.persistent_key(vec_val(vec![symbol_val("Account"), account_val(owner)]))
     }
 
@@ -489,7 +490,7 @@ impl PrepaidDeployment {
     /// `deposit_id` for `owner`: present exactly when that deposit was
     /// credited.
     #[must_use]
-    pub fn deposit_key(&self, owner: &AccountAddress, deposit_id: &[u8; 32]) -> LedgerKey {
+    pub fn deposit_key(&self, owner: &impl ScAddressOf, deposit_id: &[u8; 32]) -> LedgerKey {
         self.persistent_key(vec_val(vec![
             symbol_val("Deposit"),
             account_val(owner),
@@ -501,7 +502,7 @@ impl PrepaidDeployment {
     /// `withdrawal_id` for `owner`: present exactly when that withdrawal
     /// moved USDC.
     #[must_use]
-    pub fn withdrawal_key(&self, owner: &AccountAddress, withdrawal_id: &[u8; 32]) -> LedgerKey {
+    pub fn withdrawal_key(&self, owner: &impl ScAddressOf, withdrawal_id: &[u8; 32]) -> LedgerKey {
         self.persistent_key(vec_val(vec![
             symbol_val("Withdrawal"),
             account_val(owner),
@@ -513,7 +514,7 @@ impl PrepaidDeployment {
     /// settles `charge_id` for `owner`, holding the outcome. It lives until
     /// shortly after the charge's last ledger.
     #[must_use]
-    pub fn charge_record_key(&self, owner: &AccountAddress, charge_id: &[u8; 32]) -> LedgerKey {
+    pub fn charge_record_key(&self, owner: &impl ScAddressOf, charge_id: &[u8; 32]) -> LedgerKey {
         LedgerKey::ContractData(LedgerKeyContractData {
             contract: ScAddress::Contract(ContractId(Hash(self.contract))),
             key: vec_val(vec![symbol_val("Charge"), account_val(owner), bytes_val(charge_id)]),
@@ -559,8 +560,8 @@ impl PrepaidDeployment {
 
     fn transfer(
         &self,
-        from: &AccountAddress,
-        to: &AccountAddress,
+        from: &impl ScAddressOf,
+        to: &impl ScAddressOf,
         amount: i128,
     ) -> InvokeContractArgs {
         usdc_transfer_call(self.usdc, from, to, amount)
@@ -590,11 +591,29 @@ impl PrepaidDeployment {
 #[must_use]
 pub fn usdc_transfer_call(
     usdc: [u8; 32],
-    from: &AccountAddress,
-    to: &AccountAddress,
+    from: &impl ScAddressOf,
+    to: &impl ScAddressOf,
     amount: i128,
 ) -> InvokeContractArgs {
     call(usdc, "transfer", vec![account_val(from), account_val(to), i128_val(amount)])
+}
+
+/// What `from` signs for [`usdc_transfer_call`]: that transfer alone.
+#[must_use]
+pub fn usdc_transfer_authorization(
+    usdc: [u8; 32],
+    from: &impl ScAddressOf,
+    to: &impl ScAddressOf,
+    amount: i128,
+) -> SorobanAuthorizedInvocation {
+    invocation(usdc_transfer_call(usdc, from, to, amount), vec![])
+}
+
+/// The USDC `owner` holds, as the asset contract `usdc` reports it; works
+/// for contract accounts, which hold USDC without a trustline.
+#[must_use]
+pub fn usdc_balance_call(usdc: [u8; 32], owner: &impl ScAddressOf) -> InvokeContractArgs {
+    call(usdc, "balance", vec![account_val(owner)])
 }
 
 /// A charge's result as `charge_batch` returns it.
@@ -825,15 +844,14 @@ pub fn batch_outcomes(value: &ScVal) -> Option<Vec<Outcome>> {
 /// charge, which amount, and what the contract decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettledEntry {
-    pub owner: AccountAddress,
+    pub owner: ChainAddress,
     pub charge_id: [u8; 32],
     pub amount: i128,
     pub outcome: Outcome,
 }
 
 /// The entries of a `charges` event emitted by `contract`; `None` if the
-/// event is another contract's, another kind, malformed, or names an owner
-/// that is not a classic account.
+/// event is another contract's, another kind, or malformed.
 #[must_use]
 pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec<SettledEntry>> {
     if event.contract_id != Some(ContractId(Hash(*contract))) {
@@ -846,9 +864,8 @@ pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec
     entries
         .into_iter()
         .map(|entry| {
-            let ChainAddress::Account(owner) = entry.owner else { return None };
             Some(SettledEntry {
-                owner,
+                owner: entry.owner,
                 charge_id: entry.charge_id,
                 amount: entry.amount,
                 outcome: entry.outcome,
@@ -857,32 +874,11 @@ pub fn settled_entries(event: &ContractEvent, contract: &[u8; 32]) -> Option<Vec
         .collect()
 }
 
-/// An address as the contract's events carry it: a classic account or a
-/// contract. The contract accepts either as an account owner or destination.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ChainAddress {
-    Account(AccountAddress),
-    Contract([u8; 32]),
-}
-
-impl ChainAddress {
-    fn from_val(value: &ScVal) -> Option<Self> {
-        match value {
-            ScVal::Address(ScAddress::Account(account)) => {
-                Some(Self::Account(crate::transaction::address_of(account)))
-            }
-            ScVal::Address(ScAddress::Contract(ContractId(Hash(id)))) => Some(Self::Contract(*id)),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for ChainAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Account(account) => f.write_str(account.as_str()),
-            Self::Contract(id) => f.write_str(stellar_strkey::Contract(*id).to_string().as_str()),
-        }
+/// An owner or destination as the contract's events carry it.
+fn chain_address_val(value: &ScVal) -> Option<ChainAddress> {
+    match value {
+        ScVal::Address(address) => crate::transaction::chain_address(address),
+        _ => None,
     }
 }
 
@@ -1021,13 +1017,13 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
     match (name.0.as_slice(), rest) {
         (b"mandate", [owner]) => {
             return Some(LedgerEvent::MandateAuthorized {
-                owner: ChainAddress::from_val(owner)?,
+                owner: chain_address_val(owner)?,
                 mandate: mandate_of(data)?,
             });
         }
         (b"revoke", [owner]) => {
             return Some(LedgerEvent::MandateRevoked {
-                owner: ChainAddress::from_val(owner)?,
+                owner: chain_address_val(owner)?,
                 mandate_id: match data {
                     ScVal::Void => None,
                     other => Some(bytes32_of(other)?),
@@ -1044,7 +1040,7 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
         (b"deposit", [owner]) => {
             let [amount, deposit_id] = fields else { return None };
             LedgerEvent::Deposited {
-                owner: ChainAddress::from_val(owner)?,
+                owner: chain_address_val(owner)?,
                 amount: i128_of(amount)?,
                 deposit_id: bytes32_of(deposit_id)?,
             }
@@ -1058,7 +1054,7 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                         return None;
                     };
                     Some(ChargeEntry {
-                        owner: ChainAddress::from_val(owner)?,
+                        owner: chain_address_val(owner)?,
                         charge_id: bytes32_of(charge_id)?,
                         amount: i128_of(amount)?,
                         outcome: Outcome::from_code(*code)?,
@@ -1084,7 +1080,7 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                             return None;
                         };
                         Some(RecurringEntry {
-                            owner: ChainAddress::from_val(owner)?,
+                            owner: chain_address_val(owner)?,
                             charge_id: bytes32_of(charge_id)?,
                             mandate_id: bytes32_of(mandate_id)?,
                             cycle: *cycle,
@@ -1098,8 +1094,8 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
         (b"withdraw", [owner]) => {
             let [destination, amount, withdrawal_id] = fields else { return None };
             LedgerEvent::Withdrawn {
-                owner: ChainAddress::from_val(owner)?,
-                destination: ChainAddress::from_val(destination)?,
+                owner: chain_address_val(owner)?,
+                destination: chain_address_val(destination)?,
                 amount: i128_of(amount)?,
                 withdrawal_id: bytes32_of(withdrawal_id)?,
             }
@@ -1107,7 +1103,7 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
         (b"revenue", []) => {
             let [destination, amount, withdrawal_id] = fields else { return None };
             LedgerEvent::RevenueWithdrawn {
-                destination: ChainAddress::from_val(destination)?,
+                destination: chain_address_val(destination)?,
                 amount: i128_of(amount)?,
                 withdrawal_id: bytes32_of(withdrawal_id)?,
             }
@@ -1123,8 +1119,8 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
             };
             LedgerEvent::RoleChanged {
                 role,
-                previous: ChainAddress::from_val(previous)?,
-                current: ChainAddress::from_val(current)?,
+                previous: chain_address_val(previous)?,
+                current: chain_address_val(current)?,
             }
         }
         (b"limits", []) => {
@@ -1346,8 +1342,8 @@ fn invocation(
     }
 }
 
-fn account_val(address: &AccountAddress) -> ScVal {
-    ScVal::Address(ScAddress::Account(account_id(address)))
+fn account_val(address: &impl ScAddressOf) -> ScVal {
+    ScVal::Address(address.sc_address())
 }
 
 fn bytes_val(bytes: &[u8]) -> ScVal {

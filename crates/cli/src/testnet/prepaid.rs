@@ -29,7 +29,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 };
 use fermah_pay_stellar_chain::submission::submit_and_wait;
 use fermah_pay_stellar_chain::{deploy, friendbot, network_id, transaction, usdc};
-use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, Network};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -38,6 +38,7 @@ use super::ledger::balances;
 use super::profile::{Deployment, Profile};
 
 mod conformance;
+mod contract_account;
 mod drill;
 mod e2e;
 
@@ -723,7 +724,7 @@ impl Context {
         &self,
         submitter: &Submitter<'_>,
         pinned: &PrepaidDeployment,
-        owner: &AccountAddress,
+        owner: &ChainAddress,
     ) -> anyhow::Result<i128> {
         let value =
             submitter.read(HostFunction::InvokeContract(pinned.get_balance_call(owner))).await?;
@@ -746,7 +747,7 @@ impl Context {
             let before = balances(&self.rpc, &owner, &asset).await?;
             let treasury_before = balances(&self.rpc, &treasury, &asset).await?.usdc;
             let intent =
-                DepositIntent { owner: owner.clone(), amount, deposit_id: random_bytes()? };
+                DepositIntent { owner: owner.clone().into(), amount, deposit_id: random_bytes()? };
             let function = HostFunction::InvokeContract(pinned.deposit_call(&intent));
             let auth = self
                 .authorize(
@@ -758,7 +759,8 @@ impl Context {
             let receipt = submitter.submit(function, auth).await?;
             let after = balances(&self.rpc, &owner, &asset).await?;
             let treasury_after = balances(&self.rpc, &treasury, &asset).await?.usdc;
-            let credited = self.contract_balance(&submitter, &pinned, &owner).await?;
+            let credited =
+                self.contract_balance(&submitter, &pinned, &owner.clone().into()).await?;
             ensure!(after.xlm_stroops == Some(0), "buyer {owner} holds XLM after deposit");
             let mut record = receipt_json(&receipt);
             record["buyer"] = json!(owner.to_string());
@@ -814,7 +816,7 @@ impl Context {
         let charges: Vec<ChargeRequest> = (first..=last)
             .map(|i| {
                 Ok(ChargeRequest {
-                    owner: self.profile.buyer(i)?.address(),
+                    owner: self.profile.buyer(i)?.address().into(),
                     charge_id: tagged_charge_id(tag, i),
                     amount,
                     last_ledger,
@@ -861,7 +863,7 @@ impl Context {
         let owner = self.profile.buyer(buyer)?.address();
         let last_ledger = self.rpc.get_latest_ledger().await? + CHARGE_VALIDITY_LEDGERS;
         let charge = ChargeRequest {
-            owner: owner.clone(),
+            owner: owner.clone().into(),
             charge_id: tagged_charge_id(tag, buyer),
             amount,
             last_ledger,
@@ -955,9 +957,9 @@ impl Context {
         let owner = buyer_key.address();
         let asset = usdc::circle_usdc(self.network);
         let intent = WithdrawIntent {
-            owner: owner.clone(),
+            owner: owner.clone().into(),
             amount,
-            destination: owner.clone(),
+            destination: owner.clone().into(),
             withdrawal_id: random_bytes()?,
         };
         let before = balances(&self.rpc, &owner, &asset).await?;

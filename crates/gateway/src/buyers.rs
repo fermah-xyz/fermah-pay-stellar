@@ -1,7 +1,7 @@
 //! `BuyerService` gRPC handlers: parse at the edge, act within the caller's
 //! scope, map every outcome to one stable refusal.
 
-use fermah_pay_stellar_domain::{AccountAddress, AccountAddressError, ExternalRef};
+use fermah_pay_stellar_domain::{AccountAddressError, ChainAddress, ExternalRef};
 use fermah_pay_stellar_proto::v1::buyer_service_server::BuyerService;
 use fermah_pay_stellar_proto::v1::get_buyer_request::Lookup;
 use fermah_pay_stellar_proto::v1::{
@@ -59,7 +59,8 @@ impl BuyerService for BuyerApi {
         let body = request.into_inner();
         let external_ref: ExternalRef =
             body.external_ref.parse().map_err(|_| Refusal::InvalidExternalRef)?;
-        let wallet: AccountAddress = body.wallet_address.parse().map_err(|e| match e {
+        // A classic account or a contract account; see ChainAddress.
+        let wallet: ChainAddress = body.wallet_address.parse().map_err(|e| match e {
             AccountAddressError::Malformed => Refusal::InvalidWalletAddress,
             AccountAddressError::UnsupportedMuxed | AccountAddressError::UnsupportedContract => {
                 Refusal::UnsupportedWalletAddress

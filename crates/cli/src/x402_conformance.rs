@@ -440,7 +440,7 @@ pub async fn run(target: &Target, buyer: &SecretKey, rpc: &RpcClient) -> anyhow:
             .map(|meta| settled_in(meta, &pay_to))
             .unwrap_or_default()
             .into_iter()
-            .find(|entry| entry.charge_id == charge_id && entry.owner == buyer.address()),
+            .find(|entry| entry.charge_id == charge_id && entry.owner == buyer.address().into()),
         _ => None,
     };
     let settled_on_chain = on_chain.as_ref().is_some_and(|entry| {

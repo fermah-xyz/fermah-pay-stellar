@@ -1615,6 +1615,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fermah-pay-stellar-example-account"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "fermah-pay-stellar-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1660,6 +1667,7 @@ version = "0.1.0"
 dependencies = [
  "fermah-pay-stellar-chain",
  "fermah-pay-stellar-domain",
+ "fermah-pay-stellar-example-account",
  "proptest",
  "soroban-sdk",
 ]

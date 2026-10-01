@@ -2,7 +2,7 @@
 //! scope (product, seller deployment, network), so a row created under one
 //! scope is invisible under any other.
 
-use fermah_pay_stellar_domain::{AccountAddress, ExternalRef, Network};
+use fermah_pay_stellar_domain::{ChainAddress, ExternalRef, Network};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -147,7 +147,7 @@ impl Store {
         &self,
         scope: &Scope,
         external_ref: &ExternalRef,
-        wallet: &AccountAddress,
+        wallet: &ChainAddress,
     ) -> Result<CreateBuyerOutcome, StoreError> {
         let query = |operation| move |source| StoreError::Query { operation, source };
         let mut tx = self.pool.begin().await.map_err(query("begin buyer registration"))?;
@@ -169,7 +169,7 @@ impl Store {
             "#,
             scope.seller_deployment_id(),
             external_ref.as_str(),
-            wallet.as_str(),
+            wallet.to_string(),
         )
         .fetch_one(&mut *tx)
         .await
@@ -204,7 +204,7 @@ impl Store {
             scope.seller_deployment_id(),
             scope.network().caip2(),
             external_ref.as_str(),
-            wallet.as_str(),
+            wallet.to_string(),
         )
         .fetch_optional(&mut *tx)
         .await
@@ -221,7 +221,7 @@ impl Store {
             }));
         }
         match self.buyer(scope, BuyerLookup::ExternalRef(external_ref)).await? {
-            Some(existing) if existing.wallet_address == wallet.as_str() => {
+            Some(existing) if existing.wallet_address == *wallet.to_string() => {
                 Ok(CreateBuyerOutcome::Existing(existing))
             }
             _ => Ok(CreateBuyerOutcome::Conflict),

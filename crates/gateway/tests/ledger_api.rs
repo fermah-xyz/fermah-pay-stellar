@@ -175,7 +175,7 @@ async fn test_prepared_entry_authorizes_exactly_the_deposit_to_the_bound_treasur
     );
     let expected = PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() }
         .deposit_authorization(&DepositIntent {
-            owner: b.key.address(),
+            owner: b.key.address().into(),
             amount: 25_000_000,
             deposit_id: deposit_id.try_into().unwrap(),
         });

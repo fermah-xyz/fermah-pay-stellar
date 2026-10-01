@@ -146,6 +146,16 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// A buyer whose wallet is a contract account: deploy the example
+    /// account (WASM), fund it with Circle USDC, then register it, deposit,
+    /// charge and withdraw through the gateway API run in this process on
+    /// DATABASE_URL. Writes a `contract-account-buyer` record.
+    ContractAccountBuyer {
+        #[arg(long)]
+        wasm: PathBuf,
+        #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
     /// Provoke the condition one threat leaves and wait for its alert to be
     /// active in Alertmanager, against the development stack started with
     /// `just dev-drills-up`. Writes a `drill-<vector>` record.
@@ -291,6 +301,11 @@ async fn main() -> anyhow::Result<()> {
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
         Command::RecurringEndToEnd { database_url } => {
             context()?.recurring_end_to_end(&database_url).await?;
+        }
+        Command::ContractAccountBuyer { wasm, database_url } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            context()?.contract_account_buyer(&database_url, &code).await?;
         }
         Command::Drill { vector, gateway_url, api_key, alertmanager_url, timeout_secs } => {
             let stack = fermah_pay_stellar_cli::testnet::prepaid::DrillStack {

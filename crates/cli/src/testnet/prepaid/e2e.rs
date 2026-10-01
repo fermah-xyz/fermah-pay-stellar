@@ -620,7 +620,7 @@ impl Context {
         // straight to the contract is refused. Only simulated; nothing is
         // submitted.
         let replay = ChargeRequest {
-            owner: buyer.address(),
+            owner: buyer.address().into(),
             charge_id: parse_charge_id(&charges[0].contract_charge_id)?,
             amount: i128::from(CHARGES[0]),
             last_ledger: charges[0].last_ledger,

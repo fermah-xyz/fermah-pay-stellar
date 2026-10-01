@@ -4,7 +4,7 @@
 
 | Role | What it is | Holds |
 |---|---|---|
-| Buyer | A classic Stellar `G...` account owned by an end user | Its own key and USDC |
+| Buyer | A Stellar wallet owned by an end user: a classic `G...` account, or a contract account (`C...`) such as a smart wallet | Its own key or signers, and USDC |
 | Seller | A product that bills buyers, identified by a seller deployment | API keys for the gateway |
 | Operator | Whoever runs the gateway | Sponsor key that pays onboarding fees and reserves; the keys that submit transactions, pay their fees and authorize charges |
 
