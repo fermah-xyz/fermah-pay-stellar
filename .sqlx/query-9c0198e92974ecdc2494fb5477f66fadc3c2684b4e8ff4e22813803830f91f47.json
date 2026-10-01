@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.revocations\n            SET state = $2, resolved_at = now(),\n                last_error = 'authorization lapsed; the contract still holds a mandate'\n            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c0198e92974ecdc2494fb5477f66fadc3c2684b4e8ff4e22813803830f91f47"
+}

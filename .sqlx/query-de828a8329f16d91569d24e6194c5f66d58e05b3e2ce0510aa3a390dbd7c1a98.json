@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.revocations\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, authorization_xdr,\n                 expiration_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de828a8329f16d91569d24e6194c5f66d58e05b3e2ce0510aa3a390dbd7c1a98"
+}

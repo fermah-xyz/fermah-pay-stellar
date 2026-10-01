@@ -121,7 +121,22 @@ acts as a seller would, only through the gRPC API:
 The command exits non-zero if any step does not hold, and writes an
 `api-end-to-end` evidence record with every transaction hash.
 
-The `testnet` workflow runs the same command in CI: on changes to main, on
+Recurring charges have their own run:
+
+```bash
+testnet recurring-end-to-end \
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar
+```
+
+With periods of two minutes, so it takes about five: a new buyer with 0 XLM
+signs one mandate for two periods; the seller charges the first period and,
+once it starts, the second; a charge sent straight to the contract before
+the second period starts is refused (`not_due`), and after the last period
+the API refuses a charge (`mandate_ended`) and so does the contract
+(`mandate_expired`); finally the buyer revokes and the USDC approval is
+zero. It writes a `recurring-end-to-end` evidence record.
+
+The `testnet` workflow runs both commands in CI: on changes to main, on
 demand, and on pull requests labelled `testnet`. Its job summary lists every
 transaction with an explorer link, and the evidence record is attached to the
 run.

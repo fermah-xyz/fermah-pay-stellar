@@ -77,6 +77,12 @@ pub enum Kind {
     Extend,
     /// Moves the treasury's USDC above its ceiling to the cold reserve.
     Sweep,
+    /// Records a buyer's mandate and its USDC approval.
+    Mandate,
+    /// Ends a buyer's mandate and its USDC approval.
+    Revocation,
+    /// Charges periods of mandates.
+    RecurringBatch,
 }
 
 impl Kind {
@@ -88,6 +94,9 @@ impl Kind {
             Self::Restore => "restore",
             Self::Extend => "extend",
             Self::Sweep => "sweep",
+            Self::Mandate => "mandate",
+            Self::Revocation => "revocation",
+            Self::RecurringBatch => "recurring_batch",
         }
     }
 }

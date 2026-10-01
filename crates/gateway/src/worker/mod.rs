@@ -41,6 +41,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+mod recurring;
 mod reserve;
 mod withdrawals;
 
@@ -285,7 +286,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
         self.conclude_lapsed_withdrawals().await?;
+        self.conclude_lapsed_mandates().await?;
+        self.conclude_lapsed_revocations().await?;
         self.expire_charges().await?;
+        self.expire_recurring().await?;
+        self.end_mandates().await?;
         self.record_backlog().await?;
         let mut submitted = Vec::new();
         let funded = self.fee_source_funded().await?;
@@ -304,13 +309,22 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             }
         }
         while funded && open + submitted.len() < self.engine.capacity() {
-            let next = match self.submit_deposit().await? {
-                Some(id) => Some(id),
-                None => match self.submit_withdrawal().await? {
-                    Some(id) => Some(id),
-                    None => self.submit_charges().await?,
-                },
-            };
+            let mut next = self.submit_deposit().await?;
+            if next.is_none() {
+                next = self.submit_withdrawal().await?;
+            }
+            if next.is_none() {
+                next = self.submit_mandate().await?;
+            }
+            if next.is_none() {
+                next = self.submit_revocation().await?;
+            }
+            if next.is_none() {
+                next = self.submit_charges().await?;
+            }
+            if next.is_none() {
+                next = self.submit_recurring().await?;
+            }
             let Some(id) = next else { break };
             self.engine.broadcast(id).await?;
             if self.engine.resolve(id).await?.state.is_final() {
@@ -592,7 +606,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 OR EXISTS (SELECT 1 FROM pay_stellar.deposits d
                            WHERE d.submission_id = s.id AND d.state = 'submitted')
                 OR EXISTS (SELECT 1 FROM pay_stellar.withdrawals w
-                           WHERE w.submission_id = s.id AND w.state = 'submitted'))
+                           WHERE w.submission_id = s.id AND w.state = 'submitted')
+                OR EXISTS (SELECT 1 FROM pay_stellar.mandates m
+                           WHERE m.submission_id = s.id AND m.state = 'submitted')
+                OR EXISTS (SELECT 1 FROM pay_stellar.revocations r
+                           WHERE r.submission_id = s.id AND r.state = 'submitted')
+                OR EXISTS (SELECT 1 FROM pay_stellar.recurring_charges rc
+                           WHERE rc.submission_id = s.id AND rc.state = 'submitted'))
             ORDER BY s.created_at
             "#,
             self.network().caip2(),
@@ -606,6 +626,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 "charge_batch" => self.settle_charges(row.id, &resolution).await?,
                 "deposit" => self.settle_deposit(row.id, &resolution).await?,
                 "withdrawal" => self.settle_withdrawal(row.id, &resolution).await?,
+                "mandate" => self.settle_mandate(row.id, &resolution).await?,
+                "revocation" => self.settle_revocation(row.id, &resolution).await?,
+                "recurring_batch" => self.settle_recurring(row.id, &resolution).await?,
                 _ => {}
             }
         }

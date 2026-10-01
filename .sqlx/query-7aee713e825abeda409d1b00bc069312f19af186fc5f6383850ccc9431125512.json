@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.revocations SET state = 'confirmed', resolved_at = now()\n            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n            RETURNING buyer_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "buyer_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.revocations",
+            "name": "buyer_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7aee713e825abeda409d1b00bc069312f19af186fc5f6383850ccc9431125512"
+}

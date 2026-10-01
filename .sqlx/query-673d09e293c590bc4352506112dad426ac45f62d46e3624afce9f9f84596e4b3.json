@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT buyer_id FROM pay_stellar.mandates\n            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n            FOR UPDATE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "buyer_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "buyer_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "673d09e293c590bc4352506112dad426ac45f62d46e3624afce9f9f84596e4b3"
+}

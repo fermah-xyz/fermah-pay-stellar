@@ -9,6 +9,10 @@ deployment is reported exactly like one that does not exist.
 
 Amounts are USDC base units: one USDC is `10000000`.
 
+Recurring charges, which take USDC from the buyer's wallet once per period
+under a mandate the buyer signs once, are part of the same service and
+described in [recurring charges](recurring.md).
+
 The deployment must be bound to its prepaid ledger contract before deposits
 can be prepared (`fermah-pay-stellar-admin bind-ledger`). How the contract
 holds balances is described in

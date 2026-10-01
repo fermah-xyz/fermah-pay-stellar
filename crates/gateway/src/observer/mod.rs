@@ -36,8 +36,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use self::matching::{
-    ChargeRow, DepositRow, Verdict, WithdrawalRow, judge_charge, judge_deposit, judge_role,
-    judge_withdrawal,
+    ChargeRow, DepositRow, RecurringRow, Verdict, WithdrawalRow, judge_charge, judge_deposit,
+    judge_recurring, judge_role, judge_withdrawal,
 };
 pub use self::matching::{Finding, FindingKind, Severity};
 use crate::events::EventLog;
@@ -360,6 +360,38 @@ fn describe(record: &ContractEventRecord) -> Described {
                 json!({ "previous": previous.as_ref().map(limits), "current": limits(current) }),
             )
         }
+        LedgerEvent::MandateAuthorized { owner, mandate } => (
+            "mandate",
+            Some(owner.to_string()),
+            Some(mandate.amount),
+            Some(mandate.mandate_id),
+            json!({ "owner": owner.to_string(), "mandate_id": hex_lower(&mandate.mandate_id),
+                    "amount": mandate.amount.to_string(), "period_secs": mandate.period_secs,
+                    "start": mandate.start, "cycles": mandate.cycles,
+                    "live_until": mandate.live_until }),
+        ),
+        LedgerEvent::MandateRevoked { owner, mandate_id } => (
+            "revoke",
+            Some(owner.to_string()),
+            None,
+            *mandate_id,
+            json!({ "owner": owner.to_string(),
+                    "mandate_id": mandate_id.as_ref().map(|id| hex_lower(id)) }),
+        ),
+        LedgerEvent::Recurring(entries) => (
+            "recurring",
+            None,
+            None,
+            None,
+            json!({ "entries": entries.iter().map(|entry| json!({
+                "owner": entry.owner.to_string(),
+                "charge_id": hex_lower(&entry.charge_id),
+                "mandate_id": hex_lower(&entry.mandate_id),
+                "cycle": entry.cycle,
+                "amount": entry.amount.to_string(),
+                "outcome": entry.outcome.token(),
+            })).collect::<Vec<_>>() }),
+        ),
     };
     Described { kind, owner, amount, reference, payload, event: Some(event) }
 }
@@ -770,9 +802,47 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     ));
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
                 }
+                Some(LedgerEvent::Recurring(entries)) => {
+                    for (index, entry) in entries.iter().enumerate() {
+                        let index = i16::try_from(index)
+                            .map_err(|_| ObserverError::Inconsistent("oversized batch".into()))?;
+                        sqlx::query!(
+                            r#"
+                            INSERT INTO pay_stellar.chain_recurring_entries
+                                (chain_event_id, entry_index, owner, charge_id, mandate_id, cycle,
+                                 amount, outcome)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7::text::numeric, $8)
+                            "#,
+                            stored,
+                            index,
+                            entry.owner.to_string(),
+                            entry.charge_id.as_slice(),
+                            entry.mandate_id.as_slice(),
+                            i64::from(entry.cycle),
+                            entry.amount.to_string(),
+                            entry.outcome.token(),
+                        )
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(store("store recurring entry"))?;
+                        let row =
+                            recurring_row(&mut tx, deployment.id, &entry.owner, &entry.charge_id)
+                                .await?;
+                        let verdict = judge_recurring(entry, row.as_ref(), false);
+                        conclude(&mut tx, stored, index, verdict, |f| at(index, f), &mut recorded)
+                            .await?;
+                    }
+                }
                 // Recorded for reconciliation; the gateway keeps no record of
-                // the seller's revenue withdrawals to match them against.
-                Some(LedgerEvent::RevenueWithdrawn { .. }) => {}
+                // the seller's revenue withdrawals to match them against. A
+                // mandate or revocation moves nothing by itself: only the
+                // recurring charges made under a mandate do, and each of those
+                // is matched.
+                Some(
+                    LedgerEvent::RevenueWithdrawn { .. }
+                    | LedgerEvent::MandateAuthorized { .. }
+                    | LedgerEvent::MandateRevoked { .. },
+                ) => {}
             }
         }
         tx.commit().await.map_err(store("commit page"))?;
@@ -823,6 +893,52 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 charge_row(&mut tx, row.seller_deployment_id, &entry.owner, &entry.charge_id)
                     .await?;
             let verdict = judge_charge(&entry, charge.as_ref(), overdue(row.ledger_closed_at));
+            let deployment = row.seller_deployment_id;
+            let (event, index) = (row.id, row.entry_index);
+            let place = |mut finding: Finding| {
+                locate(&mut finding.detail, &row.event_id, row.ledger, &row.transaction_hash);
+                Recorded { deployment, event: Some((event, index)), finding }
+            };
+            decide(&mut tx, event, index, verdict, place, &mut recorded).await?;
+            tx.commit().await.map_err(store("commit recheck"))?;
+        }
+
+        let recurring = sqlx::query!(
+            r#"
+            SELECT e.id, e.seller_deployment_id, e.event_id, e.ledger, e.transaction_hash,
+                   e.ledger_closed_at, re.entry_index, re.owner, re.charge_id, re.mandate_id,
+                   re.cycle, re.amount::text AS "amount!", re.outcome
+            FROM pay_stellar.chain_recurring_entries re
+            JOIN pay_stellar.chain_events e ON e.id = re.chain_event_id
+            WHERE e.network = $1
+              AND NOT EXISTS (SELECT 1 FROM pay_stellar.chain_event_checks k
+                              WHERE k.chain_event_id = re.chain_event_id
+                                AND k.entry_index = re.entry_index)
+            ORDER BY e.event_id, re.entry_index
+            LIMIT 1000
+            "#,
+            self.network.caip2(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("read unsettled recurring entries"))?;
+        for row in recurring {
+            let bytes32 = |bytes: &[u8]| -> Result<[u8; 32], ObserverError> {
+                bytes.try_into().map_err(|_| ObserverError::Corrupt("identifier is not 32 bytes"))
+            };
+            let entry = fermah_pay_stellar_chain::prepaid::RecurringEntry {
+                owner: chain_address(&row.owner)?,
+                charge_id: bytes32(&row.charge_id)?,
+                mandate_id: bytes32(&row.mandate_id)?,
+                cycle: u32::try_from(row.cycle).map_err(|_| ObserverError::Corrupt("cycle"))?,
+                amount: row.amount.parse().map_err(|_| ObserverError::Corrupt("entry amount"))?,
+                outcome: recurring_outcome_of(&row.outcome)?,
+            };
+            let mut tx = self.pool.begin().await.map_err(store("begin recheck"))?;
+            let found =
+                recurring_row(&mut tx, row.seller_deployment_id, &entry.owner, &entry.charge_id)
+                    .await?;
+            let verdict = judge_recurring(&entry, found.as_ref(), overdue(row.ledger_closed_at));
             let deployment = row.seller_deployment_id;
             let (event, index) = (row.id, row.entry_index);
             let place = |mut finding: Finding| {
@@ -1099,6 +1215,44 @@ async fn charge_row(
     Ok(row.map(|r| ChargeRow { id: r.id, amount: r.amount, state: r.state, outcome: r.outcome }))
 }
 
+async fn recurring_row(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    charge_id: &[u8; 32],
+) -> Result<Option<RecurringRow>, ObserverError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT r.id, m.mandate_id, r.cycle, r.amount, r.state, r.outcome
+        FROM pay_stellar.recurring_charges r
+        JOIN pay_stellar.mandates m ON m.id = r.mandate_row_id
+        JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+        WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2 AND r.charge_id = $3
+        "#,
+        deployment,
+        owner.to_string(),
+        charge_id.as_slice(),
+    )
+    .fetch_optional(conn)
+    .await
+    .map_err(store("read recurring charge"))?;
+    row.map(|r| {
+        Ok(RecurringRow {
+            id: r.id,
+            mandate_id: r
+                .mandate_id
+                .as_slice()
+                .try_into()
+                .map_err(|_| ObserverError::Corrupt("mandate id is not 32 bytes"))?,
+            cycle: r.cycle,
+            amount: r.amount,
+            state: r.state,
+            outcome: r.outcome,
+        })
+    })
+    .transpose()
+}
+
 async fn deposit_row(
     conn: &mut PgConnection,
     deployment: Uuid,
@@ -1187,6 +1341,16 @@ fn outcome_of(token: &str) -> Result<fermah_pay_stellar_chain::prepaid::Outcome,
     // Every outcome the contract has, whatever it was when this was written.
     (0..)
         .map_while(Outcome::from_code)
+        .find(|outcome| outcome.token() == token)
+        .ok_or(ObserverError::Corrupt("stored outcome"))
+}
+
+fn recurring_outcome_of(
+    token: &str,
+) -> Result<fermah_pay_stellar_chain::prepaid::RecurringOutcome, ObserverError> {
+    use fermah_pay_stellar_chain::prepaid::RecurringOutcome;
+    (0..)
+        .map_while(RecurringOutcome::from_code)
         .find(|outcome| outcome.token() == token)
         .ok_or(ObserverError::Corrupt("stored outcome"))
 }

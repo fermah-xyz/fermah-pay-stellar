@@ -1537,3 +1537,208 @@ async fn test_a_round_reads_matches_and_reconciles_before_shutdown(
     assert_eq!(w.stored_event_ids().await.len(), 3);
     assert_eq!(w.findings().await, [pair("treasury_deficit", "critical")]);
 }
+
+// ---- recurring charges ------------------------------------------------------
+
+/// Owner, attempt identifier, mandate identifier, period, amount, outcome code.
+type RecurringEntryShape<'a> = (&'a AccountAddress, [u8; 32], [u8; 32], u32, i128, u32);
+
+fn recurring_event(entries: &[RecurringEntryShape<'_>]) -> Event {
+    let entries = entries
+        .iter()
+        .map(|(owner, id, mandate, cycle, amount, code)| {
+            vector(vec![
+                address(owner),
+                bytes(id),
+                bytes(mandate),
+                ScVal::U32(*cycle),
+                i128_val(*amount),
+                ScVal::U32(*code),
+            ])
+        })
+        .collect();
+    (vec![symbol("recurring")], vector(entries))
+}
+
+fn mandate_event(owner: &AccountAddress, mandate: [u8; 32]) -> Event {
+    (
+        vec![symbol("mandate"), address(owner)],
+        map(vec![
+            ("amount", i128_val(10)),
+            ("cycles", ScVal::U32(3)),
+            ("live_until", ScVal::U32(9_000)),
+            ("mandate_id", bytes(&mandate)),
+            ("next_cycle", ScVal::U32(0)),
+            ("period_secs", ScVal::U64(86_400)),
+            ("start", ScVal::U64(1_000)),
+        ]),
+    )
+}
+
+fn revoke_event(owner: &AccountAddress, mandate: Option<[u8; 32]>) -> Event {
+    (vec![symbol("revoke"), address(owner)], mandate.map_or(ScVal::Void, |m| bytes(&m)))
+}
+
+impl World {
+    /// An active mandate of `buyer` with contract identifier `mandate_id`.
+    async fn mandate(&self, buyer: Uuid, mandate_id: [u8; 32]) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO pay_stellar.mandates
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, mandate_id, amount,
+                 period_secs, cycles, live_until, state, authorization_xdr, expiration_ledger,
+                 starts_at, activated_at)
+             VALUES ($1, $2, $3, 'stellar:testnet', $4, $5, 10, 86400, 3, 9000, 'active',
+                     'AAAA', 1100, 1000, now())",
+        )
+        .bind(id)
+        .bind(buyer)
+        .bind(self.deployment)
+        .bind(format!("mandate-{id}"))
+        .bind(mandate_id.as_slice())
+        .execute(&self.owner)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// A recurring charge attempt in `state`, linked to a batch unless it
+    /// is admitted.
+    async fn recurring(
+        &self,
+        (buyer, mandate): (Uuid, Uuid),
+        charge_id: [u8; 32],
+        amount: i64,
+        state: &str,
+        outcome: Option<&str>,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let linked = state != "admitted";
+        let settled = matches!(state, "charged" | "refused" | "quarantined");
+        sqlx::query(
+            "INSERT INTO pay_stellar.recurring_charges
+                (id, mandate_row_id, buyer_id, seller_deployment_id, network, idempotency_key,
+                 cycle, charge_id, amount, last_ledger, state, outcome, submission_id,
+                 batch_index, settled_at)
+             VALUES ($1, $2, $3, $4, 'stellar:testnet', $5, 0, $6, $7, 2000, $8, $9, $10, $11,
+                     CASE WHEN $12 THEN now() END)",
+        )
+        .bind(id)
+        .bind(mandate)
+        .bind(buyer)
+        .bind(self.deployment)
+        .bind(format!("recurring-{id}"))
+        .bind(charge_id.as_slice())
+        .bind(amount)
+        .bind(state)
+        .bind(outcome)
+        .bind(linked.then_some(self.submission))
+        .bind(linked.then_some(0_i16))
+        .bind(settled)
+        .execute(&self.owner)
+        .await
+        .unwrap();
+        id
+    }
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_recurring_charges_settled_as_recorded_are_matched(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    let mandate = w.mandate(alice, [7; 32]).await;
+    w.recurring((alice, mandate), [1; 32], 10, "charged", Some("charged")).await;
+    w.recurring((alice, mandate), [2; 32], 10, "refused", Some("wallet_short")).await;
+    w.chain.emit(1010, mandate_event(&account(1), [7; 32]));
+    w.chain.emit(
+        1020,
+        recurring_event(&[
+            (&account(1), [1; 32], [7; 32], 0, 10, 0),
+            (&account(1), [2; 32], [7; 32], 0, 10, 12),
+            // A second copy of the first attempt, answered as a duplicate.
+            (&account(1), [1; 32], [7; 32], 0, 10, 1),
+        ]),
+    );
+    w.chain.emit(1030, revoke_event(&account(1), Some([7; 32])));
+    w.observer().observe().await.unwrap();
+    assert_eq!(w.findings().await, []);
+    assert_eq!(w.verdicts().await.len(), 3);
+    let kinds: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM pay_stellar.chain_events ORDER BY event_id")
+            .fetch_all(&w.owner)
+            .await
+            .unwrap();
+    assert_eq!(kinds, ["mandate", "recurring", "revoke"]);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_recurring_charges_the_records_do_not_explain_are_findings(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    let mandate = w.mandate(alice, [7; 32]).await;
+    // Refused as recorded, but the contract moved the USDC.
+    w.recurring((alice, mandate), [1; 32], 10, "refused", Some("wallet_short")).await;
+    // Recorded for another amount.
+    w.recurring((alice, mandate), [2; 32], 10, "submitted", None).await;
+    w.chain.emit(
+        1020,
+        recurring_event(&[
+            (&account(1), [1; 32], [7; 32], 0, 10, 0),
+            (&account(1), [2; 32], [7; 32], 0, 11, 0),
+            // Never admitted by the gateway, and charged.
+            (&account(1), [3; 32], [7; 32], 0, 10, 0),
+        ]),
+    );
+    w.observer().observe().await.unwrap();
+    let mut findings = w.findings().await;
+    findings.sort();
+    assert_eq!(
+        findings,
+        [
+            pair("recurring_charge_mismatch", "critical"),
+            pair("recurring_outcome_mismatch", "critical"),
+            pair("unknown_recurring_charge", "critical"),
+        ]
+    );
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_recurring_revenue_reconciles_with_the_contract_and_the_treasury(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = agreeing(&w).await;
+    let mandate = w.mandate(alice, [7; 32]).await;
+    w.recurring((alice, mandate), [5; 32], 15, "charged", Some("charged")).await;
+    w.chain.emit(1040, recurring_event(&[(&account(1), [5; 32], [7; 32], 0, 15, 0)]));
+    // Revenue grows by 15, the treasury holds 15 more, liabilities stay.
+    w.chain.with(|n| {
+        n.revenue = 35;
+        n.trustline = Some((105, 1));
+    });
+    let observer = w.observer();
+    observer.observe().await.unwrap();
+    reconcile_times(&observer, CONFIRMATIONS + 1).await;
+    assert_eq!(w.findings().await, []);
+
+    // Had the contract not counted it as revenue, both views disagree.
+    w.chain.with(|n| n.revenue = 20);
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    let mut findings = w.findings().await;
+    findings.sort();
+    assert_eq!(
+        findings,
+        [
+            pair("event_totals_mismatch", "warning"),
+            pair("ledger_totals_mismatch", "warning"),
+            pair("treasury_surplus", "info"),
+        ]
+    );
+}

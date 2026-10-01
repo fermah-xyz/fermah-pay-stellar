@@ -16,6 +16,10 @@ It provides:
   buyer's balance and settled in batches of up to 98, and idempotent retries
   ([reference](docs/api/ledger.md),
   [settlement](docs/architecture/transactions.md#settlement)).
+- **Recurring charges**: a buyer signs one mandate, and the seller charges
+  the buyer's wallet once per period, up to an amount per period, without the
+  buyer signing again; the buyer can revoke at any time
+  ([reference](docs/api/recurring.md)).
 - **x402 facilitator interface**: `/verify`, `/settle` and `/supported` over
   the `batch-settlement` scheme, for commitments a buyer signs with its
   Stellar key against its prepaid balance ([reference](docs/api/x402.md)).

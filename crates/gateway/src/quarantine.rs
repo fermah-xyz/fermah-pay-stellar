@@ -16,6 +16,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::events::{ChargeSearch, EventLog, search_charge};
+
+pub mod recurring;
 use crate::submission::{Chain, stored_authorization_horizon};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

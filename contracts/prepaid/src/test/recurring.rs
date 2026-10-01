@@ -3,7 +3,10 @@
 //! time, the refusals, revocation, and the allowance as the USDC contract
 //! itself reports it.
 
-use fermah_pay_stellar_chain::prepaid::{MandateIntent, RecurringChargeRequest};
+use fermah_pay_stellar_chain::prepaid::{
+    ChainAddress, LedgerEvent, MandateIntent, MandateTerms, RecurringChargeRequest, RecurringEntry,
+    allowance_of, ledger_event, recurring_outcomes, recurring_record, stored_mandate,
+};
 
 use super::*;
 
@@ -412,6 +415,105 @@ fn test_mandate_and_attempt_keys_match_the_contract_layout() {
     );
     // A prepaid charge record with the same identifier is a different entry.
     assert!(!present(&deployment.charge_record_key(&owner, &charge_id(1))));
+    // The USDC contract's allowance, as the mandate left it after one charge.
+    let allowance = snapshot
+        .ledger_entries
+        .iter()
+        .find(|(k, _)| **k == deployment.allowance_key(&owner))
+        .and_then(|(_, (entry, _))| allowance_of(&entry.data));
+    assert_eq!(allowance, Some((2 * USDC, w.env.ledger().sequence() + LIFETIME)));
+}
+
+/// The gateway reads mandates, attempt records, outcomes and events with its
+/// own decoders; they are pinned here against what the host records.
+#[test]
+fn test_gateway_decodes_mandates_records_outcomes_and_events() {
+    let w = new_world();
+    let buyer = w.party(10 * USDC);
+    let intent = mandate(&w, &buyer, 1, USDC, 3);
+    let owner = ChainAddress::Account(buyer.key.address());
+    let decoded = || {
+        w.env
+            .events()
+            .all()
+            .filter_by_contract(&w.contract)
+            .events()
+            .iter()
+            .map(|event| {
+                let xdr::ContractEventBody::V0(body) = &event.body;
+                ledger_event(&body.topics, &body.data).expect("a decodable event")
+            })
+            .collect::<std::vec::Vec<_>>()
+    };
+    authorize(&w, &buyer, &intent).unwrap();
+    let terms = MandateTerms {
+        mandate_id: intent.mandate_id,
+        amount: USDC,
+        period_secs: MONTH,
+        start: START,
+        cycles: 3,
+        live_until: intent.live_until,
+        next_cycle: 0,
+    };
+    assert_eq!(
+        decoded(),
+        [LedgerEvent::MandateAuthorized { owner: owner.clone(), mandate: terms.clone() }]
+    );
+
+    let charged = attempt(&w, &buyer, 1, 1, 0, USDC);
+    let early = attempt(&w, &buyer, 2, 1, 1, USDC);
+    let auth = w.signed(
+        &w.operator,
+        w.deployment().charge_recurring_batch_authorization(&[charged.clone(), early.clone()]),
+    );
+    let mut entries = soroban_sdk::Vec::new(&w.env);
+    entries.push_back(contract_charge(&w, &charged));
+    entries.push_back(contract_charge(&w, &early));
+    let returned: Val =
+        w.invoke("charge_recurring_batch", (entries,).into_val(&w.env), &[auth]).unwrap();
+    let returned: xdr::ScVal = returned.try_into_val(&w.env).unwrap();
+    use fermah_pay_stellar_chain::prepaid::RecurringOutcome as Decoded;
+    assert_eq!(recurring_outcomes(&returned), Some(std::vec![Decoded::Charged, Decoded::NotDue]));
+    let entry = |request: &RecurringChargeRequest, cycle, outcome| RecurringEntry {
+        owner: owner.clone(),
+        charge_id: request.charge_id,
+        mandate_id: intent.mandate_id,
+        cycle,
+        amount: USDC,
+        outcome,
+    };
+    assert_eq!(
+        decoded(),
+        [LedgerEvent::Recurring(std::vec![
+            entry(&charged, 0, Decoded::Charged),
+            entry(&early, 1, Decoded::NotDue),
+        ])]
+    );
+
+    let snapshot = w.env.to_ledger_snapshot();
+    let read = |key: &xdr::LedgerKey| {
+        snapshot.ledger_entries.iter().find(|(k, _)| **k == *key).map(|(_, (e, _))| e.data.clone())
+    };
+    let deployment = w.deployment();
+    let address = buyer.key.address();
+    assert_eq!(
+        read(&deployment.mandate_key(&address)).as_ref().and_then(stored_mandate),
+        Some(MandateTerms { next_cycle: 1, ..terms })
+    );
+    let record = |id| {
+        read(&deployment.recurring_record_key(&address, &charge_id(id)))
+            .as_ref()
+            .and_then(recurring_record)
+    };
+    assert_eq!((record(1), record(2)), (Some(Decoded::Charged), Some(Decoded::NotDue)));
+
+    revoke(&w, &buyer).unwrap();
+    assert_eq!(
+        decoded(),
+        [LedgerEvent::MandateRevoked { owner: owner.clone(), mandate_id: Some(intent.mandate_id) }]
+    );
+    revoke(&w, &buyer).unwrap();
+    assert_eq!(decoded(), [LedgerEvent::MandateRevoked { owner, mandate_id: None }]);
 }
 
 // ---- authorization ---------------------------------------------------------

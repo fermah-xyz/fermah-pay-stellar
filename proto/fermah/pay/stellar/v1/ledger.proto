@@ -52,6 +52,34 @@ service LedgerService {
   // nothing.
   rpc SubmitWithdrawal(SubmitWithdrawalRequest) returns (SubmitWithdrawalResponse);
   rpc GetWithdrawal(GetWithdrawalRequest) returns (GetWithdrawalResponse);
+
+  // Creates a mandate for recurring charges from the buyer's wallet and
+  // returns the authorization entry the wallet must sign: up to `amount` per
+  // period of `period_secs`, for `cycles` periods. The entry also approves
+  // the contract, in the USDC contract, to move up to `amount` times
+  // `cycles` until the mandate's last ledger. The buyer pays no network fee
+  // and needs no XLM. Idempotent like `PrepareDeposit`.
+  rpc PrepareMandate(PrepareMandateRequest) returns (PrepareMandateResponse);
+  // Stores the buyer's signed entry after verifying it; the mandate is then
+  // submitted asynchronously. Once active it replaces the buyer's previous
+  // mandate, if any. Submitting the same signed entry again changes nothing.
+  rpc SubmitMandate(SubmitMandateRequest) returns (SubmitMandateResponse);
+  rpc GetMandate(GetMandateRequest) returns (GetMandateResponse);
+  // Creates a revocation of the buyer's mandate, whichever is current, and
+  // returns the authorization entry the wallet must sign. Revoking also sets
+  // the contract's USDC allowance to zero. Idempotent like `PrepareDeposit`.
+  rpc PrepareRevocation(PrepareRevocationRequest) returns (PrepareRevocationResponse);
+  rpc SubmitRevocation(SubmitRevocationRequest) returns (SubmitRevocationResponse);
+  rpc GetRevocation(GetRevocationRequest) returns (GetRevocationResponse);
+  // Charges the current period of an active mandate, up to its amount per
+  // period, from the buyer's wallet to the seller's revenue. The charge is
+  // settled on-chain asynchronously; the contract charges each period at
+  // most once, never before it starts and never after it ends. A refused
+  // charge leaves its period free for another attempt while it lasts.
+  // Repeating a request with the same idempotency key, mandate and amount
+  // returns the existing charge with `created = false`.
+  rpc CreateRecurringCharge(CreateRecurringChargeRequest) returns (CreateRecurringChargeResponse);
+  rpc GetRecurringCharge(GetRecurringChargeRequest) returns (GetRecurringChargeResponse);
 }
 
 enum DepositState {
@@ -268,4 +296,187 @@ message GetWithdrawalRequest {
 
 message GetWithdrawalResponse {
   Withdrawal withdrawal = 1;
+}
+
+enum MandateState {
+  MANDATE_STATE_UNSPECIFIED = 0;
+  // Waiting for the buyer's signed authorization entry.
+  MANDATE_STATE_AWAITING_SIGNATURE = 1;
+  // Signed and verified; waiting to be submitted.
+  MANDATE_STATE_SIGNED = 2;
+  // In a transaction sent to the network.
+  MANDATE_STATE_SUBMITTED = 3;
+  // Held by the contract: its periods can be charged.
+  MANDATE_STATE_ACTIVE = 4;
+  // Included as failed, and the contract never held it.
+  MANDATE_STATE_FAILED = 5;
+  // The authorization lapsed and the contract never held it.
+  MANDATE_STATE_EXPIRED = 6;
+  // A newer mandate of the same buyer took its place.
+  MANDATE_STATE_REPLACED = 7;
+  // The buyer revoked it.
+  MANDATE_STATE_REVOKED = 8;
+  // Past its last ledger or its last period.
+  MANDATE_STATE_ENDED = 9;
+}
+
+message Mandate {
+  string mandate_id = 1;
+  string buyer_id = 2;
+  // Most that may be charged per period, in USDC base units.
+  int64 amount = 3;
+  uint64 period_secs = 4;
+  uint32 cycles = 5;
+  // Last ledger in which the mandate, and the USDC allowance behind it, can
+  // be used.
+  uint32 live_until_ledger = 6;
+  MandateState state = 7;
+  // Base64 XDR `SorobanAuthorizationEntry` for the buyer's wallet to sign:
+  // the mandate and, beneath it, the USDC approval, and nothing else.
+  string authorization_entry_xdr = 8;
+  // Hex SHA-256 payload the wallet key signs to authorize the entry.
+  string signature_payload = 9;
+  // Last ledger in which the signed entry is valid.
+  uint32 expiration_ledger = 10;
+  // Unix seconds of ledger time at which the first period started, once
+  // active.
+  uint64 starts_at = 11;
+  string transaction_hash = 12;
+  uint32 ledger = 13;
+  string created_at = 14;
+}
+
+message PrepareMandateRequest {
+  string buyer_id = 1;
+  int64 amount = 2;
+  uint64 period_secs = 3;
+  uint32 cycles = 4;
+  // 1-128 characters of [A-Za-z0-9._:@+-], unique within the deployment.
+  string idempotency_key = 5;
+}
+
+message PrepareMandateResponse {
+  Mandate mandate = 1;
+  bool created = 2;
+}
+
+message SubmitMandateRequest {
+  string mandate_id = 1;
+  // Base64 XDR of the entry from `PrepareMandate`, with the wallet's
+  // signature set and every other field unchanged.
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitMandateResponse {
+  Mandate mandate = 1;
+}
+
+message GetMandateRequest {
+  string mandate_id = 1;
+}
+
+message GetMandateResponse {
+  Mandate mandate = 1;
+}
+
+enum RevocationState {
+  REVOCATION_STATE_UNSPECIFIED = 0;
+  REVOCATION_STATE_AWAITING_SIGNATURE = 1;
+  REVOCATION_STATE_SIGNED = 2;
+  REVOCATION_STATE_SUBMITTED = 3;
+  // The contract holds no mandate for the buyer.
+  REVOCATION_STATE_CONFIRMED = 4;
+  // Included as failed, and the contract still holds a mandate.
+  REVOCATION_STATE_FAILED = 5;
+  // The authorization lapsed, and the contract still holds a mandate.
+  REVOCATION_STATE_EXPIRED = 6;
+}
+
+message Revocation {
+  string revocation_id = 1;
+  string buyer_id = 2;
+  RevocationState state = 3;
+  string authorization_entry_xdr = 4;
+  string signature_payload = 5;
+  uint32 expiration_ledger = 6;
+  string transaction_hash = 7;
+  uint32 ledger = 8;
+  string created_at = 9;
+}
+
+message PrepareRevocationRequest {
+  string buyer_id = 1;
+  string idempotency_key = 2;
+}
+
+message PrepareRevocationResponse {
+  Revocation revocation = 1;
+  bool created = 2;
+}
+
+message SubmitRevocationRequest {
+  string revocation_id = 1;
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitRevocationResponse {
+  Revocation revocation = 1;
+}
+
+message GetRevocationRequest {
+  string revocation_id = 1;
+}
+
+message GetRevocationResponse {
+  Revocation revocation = 1;
+}
+
+enum RecurringChargeState {
+  RECURRING_CHARGE_STATE_UNSPECIFIED = 0;
+  // Waiting for a batch.
+  RECURRING_CHARGE_STATE_ADMITTED = 1;
+  // In a transaction sent to the network.
+  RECURRING_CHARGE_STATE_SUBMITTED = 2;
+  // The USDC moved from the buyer's wallet to the treasury.
+  RECURRING_CHARGE_STATE_CHARGED = 3;
+  // Refused by the contract, or expired before it was sent; `outcome` says
+  // why. Nothing moved.
+  RECURRING_CHARGE_STATE_REFUSED = 4;
+  // The evidence contradicts itself; an operator decides.
+  RECURRING_CHARGE_STATE_QUARANTINED = 5;
+}
+
+message RecurringCharge {
+  string recurring_charge_id = 1;
+  string mandate_id = 2;
+  string buyer_id = 3;
+  // The mandate's period this charge is for, from 0.
+  uint32 cycle = 4;
+  int64 amount = 5;
+  RecurringChargeState state = 6;
+  // The contract's outcome token once settled, e.g. `charged`,
+  // `wallet_short` or `period_over`; empty before.
+  string outcome = 7;
+  string transaction_hash = 8;
+  uint32 ledger = 9;
+  string created_at = 10;
+}
+
+message CreateRecurringChargeRequest {
+  string mandate_id = 1;
+  int64 amount = 2;
+  string idempotency_key = 3;
+}
+
+message CreateRecurringChargeResponse {
+  RecurringCharge recurring_charge = 1;
+  bool created = 2;
+}
+
+message GetRecurringChargeRequest {
+  string recurring_charge_id = 1;
+}
+
+message GetRecurringChargeResponse {
+  RecurringCharge recurring_charge = 1;
 }

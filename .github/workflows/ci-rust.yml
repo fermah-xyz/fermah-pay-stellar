@@ -256,6 +256,12 @@ jobs:
           tool deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
             --min-deposit 100000 --max-charge 10000000
           tool end-to-end
+          # Its own database: a contract is bound to one deployment, which
+          # the run above created.
+          PGPASSWORD=ci-only psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar \
+            -c 'CREATE DATABASE pay_stellar_recurring'
+          PAY_STELLAR_E2E_DATABASE_URL=postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_recurring \
+            tool recurring-end-to-end
       - name: Node logs on failure
         if: failure()
         run: docker logs --tail 200 stellar

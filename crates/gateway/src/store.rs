@@ -32,6 +32,8 @@ pub struct Quotas {
     pub withdrawals_per_buyer: u32,
     /// Smallest withdrawal, in USDC base units; the contract has none.
     pub min_withdrawal: i64,
+    /// Mandates and revocations prepared per buyer.
+    pub mandate_changes_per_buyer: u32,
 }
 
 impl Default for Quotas {
@@ -41,6 +43,7 @@ impl Default for Quotas {
             deposits_per_buyer: 10,
             withdrawals_per_buyer: 5,
             min_withdrawal: 100_000,
+            mandate_changes_per_buyer: 5,
         }
     }
 }

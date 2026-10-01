@@ -1,0 +1,167 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT e.id, e.seller_deployment_id, e.event_id, e.ledger, e.transaction_hash,\n                   e.ledger_closed_at, re.entry_index, re.owner, re.charge_id, re.mandate_id,\n                   re.cycle, re.amount::text AS \"amount!\", re.outcome\n            FROM pay_stellar.chain_recurring_entries re\n            JOIN pay_stellar.chain_events e ON e.id = re.chain_event_id\n            WHERE e.network = $1\n              AND NOT EXISTS (SELECT 1 FROM pay_stellar.chain_event_checks k\n                              WHERE k.chain_event_id = re.chain_event_id\n                                AND k.entry_index = re.entry_index)\n            ORDER BY e.event_id, re.entry_index\n            LIMIT 1000\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seller_deployment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "seller_deployment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "event_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "transaction_hash",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "transaction_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "ledger_closed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_events",
+            "name": "ledger_closed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "entry_index",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "entry_index"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "owner",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "owner"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "charge_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "charge_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "mandate_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "mandate_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "cycle",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "cycle"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "amount!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "outcome",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.chain_recurring_entries",
+            "name": "outcome"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "9f6ad7bce9bbc45c5fd70336be807c9c02cdb8b3b13552582179e7e4e8e55248"
+}

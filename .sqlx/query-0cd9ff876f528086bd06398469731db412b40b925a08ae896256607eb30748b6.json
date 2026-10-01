@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.mandates m\n            SET state = 'ended', closed_at = now(),\n                last_error = 'past its last ledger or its last period'\n            FROM pay_stellar.ledger_contracts l\n            WHERE m.state = 'active' AND m.network = $1\n              AND l.seller_deployment_id = m.seller_deployment_id AND l.network = m.network\n              AND l.operator_address = $2\n              AND (m.live_until < $3 OR m.starts_at + m.period_secs * m.cycles <= $4)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0cd9ff876f528086bd06398469731db412b40b925a08ae896256607eb30748b6"
+}

@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 pub const AUTHORIZATION_VALIDITY_LEDGERS: u32 = 720;
 pub const CHARGE_VALIDITY_LEDGERS: u32 = 720;
+pub const MIN_MANDATE_PERIOD_SECS: u64 = 60;
+pub const MAX_MANDATE_LEDGERS: u32 = 3_000_000;
 
 /// The latest ledger the API sees; `None` makes every read fail.
 #[derive(Clone, Default)]
@@ -51,6 +53,10 @@ impl LatestLedger for Ledger {
             }),
             ledger => Ok(ledger),
         }
+    }
+
+    async fn latest_close_time(&self) -> Result<i64, RpcError> {
+        Ok(time::OffsetDateTime::now_utc().unix_timestamp())
     }
 }
 
@@ -134,6 +140,8 @@ pub async fn start_with_quotas<L: LatestLedger>(
         LedgerPolicy {
             authorization_validity_ledgers: AUTHORIZATION_VALIDITY_LEDGERS,
             charge_validity_ledgers: CHARGE_VALIDITY_LEDGERS,
+            min_mandate_period_secs: MIN_MANDATE_PERIOD_SECS,
+            max_mandate_ledgers: MAX_MANDATE_LEDGERS,
         },
     );
     let limits = ServerLimits {

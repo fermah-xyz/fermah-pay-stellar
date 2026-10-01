@@ -81,14 +81,18 @@ async fn pool_as(connect: &PgConnectOptions, role: &'static str) -> anyhow::Resu
         .with_context(|| format!("connecting with `{role}`"))
 }
 
-fn authed<T>(message: T, token: &str) -> anyhow::Result<Request<T>> {
+pub(super) fn authed<T>(message: T, token: &str) -> anyhow::Result<Request<T>> {
     let mut request = Request::new(message);
     request.metadata_mut().insert("authorization", format!("Bearer {token}").parse()?);
     Ok(request)
 }
 
 /// Polls `read` until `done` holds or the settlement timeout passes.
-async fn until<T, F, Fut>(what: &str, mut read: F, done: impl Fn(&T) -> bool) -> anyhow::Result<T>
+pub(super) async fn until<T, F, Fut>(
+    what: &str,
+    mut read: F,
+    done: impl Fn(&T) -> bool,
+) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
@@ -132,7 +136,49 @@ impl Stack {
     }
 }
 
+/// A new buyer wallet holding USDC and no XLM, and the transactions that
+/// created and funded it.
+pub(super) struct FundedBuyer {
+    pub key: SecretKey,
+    pub onboarding: fermah_pay_stellar_chain::onboarding::BatchOnboardingReceipt,
+    pub funding: [u8; 32],
+}
+
 impl Context {
+    /// A new buyer: created with 0 XLM by the sponsor, then sent `usdc` from
+    /// the reserve.
+    pub(super) async fn funded_buyer(&self, usdc: i64) -> anyhow::Result<FundedBuyer> {
+        let asset = usdc::circle_usdc(self.network);
+        let buyer = SecretKey::generate()?;
+        let sponsor = self.profile.key(SPONSOR)?;
+        let reserve = self.profile.key(USDC_RESERVE)?;
+        let onboarding = onboard_buyers(
+            &self.rpc,
+            self.network,
+            &sponsor,
+            &[&buyer],
+            &asset,
+            self.onboarding_policy(),
+        )
+        .await?;
+        let sequence = self.sequence_of(&sponsor.address()).await?;
+        let valid_until = unix_now() + self.policy.validity.as_secs();
+        let tx = payments_transaction(
+            &sponsor.address(),
+            sequence + 1,
+            &reserve.address(),
+            &[(buyer.address(), usdc)],
+            &asset,
+            self.policy.inclusion_fee,
+            valid_until,
+        )?;
+        let funding = transaction::transaction_hash(&tx, self.network)?;
+        let envelope = transaction::sign(tx, self.network, &[&sponsor, &reserve])?;
+        submit_and_wait(&self.rpc, &envelope, funding, valid_until, self.policy.poll_interval)
+            .await?;
+        Ok(FundedBuyer { key: buyer, onboarding, funding })
+    }
+
     pub async fn end_to_end(&self, database_url: &str) -> anyhow::Result<()> {
         // The zero-XLM channel account comes first, so it sends whenever it
         // is free.
@@ -210,7 +256,13 @@ impl Context {
             store.clone(),
             self.rpc.clone(),
             self.network,
-            LedgerPolicy { authorization_validity_ledgers: 720, charge_validity_ledgers: 720 },
+            LedgerPolicy {
+                authorization_validity_ledgers: 720,
+                charge_validity_ledgers: 720,
+                // Short periods, so a run can show several within minutes.
+                min_mandate_period_secs: 60,
+                max_mandate_ledgers: 3_000_000,
+            },
         );
         let mut gateway_stop = stopped.clone();
         let limits =
@@ -297,35 +349,8 @@ impl Context {
         let mut buyers = BuyerServiceClient::new(channel.clone());
         let mut ledger = LedgerServiceClient::new(channel);
 
-        // A new buyer: created with 0 XLM by the sponsor, then sent the
-        // deposit amount in USDC from the reserve.
-        let buyer = SecretKey::generate()?;
-        let sponsor = self.profile.key(SPONSOR)?;
-        let reserve = self.profile.key(USDC_RESERVE)?;
-        let onboarding = onboard_buyers(
-            &self.rpc,
-            self.network,
-            &sponsor,
-            &[&buyer],
-            &asset,
-            self.onboarding_policy(),
-        )
-        .await?;
-        let sequence = self.sequence_of(&sponsor.address()).await?;
-        let valid_until = unix_now() + self.policy.validity.as_secs();
-        let tx = payments_transaction(
-            &sponsor.address(),
-            sequence + 1,
-            &reserve.address(),
-            &[(buyer.address(), DEPOSIT)],
-            &asset,
-            self.policy.inclusion_fee,
-            valid_until,
-        )?;
-        let funding_hash = transaction::transaction_hash(&tx, self.network)?;
-        let envelope = transaction::sign(tx, self.network, &[&sponsor, &reserve])?;
-        submit_and_wait(&self.rpc, &envelope, funding_hash, valid_until, self.policy.poll_interval)
-            .await?;
+        let FundedBuyer { key: buyer, onboarding, funding: funding_hash } =
+            self.funded_buyer(DEPOSIT).await?;
         let before = balances(&self.rpc, &buyer.address(), &asset).await?;
         ensure!(
             before.xlm_stroops == Some(0),

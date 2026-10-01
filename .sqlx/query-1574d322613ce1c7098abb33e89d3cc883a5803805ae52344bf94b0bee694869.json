@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.recurring_charges r\n            SET state = 'refused', outcome = 'expired', settled_at = now(),\n                last_error = 'not settled before its last ledger'\n            FROM pay_stellar.ledger_contracts l\n            WHERE r.state = 'admitted' AND r.last_ledger < $1 AND r.network = $2\n              AND l.seller_deployment_id = r.seller_deployment_id AND l.network = r.network\n              AND l.operator_address = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1574d322613ce1c7098abb33e89d3cc883a5803805ae52344bf94b0bee694869"
+}

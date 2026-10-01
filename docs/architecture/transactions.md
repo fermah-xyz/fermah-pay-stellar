@@ -240,6 +240,23 @@ when its record has lapsed and the events of the whole range cannot be read.
 Each is held for an operator rather than guessed at; see
 [resolving quarantined charges](../self-hosting/quarantine.md).
 
+### Mandates and recurring charges
+
+Mandates and revocations are sent like deposits: the buyer's signed entry
+goes out unchanged, and a submission that did not succeed is decided only
+once the entry has lapsed. What decides them is their effect on the
+contract's mandate entry for the buyer: a mandate is active once the entry
+holds it, and a revocation confirmed once the entry holds none. A successful
+transaction is decided only from a read at or after its ledger, so a node
+that trails the network cannot make a fresh mandate look absent.
+
+Recurring charges are batched and settled like prepaid charges, from the
+batch's answer, then the attempt's record, then the contract's `recurring`
+events, with the same windows. They hold nothing from the buyer's balance,
+so settling one moves no balance; a `no_mandate` answer marks the mandate
+revoked and a `mandate_expired` answer marks it ended. A batch holds at most
+35 recurring charges ([why](prepaid-contract.md#recurring-charges)).
+
 ## Credentials
 
 Authorization entries can use legacy `Address` credentials or `AddressV2`,

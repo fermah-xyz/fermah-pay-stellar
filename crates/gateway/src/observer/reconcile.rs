@@ -28,8 +28,12 @@
 //!   not yet final (`awaiting_signature`, `signed`, `submitted`: each may
 //!   already be credited on-chain) and the withdrawals held but not yet final
 //!   (`signed`, `submitted`: each may not have left yet);
-//! - the revenue lies between `sum(charged) + C_out - R` and that plus the
-//!   charges not yet final.
+//! - the revenue lies between `sum(charged) + RC + C_out + RC_out - R` and
+//!   that plus the charges and recurring charges not yet final, where `RC`
+//!   is the recurring charges recorded as charged and `RC_out` the observed
+//!   recurring charges no row explains. A recurring charge moves USDC from
+//!   the buyer's wallet straight to revenue, so it never touches the
+//!   liabilities.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -81,31 +85,41 @@ struct Books {
     unrecognized: i64,
     available: i128,
     charged: i128,
+    recurring_charged: i128,
     pending_charges: i128,
+    pending_recurring: i128,
     pending_deposits: i128,
     pending_withdrawals: i128,
     deposited_on_chain: i128,
     charged_on_chain: i128,
+    recurring_on_chain: i128,
     withdrawn: i128,
     revenue_withdrawn: i128,
     outside_deposits: i128,
     outside_charges: i128,
+    outside_recurring: i128,
     outside_withdrawals: i128,
 }
 
-/// The deployment's available and charged sums, refused while any charge,
-/// deposit or held withdrawal is not final.
+/// The deployment's available and charged sums, recurring charges included
+/// in the latter, refused while any charge, recurring charge, deposit or
+/// held withdrawal is not final.
 async fn quiet_books(pool: &PgPool, deployment: Uuid) -> Result<(i128, i128), ObserverError> {
     let row = sqlx::query!(
         r#"
         SELECT
             (SELECT COALESCE(sum(available), 0) FROM pay_stellar.buyers
              WHERE seller_deployment_id = $1)::text AS "available!",
-            (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.charges
-             WHERE seller_deployment_id = $1 AND state = 'charged')::text AS "charged!",
+            ((SELECT COALESCE(sum(amount), 0) FROM pay_stellar.charges
+              WHERE seller_deployment_id = $1 AND state = 'charged')
+             + (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.recurring_charges
+                WHERE seller_deployment_id = $1 AND state = 'charged'))::text AS "charged!",
             (SELECT count(*) FROM pay_stellar.charges
              WHERE seller_deployment_id = $1
-               AND state IN ('admitted', 'submitted', 'quarantined')) AS "charges_in_flight!",
+               AND state IN ('admitted', 'submitted', 'quarantined'))
+            + (SELECT count(*) FROM pay_stellar.recurring_charges
+               WHERE seller_deployment_id = $1
+                 AND state IN ('admitted', 'submitted', 'quarantined')) AS "charges_in_flight!",
             (SELECT count(*) FROM pay_stellar.deposits
              WHERE seller_deployment_id = $1
                AND state IN ('awaiting_signature', 'signed', 'submitted')) AS "deposits_in_flight!",
@@ -233,7 +247,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 - books.charged_on_chain
                 - books.withdrawn;
             let expected_revenue =
-                base.map_or(0, |b| b.revenue) + books.charged_on_chain - books.revenue_withdrawn;
+                base.map_or(0, |b| b.revenue) + books.charged_on_chain + books.recurring_on_chain
+                    - books.revenue_withdrawn;
             let events_differ =
                 (expected_liabilities, expected_revenue) != (totals.liabilities, totals.revenue);
             checks.push((
@@ -250,6 +265,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                                         "revenue": expected_revenue.to_string(),
                                         "deposited": books.deposited_on_chain.to_string(),
                                         "charged": books.charged_on_chain.to_string(),
+                                        "recurring_charged": books.recurring_on_chain.to_string(),
                                         "withdrawn": books.withdrawn.to_string(),
                                         "revenue_withdrawn": books.revenue_withdrawn.to_string() },
                             "coverage": coverage,
@@ -266,10 +282,13 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 + books.pending_charges
                 + books.pending_deposits
                 + books.pending_withdrawals;
-            let revenue_low =
-                books.charged + base.map_or(0, |b| b.revenue_offset) + books.outside_charges
-                    - books.revenue_withdrawn;
-            let revenue_high = revenue_low + books.pending_charges;
+            let revenue_low = books.charged
+                + books.recurring_charged
+                + base.map_or(0, |b| b.revenue_offset)
+                + books.outside_charges
+                + books.outside_recurring
+                - books.revenue_withdrawn;
+            let revenue_high = revenue_low + books.pending_charges + books.pending_recurring;
             let outside = !(liabilities_low..=liabilities_high).contains(&totals.liabilities)
                 || !(revenue_low..=revenue_high).contains(&totals.revenue);
             checks.push((FindingKind::LedgerTotalsMismatch, (outside).then(|| Finding::new(
@@ -286,11 +305,14 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                         "database": { "available": books.available.to_string(),
                                       "charged": books.charged.to_string(),
                                       "pending_charges": books.pending_charges.to_string(),
+                                      "recurring_charged": books.recurring_charged.to_string(),
+                                      "pending_recurring": books.pending_recurring.to_string(),
                                       "pending_deposits": books.pending_deposits.to_string(),
                                       "pending_withdrawals": books.pending_withdrawals.to_string() },
                         "events": { "revenue_withdrawn": books.revenue_withdrawn.to_string(),
                                     "outside_deposits": books.outside_deposits.to_string(),
                                     "outside_charges": books.outside_charges.to_string(),
+                                    "outside_recurring": books.outside_recurring.to_string(),
                                     "outside_withdrawals": books.outside_withdrawals.to_string() },
                         "coverage": coverage,
                     }),
@@ -450,6 +472,29 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                  WHERE seller_deployment_id = $1
                    AND state IN ('admitted', 'submitted', 'quarantined'))::text
                     AS "pending_charges!",
+                (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.recurring_charges
+                 WHERE seller_deployment_id = $1 AND state = 'charged')::text
+                    AS "recurring_charged!",
+                (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.recurring_charges
+                 WHERE seller_deployment_id = $1
+                   AND state IN ('admitted', 'submitted', 'quarantined'))::text
+                    AS "pending_recurring!",
+                (SELECT COALESCE(sum(re.amount), 0)
+                 FROM pay_stellar.chain_recurring_entries re
+                 JOIN pay_stellar.chain_events e ON e.id = re.chain_event_id
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
+                   AND re.outcome = 'charged')::text AS "recurring_on_chain!",
+                (SELECT COALESCE(sum(re.amount), 0)
+                 FROM pay_stellar.chain_recurring_entries re
+                 JOIN pay_stellar.chain_events e ON e.id = re.chain_event_id
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
+                   AND re.outcome = 'charged'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pay_stellar.recurring_charges r
+                       JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+                       WHERE r.seller_deployment_id = e.seller_deployment_id
+                         AND b.wallet_address = re.owner AND r.charge_id = re.charge_id))::text
+                    AS "outside_recurring!",
                 (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.deposits
                  WHERE seller_deployment_id = $1
                    AND state IN ('awaiting_signature', 'signed', 'submitted'))::text
@@ -541,15 +586,19 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             unrecognized: row.unrecognized,
             available: amount(&row.available)?,
             charged: amount(&row.charged)?,
+            recurring_charged: amount(&row.recurring_charged)?,
             pending_charges: amount(&row.pending_charges)?,
+            pending_recurring: amount(&row.pending_recurring)?,
             pending_deposits: amount(&row.pending_deposits)?,
             pending_withdrawals: amount(&row.pending_withdrawals)?,
             deposited_on_chain: amount(&row.deposited_on_chain)?,
             charged_on_chain: amount(&row.charged_on_chain)?,
+            recurring_on_chain: amount(&row.recurring_on_chain)?,
             withdrawn: amount(&row.withdrawn)?,
             revenue_withdrawn: amount(&row.revenue_withdrawn)?,
             outside_deposits: amount(&row.outside_deposits)?,
             outside_charges: amount(&row.outside_charges)?,
+            outside_recurring: amount(&row.outside_recurring)?,
             outside_withdrawals: amount(&row.outside_withdrawals)?,
         })
     }

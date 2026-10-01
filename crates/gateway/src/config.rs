@@ -65,6 +65,23 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_MIN_WITHDRAWAL", default_value = "100000")]
     pub min_withdrawal: i64,
 
+    /// Mandates and revocations a buyer may prepare in 24 hours; each one
+    /// the worker sends costs the operator a fee and the allowance's rent.
+    #[arg(long, env = "PAY_STELLAR_MAX_MANDATE_CHANGES_PER_BUYER_PER_DAY", default_value = "5")]
+    pub max_mandate_changes_per_buyer_per_day: u32,
+
+    /// Shortest period of a mandate, in seconds (a day by default).
+    #[arg(long, env = "PAY_STELLAR_MIN_MANDATE_PERIOD_SECS", default_value = "86400",
+          value_parser = clap::value_parser!(u64).range(1..))]
+    pub min_mandate_period_secs: u64,
+
+    /// Furthest ahead, in ledgers, a mandate's last ledger may be (about 170
+    /// days by default). The network refuses an allowance beyond its
+    /// longest entry lifetime (`max_entry_ttl`, 3,110,400 ledgers on testnet
+    /// in October 2026).
+    #[arg(long, env = "PAY_STELLAR_MAX_MANDATE_LEDGERS", default_value = "3000000")]
+    pub max_mandate_ledgers: u32,
+
     /// Requests processed at once, across all connections. Every request,
     /// authenticated or not, costs a database lookup, so this bounds the
     /// load unauthenticated traffic can put on the database; rate limiting

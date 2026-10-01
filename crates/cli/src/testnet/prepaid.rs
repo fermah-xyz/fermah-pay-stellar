@@ -39,6 +39,7 @@ use super::profile::{Deployment, Profile};
 
 mod e2e;
 mod load;
+mod recurring;
 
 pub use load::LoadShape;
 

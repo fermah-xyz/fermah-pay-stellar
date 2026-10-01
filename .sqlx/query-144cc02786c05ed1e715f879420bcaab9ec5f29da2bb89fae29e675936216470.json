@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.mandates\n            SET state = $2, last_error = $3, closed_at = now()\n            WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted', 'active')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "144cc02786c05ed1e715f879420bcaab9ec5f29da2bb89fae29e675936216470"
+}
