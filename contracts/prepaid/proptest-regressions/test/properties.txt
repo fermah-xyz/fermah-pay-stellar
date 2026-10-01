@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc b349d403861abe354b914c048ed0c9d5184dfea34ba243a7c98ea1bf214816fe # shrinks to ops = [SetDailyLimits { per_buyer: 22038182, per_seller: 1 }, Deposit { buyer: 0, amount: 100000, id: 0 }, Deposit { buyer: 1, amount: 9349201, id: 0 }, Deposit { buyer: 0, amount: 100666, id: 5 }, Charges([(1, 2, 9349201), (2, 4, 48850542)])]
 cc a654e277e27ff6c423475b57103431482e3873785b6e9bcb8db3c8faf9d7315d # shrinks to ops = [Deposit { buyer: 2, amount: 26344989, id: 0 }, Charges([(2, 0, 4515565)]), NextDay, SetDailyLimits { per_buyer: 1377996, per_seller: 1377996 }, Charges([(2, 1, 1)])]
+cc ae471f15391e7f998e51f4d0cea849c872614efc3976486e52c71d7bbf8cf254 # shrinks to ops = [Authorize { buyer: 1, mandate: 1, amount: 17264231, cycles: 1 }, SetDailyLimits { per_buyer: 1, per_seller: 1 }, Authorize { buyer: 0, mandate: 0, amount: 1, cycles: 1 }, Recurring([(1, 0, 1, 0, 2)])]

@@ -33,12 +33,24 @@
 //! across all accounts, in one UTC day of ledger time. The counts live in
 //! entries a charge already writes (the account, the instance), so the limit
 //! costs a batch no extra write.
+//!
+//! Recurring charges: a buyer may also authorize the seller to charge their
+//! wallet once per period, up to an amount per period, for a number of
+//! periods, until a ledger. The buyer signs one authorization that both
+//! records these terms (the mandate) and approves this contract, through the
+//! USDC contract's `approve`, to move up to the amount times the periods
+//! until that ledger. Only this contract can spend that allowance, and only
+//! within the mandate: each period's charge moves USDC from the buyer's
+//! wallet straight to the treasury as revenue, without touching the buyer's
+//! prepaid account. A period the seller does not charge in is not charged
+//! later. The allowance's own expiry bounds the mandate even if the contract
+//! did not.
 
 #![no_std]
 
 use soroban_sdk::{
-    Address, BytesN, ContractExecutable, Env, Symbol, TryFromVal, Vec, contract, contracterror,
-    contractevent, contractimpl, contracttype, panic_with_error, symbol_short, token,
+    Address, BytesN, ContractExecutable, Env, Symbol, Vec, contract, contracterror, contractevent,
+    contractimpl, contracttype, panic_with_error, symbol_short, token, xdr::ScErrorType,
 };
 
 /// Largest number of charges one `charge_batch` call accepts. Each charge of
@@ -47,6 +59,14 @@ use soroban_sdk::{
 /// against the network's 200 write entries per transaction. The footprint,
 /// about 200 entries, is well within its limit of 400.
 pub const MAX_BATCH: u32 = 98;
+
+/// Largest number of recurring charges one `charge_recurring_batch` call
+/// accepts. The bound is the network's 16,384 bytes of contract events per
+/// transaction: each charge adds its entry to this contract's event and the
+/// USDC contract's own transfer event, about 416 bytes together, so 39 fit
+/// and 35 leave a margin. Writes (four per charge: mandate, record,
+/// allowance, buyer's USDC balance) would allow 49.
+pub const MAX_RECURRING_BATCH: u32 = 35;
 
 /// Furthest ahead, in ledgers (~1 day), a charge's last ledger may be. A
 /// charge record's rent grows with how long it lives, so this bounds it.
@@ -95,6 +115,9 @@ pub enum Error {
     ChargeWindowTooLong = 118,
     /// The charge would take the account or the seller past a daily limit.
     ChargeAboveDailyLimit = 119,
+    /// A mandate's amount, period, number of periods or last ledger is not
+    /// usable.
+    InvalidMandate = 120,
 }
 
 #[contracttype]
@@ -135,15 +158,6 @@ pub struct Account {
     pub day: u64,
     /// Charged from this account on `day`.
     pub charged: i128,
-}
-
-/// An account as the first version of this contract stored it, before daily
-/// counts. It is read as an [`Account`] with nothing charged and written back
-/// in the new form the next time the account changes.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AccountV1 {
-    balance: i128,
 }
 
 /// The most that may be charged in one UTC day of ledger time, from one
@@ -192,6 +206,88 @@ pub enum Outcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Settled(pub Address, pub BytesN<32>, pub i128, pub Outcome);
 
+/// A buyer's standing authorization for the seller to charge their wallet:
+/// up to `amount` once per `period_secs` of ledger time from `start`, for
+/// `cycles` periods, and never after ledger `live_until`. `next_cycle` is the
+/// first period not charged yet.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Mandate {
+    pub mandate_id: BytesN<32>,
+    pub amount: i128,
+    pub period_secs: u64,
+    pub start: u64,
+    pub cycles: u32,
+    pub live_until: u32,
+    pub next_cycle: u32,
+}
+
+/// One recurring charge: the buyer, the identifier of this attempt, the
+/// mandate and period it charges for, the amount, and the last ledger in
+/// which it may be settled. A refused period may be attempted again under a
+/// new identifier; a period is charged at most once whatever the identifier.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringCharge {
+    pub owner: Address,
+    pub charge_id: BytesN<32>,
+    pub mandate_id: BytesN<32>,
+    pub cycle: u32,
+    pub amount: i128,
+    pub last_ledger: u32,
+}
+
+/// Outcome of one recurring charge. As for prepaid charges, every outcome
+/// but `Duplicate` and `Expired` records the attempt with that outcome.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RecurringOutcome {
+    Charged = 0,
+    /// This attempt's identifier was already settled.
+    Duplicate = 1,
+    /// Past the attempt's last ledger.
+    Expired = 2,
+    /// The buyer has no mandate, or a different one than the charge names.
+    NoMandate = 3,
+    /// Past the mandate's last ledger or its last period.
+    MandateExpired = 4,
+    /// The period was already charged.
+    AlreadyCharged = 5,
+    /// The period has not started.
+    NotDue = 6,
+    /// The period is over; it is not charged late.
+    PeriodOver = 7,
+    /// Above the mandate's amount per period.
+    AboveMandate = 8,
+    /// Above the largest single charge.
+    AboveLimit = 9,
+    /// The charge would pass the seller's daily limit.
+    AboveDailyLimit = 10,
+    /// The buyer's allowance to this contract no longer covers it, e.g.
+    /// because the buyer lowered it in the USDC contract.
+    AllowanceShort = 11,
+    /// The buyer's wallet holds less USDC than the amount.
+    WalletShort = 12,
+    /// The USDC contract refused the transfer for another reason, e.g. the
+    /// wallet has no USDC trustline or is frozen.
+    TransferRefused = 13,
+}
+
+/// Per-charge result in a `recurring` event: owner, attempt identifier,
+/// mandate, period, amount, outcome. A tuple, like [`Settled`], because
+/// field names would add to an event whose size bounds the batch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringSettled(
+    pub Address,
+    pub BytesN<32>,
+    pub BytesN<32>,
+    pub u32,
+    pub i128,
+    pub RecurringOutcome,
+);
+
 #[contracttype]
 #[derive(Clone)]
 enum Key {
@@ -207,6 +303,11 @@ enum Key {
     DailyLimits,
     /// Instance: what the seller's accounts were charged today.
     SellerDay,
+    /// A buyer's mandate.
+    Mandate(Address),
+    /// Temporary: a settled recurring charge's outcome, by owner and the
+    /// attempt's identifier.
+    Recurring(Address, BytesN<32>),
 }
 
 #[contractevent(topics = ["deposit"], data_format = "vec")]
@@ -270,6 +371,32 @@ pub struct LimitsChanged {
 pub struct DailyLimitsChanged {
     pub previous: Option<DailyLimits>,
     pub current: DailyLimits,
+}
+
+/// A buyer authorized a mandate, replacing any previous one.
+#[contractevent(topics = ["mandate"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateAuthorized {
+    #[topic]
+    pub owner: Address,
+    pub mandate: Mandate,
+}
+
+/// A buyer revoked their mandate; `mandate_id` is `None` if there was none.
+/// The buyer's allowance to this contract is zero afterwards either way.
+#[contractevent(topics = ["revoke"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MandateRevoked {
+    #[topic]
+    pub owner: Address,
+    pub mandate_id: Option<BytesN<32>>,
+}
+
+/// One event per recurring charge call, for the same reason as [`Charges`].
+#[contractevent(topics = ["recurring"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringCharges {
+    pub settled: Vec<RecurringSettled>,
 }
 
 #[contractevent(topics = ["revenue"], data_format = "vec")]
@@ -459,6 +586,118 @@ impl PrepaidLedger {
         RevenueWithdrawn { destination, amount, withdrawal_id }.publish(&env);
     }
 
+    /// Records `owner`'s mandate, replacing any previous one, and approves
+    /// this contract to move up to `amount` times `cycles` of the owner's USDC
+    /// until ledger `live_until`. The approval replaces any previous one, so
+    /// what is left of a replaced mandate's allowance cannot be spent under
+    /// the new one. The owner authorizes both the call and the approval, with
+    /// exactly these terms; the first period starts now.
+    pub fn authorize_recurring(
+        env: Env,
+        owner: Address,
+        mandate_id: BytesN<32>,
+        amount: i128,
+        period_secs: u64,
+        cycles: u32,
+        live_until: u32,
+    ) {
+        owner.require_auth();
+        let config = active_config(&env);
+        if amount <= 0 || amount > MAX_TRANSFER {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+        if period_secs == 0 || cycles == 0 || live_until < env.ledger().sequence() {
+            panic_with_error!(&env, Error::InvalidMandate);
+        }
+        let allowance = checked_mul(&env, amount, i128::from(cycles));
+        let mandate = Mandate {
+            mandate_id,
+            amount,
+            period_secs,
+            start: env.ledger().timestamp(),
+            cycles,
+            live_until,
+            next_cycle: 0,
+        };
+        put_persistent(&env, &Key::Mandate(owner.clone()), &mandate);
+        extend_instance(&env);
+        // The USDC contract refuses a last ledger beyond what the network
+        // lets an entry live, so that bound needs no check here.
+        token::Client::new(&env, &config.usdc).approve(
+            &owner,
+            &env.current_contract_address(),
+            &allowance,
+            &live_until,
+        );
+        MandateAuthorized { owner, mandate }.publish(&env);
+    }
+
+    /// Ends `owner`'s mandate and sets the owner's allowance to this contract
+    /// to zero. Allowed while the contract is paused: stopping future charges
+    /// must not depend on the admin. The owner can also lower the allowance
+    /// in the USDC contract directly, which stops charges just the same.
+    pub fn revoke_recurring(env: Env, owner: Address) {
+        owner.require_auth();
+        let config = config(&env);
+        let key = Key::Mandate(owner.clone());
+        let mandate_id = env.storage().persistent().get::<Key, Mandate>(&key).map(|m| m.mandate_id);
+        env.storage().persistent().remove(&key);
+        extend_instance(&env);
+        // A fixed last ledger keeps the call the owner signs independent of
+        // the ledger it lands in; the USDC contract accepts any last ledger
+        // for a zero allowance.
+        token::Client::new(&env, &config.usdc).approve(
+            &owner,
+            &env.current_contract_address(),
+            &0,
+            &0,
+        );
+        MandateRevoked { owner, mandate_id }.publish(&env);
+    }
+
+    /// Settles up to `MAX_RECURRING_BATCH` recurring charges and returns each
+    /// one's outcome. A refused entry does not affect the others; only a
+    /// malformed batch reverts the whole call.
+    pub fn charge_recurring_batch(
+        env: Env,
+        charges: Vec<RecurringCharge>,
+    ) -> Vec<RecurringOutcome> {
+        let config = active_config(&env);
+        config.operator.require_auth();
+        if charges.is_empty() {
+            panic_with_error!(&env, Error::EmptyBatch);
+        }
+        if charges.len() > MAX_RECURRING_BATCH {
+            panic_with_error!(&env, Error::BatchTooLarge);
+        }
+        let mut totals = totals(&env);
+        let mut day = Charging::load(&env);
+        let usdc = token::Client::new(&env, &config.usdc);
+        let mut settled = Vec::new(&env);
+        let mut outcomes = Vec::new(&env);
+        for charge in charges.iter() {
+            let outcome = settle_recurring(&env, &config, &usdc, &mut totals, &mut day, &charge);
+            outcomes.push_back(outcome);
+            settled.push_back(RecurringSettled(
+                charge.owner,
+                charge.charge_id,
+                charge.mandate_id,
+                charge.cycle,
+                charge.amount,
+                outcome,
+            ));
+        }
+        env.storage().instance().set(&Key::Totals, &totals);
+        day.store(&env);
+        extend_instance(&env);
+        RecurringCharges { settled }.publish(&env);
+        outcomes
+    }
+
+    pub fn get_mandate(env: Env, owner: Address) -> Option<Mandate> {
+        env.storage().persistent().get(&Key::Mandate(owner))
+    }
+
     pub fn get_balance(env: Env, owner: Address) -> i128 {
         load_account(&env, &Key::Account(owner)).map_or(0, |account| account.balance)
     }
@@ -597,6 +836,109 @@ fn settle(
     Settled(owner, charge_id, amount, outcome)
 }
 
+fn settle_recurring(
+    env: &Env,
+    config: &Config,
+    usdc: &token::Client,
+    totals: &mut Totals,
+    day: &mut Charging,
+    charge: &RecurringCharge,
+) -> RecurringOutcome {
+    let amount = charge.amount;
+    if amount <= 0 || amount > MAX_TRANSFER {
+        panic_with_error!(env, Error::InvalidAmount);
+    }
+    let now = env.ledger().sequence();
+    if charge.last_ledger > now.saturating_add(MAX_CHARGE_WINDOW) {
+        panic_with_error!(env, Error::ChargeWindowTooLong);
+    }
+    let record = Key::Recurring(charge.owner.clone(), charge.charge_id.clone());
+    if env.storage().temporary().has(&record) {
+        return RecurringOutcome::Duplicate;
+    }
+    if charge.last_ledger < now {
+        return RecurringOutcome::Expired;
+    }
+    let outcome = charge_mandate(env, config, usdc, totals, day, charge);
+    env.storage().temporary().set(&record, &outcome);
+    let live_for = charge.last_ledger - now + CHARGE_RECORD_GRACE;
+    env.storage().temporary().extend_ttl(&record, live_for, live_for);
+    outcome
+}
+
+/// Checks a recurring charge against its mandate and limits and, if they
+/// allow it, moves the USDC and counts the period as charged.
+fn charge_mandate(
+    env: &Env,
+    config: &Config,
+    usdc: &token::Client,
+    totals: &mut Totals,
+    day: &mut Charging,
+    charge: &RecurringCharge,
+) -> RecurringOutcome {
+    let key = Key::Mandate(charge.owner.clone());
+    let Some(mut mandate) = env.storage().persistent().get::<Key, Mandate>(&key) else {
+        return RecurringOutcome::NoMandate;
+    };
+    if mandate.mandate_id != charge.mandate_id {
+        return RecurringOutcome::NoMandate;
+    }
+    let due = (env.ledger().timestamp() - mandate.start) / mandate.period_secs;
+    if env.ledger().sequence() > mandate.live_until
+        || charge.cycle >= mandate.cycles
+        || due >= u64::from(mandate.cycles)
+    {
+        return RecurringOutcome::MandateExpired;
+    }
+    if charge.cycle < mandate.next_cycle {
+        return RecurringOutcome::AlreadyCharged;
+    }
+    let cycle = u64::from(charge.cycle);
+    if cycle > due {
+        return RecurringOutcome::NotDue;
+    }
+    if cycle < due {
+        return RecurringOutcome::PeriodOver;
+    }
+    if charge.amount > mandate.amount {
+        return RecurringOutcome::AboveMandate;
+    }
+    if charge.amount > config.limits.max_charge {
+        return RecurringOutcome::AboveLimit;
+    }
+    // The buyer's own daily limit counts prepaid charges in the account,
+    // which a recurring charge does not touch; the mandate bounds what it
+    // takes from the buyer instead.
+    if day.exceeds_seller(env, charge.amount) {
+        return RecurringOutcome::AboveDailyLimit;
+    }
+    // A refused transfer reverts only itself: nothing moved, and the period
+    // stays chargeable.
+    let moved = usdc.try_transfer_from(
+        &env.current_contract_address(),
+        &charge.owner,
+        &config.treasury,
+        &charge.amount,
+    );
+    match moved {
+        Ok(_) => {}
+        Err(Ok(error)) if error.is_type(ScErrorType::Contract) => {
+            // The USDC contract's codes for these refusals.
+            return match error.get_code() {
+                9 => RecurringOutcome::AllowanceShort,
+                10 => RecurringOutcome::WalletShort,
+                _ => RecurringOutcome::TransferRefused,
+            };
+        }
+        Err(_) => return RecurringOutcome::TransferRefused,
+    }
+    mandate.next_cycle = charge.cycle + 1;
+    put_persistent(env, &key, &mandate);
+    day.seller.charged = checked_add(env, day.seller.charged, charge.amount);
+    totals.revenue = checked_add(env, totals.revenue, charge.amount);
+    RecurringOutcome::Charged
+}
+
 /// The daily limits and what the seller's accounts were charged today, for
 /// the charges of one call.
 struct Charging {
@@ -626,21 +968,20 @@ impl Charging {
         })
     }
 
+    /// Whether charging `amount` would pass the seller's limit.
+    fn exceeds_seller(&self, env: &Env, amount: i128) -> bool {
+        self.limits
+            .as_ref()
+            .is_some_and(|limits| checked_add(env, self.seller.charged, amount) > limits.per_seller)
+    }
+
     fn store(&self, env: &Env) {
         env.storage().instance().set(&Key::SellerDay, &self.seller);
     }
 }
 
-/// The account stored under `key`, in either layout this contract has
-/// written.
 fn load_account(env: &Env, key: &Key) -> Option<Account> {
-    let stored: soroban_sdk::Val = env.storage().persistent().get(key)?;
-    if let Ok(account) = Account::try_from_val(env, &stored) {
-        return Some(account);
-    }
-    let legacy = AccountV1::try_from_val(env, &stored)
-        .unwrap_or_else(|_| panic!("an account entry in neither known layout"));
-    Some(Account { balance: legacy.balance, day: 0, charged: 0 })
+    env.storage().persistent().get(key)
 }
 
 fn set_paused(env: &Env, paused: bool) {
@@ -703,6 +1044,10 @@ fn validate_limits(env: &Env, limits: &Limits) {
 
 fn checked_add(env: &Env, a: i128, b: i128) -> i128 {
     a.checked_add(b).unwrap_or_else(|| panic_with_error!(env, Error::Overflow))
+}
+
+fn checked_mul(env: &Env, a: i128, b: i128) -> i128 {
+    a.checked_mul(b).unwrap_or_else(|| panic_with_error!(env, Error::Overflow))
 }
 
 fn put_persistent<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &Key, value: &V) {
