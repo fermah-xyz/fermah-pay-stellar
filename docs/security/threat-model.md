@@ -19,8 +19,8 @@ contract.
 
 **Stopped by.** The contract, whatever the operator signs:
 - each charge is at most `max_charge`;
-- a buyer and the seller are charged at most the [daily limits](../architecture/prepaid-contract.md#daily-limits) per UTC day;
-- a recurring charge is at most the mandate's amount, once per period, from a buyer who signed that mandate;
+- a buyer's prepaid credit and the seller's revenue grow by at most the [daily limits](../architecture/prepaid-contract.md#daily-limits) per UTC day;
+- a recurring charge is at most the mandate's amount, once per period, from a buyer who signed that mandate; the buyer's daily limit does not apply to it, since the mandate already bounds the wallet, but the seller's does;
 - a charge identifier is settled at most once.
 
 The operator key moves no USDC out of the treasury (that needs the treasury's key) and cannot pay out revenue (that needs the seller's and the treasury's).
@@ -29,7 +29,7 @@ The operator key moves no USDC out of the treasury (that needs the treasury's ke
 
 **Response.** Pause the contract with the admin's keys, [rotate the operator](../self-hosting/rotation.md), and refund what the findings show was taken.
 
-**Left.** Until the pause, the operator key can take up to the daily limits from buyers with prepaid credit, as seller revenue: the seller can withdraw it, the operator cannot. Set the daily limits to what a day's legitimate charging needs.
+**Left.** Until the pause, the operator key can take up to the daily limits from buyers with prepaid credit, and each mandate's current period, as seller revenue: the seller can withdraw it, the operator cannot. Set the daily limits to what a day's legitimate charging needs. It can also charge a mandate's period a token amount, which uses the period up: buyers lose nothing, but the seller loses that period's revenue, since periods are not charged late.
 
 ## Compromised buyer key
 
