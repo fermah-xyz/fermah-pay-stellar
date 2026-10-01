@@ -154,6 +154,37 @@ pub struct ChargeRequest {
     pub last_ledger: u32,
 }
 
+/// A buyer's mandate: up to `amount` per `period_secs` for `cycles` periods,
+/// until ledger `live_until`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MandateIntent {
+    pub owner: AccountAddress,
+    pub mandate_id: [u8; 32],
+    pub amount: i128,
+    pub period_secs: u64,
+    pub cycles: u32,
+    pub live_until: u32,
+}
+
+impl MandateIntent {
+    /// The allowance the mandate approves: the amount for every period.
+    #[must_use]
+    pub fn allowance(&self) -> i128 {
+        self.amount.saturating_mul(i128::from(self.cycles))
+    }
+}
+
+/// One attempt to charge period `cycle` of a mandate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecurringChargeRequest {
+    pub owner: AccountAddress,
+    pub charge_id: [u8; 32],
+    pub mandate_id: [u8; 32],
+    pub cycle: u32,
+    pub amount: i128,
+    pub last_ledger: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DepositIntent {
     pub owner: AccountAddress,
@@ -331,6 +362,91 @@ impl PrepaidDeployment {
         invocation(self.charge_batch_call(charges), vec![])
     }
 
+    #[must_use]
+    pub fn authorize_recurring_call(&self, intent: &MandateIntent) -> InvokeContractArgs {
+        call(
+            self.contract,
+            "authorize_recurring",
+            vec![
+                account_val(&intent.owner),
+                bytes_val(&intent.mandate_id),
+                i128_val(intent.amount),
+                ScVal::U64(intent.period_secs),
+                ScVal::U32(intent.cycles),
+                ScVal::U32(intent.live_until),
+            ],
+        )
+    }
+
+    /// What the buyer signs for a mandate: the mandate and, beneath it, the
+    /// approval of the ledger contract to move up to the whole mandate's
+    /// amount until its last ledger.
+    #[must_use]
+    pub fn authorize_recurring_authorization(
+        &self,
+        intent: &MandateIntent,
+    ) -> SorobanAuthorizedInvocation {
+        invocation(
+            self.authorize_recurring_call(intent),
+            vec![invocation(
+                self.approve(&intent.owner, intent.allowance(), intent.live_until),
+                vec![],
+            )],
+        )
+    }
+
+    #[must_use]
+    pub fn revoke_recurring_call(&self, owner: &AccountAddress) -> InvokeContractArgs {
+        call(self.contract, "revoke_recurring", vec![account_val(owner)])
+    }
+
+    /// What the buyer signs to revoke: the revocation and, beneath it, the
+    /// approval that sets the ledger contract's allowance to zero.
+    #[must_use]
+    pub fn revoke_recurring_authorization(
+        &self,
+        owner: &AccountAddress,
+    ) -> SorobanAuthorizedInvocation {
+        invocation(
+            self.revoke_recurring_call(owner),
+            vec![invocation(self.approve(owner, 0, 0), vec![])],
+        )
+    }
+
+    #[must_use]
+    pub fn charge_recurring_batch_call(
+        &self,
+        charges: &[RecurringChargeRequest],
+    ) -> InvokeContractArgs {
+        let entries: Vec<ScVal> = charges.iter().map(recurring_charge_val).collect();
+        call(self.contract, "charge_recurring_batch", vec![vec_val(entries)])
+    }
+
+    /// What the operator signs for a batch of recurring charges.
+    #[must_use]
+    pub fn charge_recurring_batch_authorization(
+        &self,
+        charges: &[RecurringChargeRequest],
+    ) -> SorobanAuthorizedInvocation {
+        invocation(self.charge_recurring_batch_call(charges), vec![])
+    }
+
+    /// Ledger key of the owner's mandate.
+    #[must_use]
+    pub fn mandate_key(&self, owner: &AccountAddress) -> LedgerKey {
+        self.persistent_key(vec_val(vec![symbol_val("Mandate"), account_val(owner)]))
+    }
+
+    /// Ledger key of the record of one recurring charge attempt.
+    #[must_use]
+    pub fn recurring_record_key(&self, owner: &AccountAddress, charge_id: &[u8; 32]) -> LedgerKey {
+        LedgerKey::ContractData(LedgerKeyContractData {
+            contract: ScAddress::Contract(ContractId(Hash(self.contract))),
+            key: vec_val(vec![symbol_val("Recurring"), account_val(owner), bytes_val(charge_id)]),
+            durability: ContractDataDurability::Temporary,
+        })
+    }
+
     /// Ledger key of the contract's instance entry, which holds its
     /// configuration and totals.
     #[must_use]
@@ -387,6 +503,20 @@ impl PrepaidDeployment {
             key,
             durability: ContractDataDurability::Persistent,
         })
+    }
+
+    /// The USDC approval of the ledger contract as spender of `owner`'s USDC.
+    fn approve(&self, owner: &AccountAddress, amount: i128, live_until: u32) -> InvokeContractArgs {
+        call(
+            self.usdc,
+            "approve",
+            vec![
+                account_val(owner),
+                ScVal::Address(ScAddress::Contract(ContractId(Hash(self.contract)))),
+                i128_val(amount),
+                ScVal::U32(live_until),
+            ],
+        )
     }
 
     fn transfer(
@@ -981,6 +1111,23 @@ fn charge_val(charge: &ChargeRequest) -> ScVal {
         i128_val(charge.amount),
         ScVal::U32(charge.last_ledger),
     ])
+}
+
+/// The contract's `RecurringCharge`, a struct with named fields, which
+/// encodes as a map keyed by field name in sorted order.
+fn recurring_charge_val(charge: &RecurringChargeRequest) -> ScVal {
+    let field = |name: &str, val: ScVal| ScMapEntry { key: symbol_val(name), val };
+    ScVal::Map(Some(ScMap(
+        VecM::try_from(vec![
+            field("amount", i128_val(charge.amount)),
+            field("charge_id", bytes_val(&charge.charge_id)),
+            field("cycle", ScVal::U32(charge.cycle)),
+            field("last_ledger", ScVal::U32(charge.last_ledger)),
+            field("mandate_id", bytes_val(&charge.mandate_id)),
+            field("owner", account_val(&charge.owner)),
+        ])
+        .expect("invariant: six fields"),
+    )))
 }
 
 #[cfg(test)]

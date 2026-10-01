@@ -71,6 +71,9 @@ Authorization binds a signer to the exact call and its sub-calls:
 | `withdraw(owner, amount, destination, id)` | buyer | the call only |
 | `withdraw(...)` | treasury | the call, and under it `usdc.transfer(treasury, destination, amount)` |
 | `charge_batch(charges)` | operator | the call only |
+| `authorize_recurring(owner, mandate_id, amount, period_secs, cycles, live_until)` | buyer | the call, and under it `usdc.approve(buyer, contract, amount × cycles, live_until)` |
+| `revoke_recurring(owner)` | buyer | the call, and under it `usdc.approve(buyer, contract, 0, 0)` |
+| `charge_recurring_batch(charges)` | operator | the call only |
 
 A deposit signed for another deployment or treasury, a changed amount or a
 changed withdrawal destination does not match the signed tree and is refused
@@ -130,7 +133,7 @@ Once the admin calls `set_daily_limits({per_buyer, per_seller})`, a charge is re
 
 The limits are enforced by the contract whatever the gateway admits. They bound what a leaked operator key can move in a day, and what one seller deployment can charge before a person looks.
 
-Each account's count lives in its own entry, which a charge already writes: `Account {balance, day, charged}`. The seller's count lives in the contract instance. A full batch therefore writes no more entries than before. An account stored by an earlier version (`{balance}` only) is read as having nothing charged, and is written in the new layout the next time it changes.
+Each account's count lives in its own entry, which a charge already writes: `Account {balance, day, charged}`. The seller's count lives in the contract instance. A full batch therefore writes no more entries than before.
 
 ### Batch size
 
@@ -155,6 +158,72 @@ Measured in the Soroban VM with the built Wasm, one `charge_batch` call for
 These are local VM measurements, reproduced by `just contract-resources` and
 by the `Contract` CI job; they are not network evidence.
 
+## Recurring charges
+
+A buyer can let the seller charge their wallet on a schedule without signing
+each charge. The buyer signs one authorization for
+`authorize_recurring(owner, mandate_id, amount, period_secs, cycles,
+live_until)`, which records a **mandate** (up to `amount` per period of
+`period_secs` of ledger time, for `cycles` periods, never after ledger
+`live_until`) and, under the same signature, approves this contract in the
+USDC contract to move up to `amount × cycles` of the buyer's USDC until
+`live_until`. The first period starts when the mandate is recorded. The
+operator then settles each period's charge with `charge_recurring_batch`;
+the USDC moves from the buyer's wallet straight to the treasury as seller
+revenue. A recurring charge does not touch the buyer's prepaid account or
+the contract's liabilities.
+
+The allowance names this contract as spender, so only this contract's code
+can use it, and only within a mandate. The USDC contract stops honouring it
+after `live_until` by itself. A buyer has at most one mandate per contract,
+because the USDC contract keeps one allowance per buyer and spender: a new
+`authorize_recurring` replaces the mandate and sets the allowance to the new
+mandate's total, so what was left of the old one cannot be spent. The
+network bounds how far ahead `live_until` can be (about six months on
+testnet and mainnet today); a longer subscription needs a new mandate before
+then.
+
+A recurring charge is `{owner, charge_id, mandate_id, cycle, amount,
+last_ledger}`: an identifier for this attempt, the mandate and the period it
+charges for. Each entry's outcome:
+
+| Outcome | Meaning | Recorded |
+|---|---|---|
+| `Charged` | USDC moved from the wallet to the treasury; the period is used | yes |
+| `NoMandate` | the buyer has no mandate, or a different one | yes |
+| `MandateExpired` | past the mandate's `live_until` or its last period | yes |
+| `AlreadyCharged` | the period was already charged | yes |
+| `NotDue` | the period has not started | yes |
+| `PeriodOver` | the period ended without a charge; it is not charged late | yes |
+| `AboveMandate` | above the mandate's amount per period | yes |
+| `AboveLimit` | above the per-charge limit | yes |
+| `AboveDailyLimit` | would take the seller past its daily limit | yes |
+| `AllowanceShort` | the allowance no longer covers it, e.g. the buyer lowered it in the USDC contract | yes |
+| `WalletShort` | the wallet holds less USDC than the amount | yes |
+| `TransferRefused` | the USDC contract refused for another reason, e.g. a frozen trustline | yes |
+| `Duplicate` | this attempt's identifier is already recorded | no |
+| `Expired` | past the attempt's last ledger | no |
+
+A period is charged at most once, whatever the attempt identifier; a refused
+period can be attempted again under a new identifier while it lasts.
+Attempt records use the same lifetime and window as prepaid charge records,
+in their own key space. The seller's daily limit counts recurring charges;
+the buyer's does not, because it counts what leaves the prepaid account and
+the mandate already bounds the wallet.
+
+`revoke_recurring` ends the buyer's mandate and sets the allowance to zero.
+It works while the contract is paused, so stopping charges never depends on
+the admin. The buyer can also lower the allowance in the USDC contract from
+any wallet; charges are then refused as `AllowanceShort`.
+
+`charge_recurring_batch` settles up to 35 charges. The binding limit is the
+16,384 bytes of contract events per transaction: each charge adds about 416
+bytes between this contract's `recurring` event and the USDC contract's
+`transfer` event, so 39 fit. Writes would allow 49 (four per charge: the
+mandate, the record, the allowance and the buyer's USDC balance). Measured
+for 35 distinct buyers: 30.4 M instructions, 7.3 MB of memory, 143 writes,
+34.9 KB written and 14,644 event bytes.
+
 ## Events
 
 After construction, every call that changes state emits an event, all but
@@ -171,15 +240,20 @@ them:
 | `pause`, `unpause` | `"pause"` | `paused` after the call, even when it did not change |
 | `set_limits` | `"limits"` | `[previous, current]`, each `{max_charge, min_deposit}` |
 | `set_daily_limits` | `"daily"` | `[previous, current]`, each `{per_buyer, per_seller}`; `previous` is void the first time |
+| `authorize_recurring` | `"mandate"`, owner | the mandate `{amount, cycles, live_until, mandate_id, next_cycle, period_secs, start}` |
+| `revoke_recurring` | `"revoke"`, owner | the revoked mandate's identifier, or void if there was none |
+| `charge_recurring_batch` | `"recurring"` | `[[owner, charge_id, mandate_id, cycle, amount, outcome], ...]` |
 | `upgrade` | `"executable_update"`, previous code, new code (system event) | an empty vector |
 
 `upgrade` publishes no event of its own: the Soroban host emits a system
 event (type `System`, attributed to the contract) whenever a contract's code
 is replaced, naming the previous and the new executable (for Wasm code,
 `["Wasm", hash]`). A refused call emits nothing.
-[`prepaid_event`](../../crates/stellar-chain/src/prepaid.rs) decodes each of
-these; the contract tests pin the decoding against the events the host
-records.
+[`ledger_event`](../../crates/stellar-chain/src/prepaid.rs) decodes the
+deposit, charge, withdrawal and administrative events; the contract tests pin
+the decoding against the events the host records. The chain observer records
+any other event from the contract, the recurring ones included, as
+`unrecognized`.
 
 ## Errors
 
@@ -207,6 +281,7 @@ this contract.
 | 117 | `DuplicateRole` |
 | 118 | `ChargeWindowTooLong` |
 | 119 | `ChargeAboveDailyLimit` |
+| 120 | `InvalidMandate` |
 
 ## Storage lifetime
 

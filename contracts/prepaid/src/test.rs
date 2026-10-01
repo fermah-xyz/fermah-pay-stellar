@@ -1588,26 +1588,6 @@ fn test_only_the_admin_sets_positive_daily_limits_and_each_change_is_announced()
     );
 }
 
-#[test]
-fn test_an_account_stored_before_daily_counts_is_read_and_charged() {
-    let w = world();
-    funded(&w, 1, 10 * USDC);
-    let owner = w.owner_address(1);
-    // As the first version of the contract wrote it.
-    w.env.as_contract(&w.contract, || {
-        w.env
-            .storage()
-            .persistent()
-            .set(&Key::Account(owner.clone()), &AccountV1 { balance: 10 * USDC });
-    });
-    assert_eq!(w.balance(1), 10 * USDC);
-    set_daily(&w, 3 * USDC, 100 * USDC).unwrap();
-    let outcomes = w.charge_batch(&[w.charge(1, 1, 2 * USDC), w.charge(1, 2, 2 * USDC)]).unwrap();
-    assert_eq!(outcomes, soroban_sdk::vec![&w.env, Outcome::Charged, Outcome::AboveDailyLimit]);
-    let account = w.client().get_account(&owner).unwrap();
-    assert_eq!((account.balance, account.charged), (8 * USDC, 2 * USDC));
-}
-
 // ---- revenue ----------------------------------------------------------------
 
 fn withdraw_revenue(w: &World, amount: i128, id: u8) -> Result<(), soroban_sdk::Error> {
@@ -2179,3 +2159,4 @@ fn test_solvency_tooling_reads_get_totals() {
 }
 
 mod properties;
+mod recurring;
