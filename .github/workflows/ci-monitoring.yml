@@ -1,0 +1,57 @@
+name: Monitoring
+
+# The alert rules, the Alertmanager configuration and the Grafana dashboard:
+# each rule and query names a metric the code emits, every query parses on a
+# real Prometheus, and Grafana loads the provisioned dashboard.
+on:
+  push:
+    branches: [main]
+    paths: &monitoring-inputs
+      - deploy/monitoring/**
+      - deploy/dev/prometheus.yml
+      - crates/gateway/src/**
+      - .github/workflows/ci-monitoring.yml
+  pull_request:
+    paths: *monitoring-inputs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: Rules and dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the alert rules and the Alertmanager configuration
+        run: |
+          docker run --rm -v "$PWD/deploy/monitoring:/m" --entrypoint promtool \
+            prom/prometheus:v3.5.0 check rules /m/alerts.yml
+          docker run --rm -v "$PWD/deploy/monitoring:/m" --entrypoint amtool \
+            prom/alertmanager:v0.28.1 check-config /m/alertmanager.yml
+      - name: Start Prometheus and Grafana
+        run: |
+          docker run -d --name prometheus -p 9090:9090 prom/prometheus:v3.5.0
+          docker run -d --name grafana -p 3000:3000 \
+            -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer \
+            -v "$PWD/deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro" \
+            -v "$PWD/deploy/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
+            grafana/grafana:12.1.1
+          deadline=$((SECONDS + 120))
+          until curl -sf http://127.0.0.1:9090/-/ready >/dev/null \
+             && curl -sf http://127.0.0.1:3000/api/dashboards/uid/pay-stellar >/dev/null; do
+            [ "$SECONDS" -lt "$deadline" ] || { docker logs grafana | tail -50; exit 1; }
+            sleep 2
+          done
+      - name: Check every metric and query
+        env:
+          PROMETHEUS_URL: http://127.0.0.1:9090
+          GRAFANA_URL: http://127.0.0.1:3000
+        run: python3 deploy/monitoring/check.py

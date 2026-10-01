@@ -867,6 +867,10 @@ async fn test_failed_inclusion_is_recorded_with_its_fee(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
 ) {
+    // This test's own recorder: the runtime runs it on one thread.
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
     let h = harness(opts, connect).await;
     let engine = h.engine();
     let installed = engine.install(Kind::ChargeBatch, call(), vec![]).await.unwrap();
@@ -875,6 +879,34 @@ async fn test_failed_inclusion_is_recorded_with_its_fee(
     assert_eq!(
         (resolution.state, resolution.fee_charged, resolution.ledger),
         (State::Failed, Some(1_234), Some(777))
+    );
+    // A failed inclusion is a closed submission, and its fee was paid; asked
+    // again, nothing is counted twice.
+    engine.resolve(installed.id).await.unwrap();
+    // One snapshot: the recorder reports a metric again only once it changes.
+    let snapshot = snapshotter.snapshot().into_vec();
+    let counted = |name: &str, labels: &[(&str, &str)]| -> u64 {
+        snapshot
+            .iter()
+            .filter(|(key, ..)| key.key().name() == name)
+            .filter(|(key, ..)| {
+                labels
+                    .iter()
+                    .all(|(k, v)| key.key().labels().any(|l| l.key() == *k && l.value() == *v))
+            })
+            .map(|(.., value)| match value {
+                metrics_util::debugging::DebugValue::Counter(n) => *n,
+                _ => 0,
+            })
+            .sum()
+    };
+    let kind = ("kind", "charge_batch");
+    assert_eq!(
+        (
+            counted("pay_stellar_submissions_closed_total", &[kind, ("state", "failed")]),
+            counted("pay_stellar_fees_charged_stroops_total", &[kind]),
+        ),
+        (1, 1_234)
     );
 }
 

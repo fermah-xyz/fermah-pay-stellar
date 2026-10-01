@@ -1059,12 +1059,13 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             .map_err(encode)?;
         let ledger =
             i32::try_from(tx.ledger).map_err(|_| EngineError::Corrupt("ledger out of range"))?;
-        sqlx::query!(
+        let closed = sqlx::query!(
             r#"
             UPDATE pay_stellar.submissions
             SET state = $2, ledger = $3, fee_charged = $4, result_xdr = $5,
                 return_value_xdr = $6, resolved_at = now()
             WHERE id = $1 AND state = 'installed'
+            RETURNING kind, created_at
             "#,
             id,
             state.as_str(),
@@ -1073,9 +1074,15 @@ impl<C: Chain, K: Clock> Engine<C, K> {
             result_xdr,
             return_value_xdr,
         )
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(store("record submission outcome"))?;
+        if let Some(closed) = closed {
+            record_closed(&closed.kind, state, closed.created_at);
+            // What inclusion cost, by kind, whether or not it succeeded.
+            metrics::counter!("pay_stellar_fees_charged_stroops_total", "kind" => closed.kind)
+                .increment(u64::try_from(tx.result.fee_charged).unwrap_or(0));
+        }
         resolution_of(&self.load(id).await?)
     }
 
@@ -1101,10 +1108,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         .map_err(store("close submission"))?;
         // Counted once, by whichever call closed the submission.
         if let Some(closed) = closed {
-            let labels = [("kind", closed.kind), ("state", state.as_str().to_owned())];
-            metrics::counter!("pay_stellar_submissions_closed_total", &labels).increment(1);
-            let open_for = (OffsetDateTime::now_utc() - closed.created_at).as_seconds_f64();
-            metrics::histogram!("pay_stellar_submission_seconds", &labels).record(open_for);
+            record_closed(&closed.kind, state, closed.created_at);
         }
         resolution_of(&self.load(id).await?)
     }
@@ -1118,6 +1122,15 @@ pub fn signing_failed(role: &'static str) {
 
 /// [`Engine::authorization_horizon`] of a stored envelope, for readers that
 /// hold the row rather than the engine.
+/// Counts a submission that reached its final `state`, and how long it was
+/// open: included (succeeded or failed) or not (expired, quarantined).
+fn record_closed(kind: &str, state: State, created_at: OffsetDateTime) {
+    let labels = [("kind", kind.to_owned()), ("state", state.as_str().to_owned())];
+    metrics::counter!("pay_stellar_submissions_closed_total", &labels).increment(1);
+    let open_for = (OffsetDateTime::now_utc() - created_at).as_seconds_f64();
+    metrics::histogram!("pay_stellar_submission_seconds", &labels).record(open_for);
+}
+
 pub fn stored_authorization_horizon(envelope_xdr: &str) -> Option<u32> {
     TransactionEnvelope::from_xdr_base64(envelope_xdr, Limits::none())
         .ok()

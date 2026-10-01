@@ -1,0 +1,13 @@
+# Alertmanager for the alert rules in alerts.yml. Alerts are grouped by name
+# and deployment and held in Alertmanager (http://127.0.0.1:9093 in the dev
+# stack). To be told, add a receiver below, e.g. email_configs,
+# slack_configs, pagerduty_configs or webhook_configs, and route critical
+# alerts to it; docs/self-hosting/monitoring.md shows an example.
+route:
+  receiver: hold
+  group_by: [alertname, deployment, seller_deployment_id]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+receivers:
+  - name: hold
