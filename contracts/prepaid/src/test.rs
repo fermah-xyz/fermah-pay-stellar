@@ -11,6 +11,7 @@ extern crate std;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::string::ToString as _;
 
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
@@ -322,12 +323,17 @@ impl World {
     }
 
     fn charge_until(&self, n: u8, id: u64, amount: i128, last_ledger: u32) -> ChargeRequest {
-        ChargeRequest { owner: self.owner_of(n), charge_id: charge_id(id), amount, last_ledger }
+        ChargeRequest {
+            owner: self.owner_of(n).into(),
+            charge_id: charge_id(id),
+            amount,
+            last_ledger,
+        }
     }
 
     fn contract_charge(&self, request: &ChargeRequest) -> Charge {
         Charge(
-            Address::from_str(&self.env, request.owner.as_str()),
+            Address::from_str(&self.env, &request.owner.to_string()),
             BytesN::from_array(&self.env, &request.charge_id),
             request.amount,
             request.last_ledger,
@@ -337,7 +343,7 @@ impl World {
     fn deposit_intent(&self, buyer: &Party, n: u8, amount: i128, deposit: u8) -> DepositIntent {
         let registered = self.owners.borrow_mut().entry(n).or_insert(buyer.address.clone()).clone();
         assert_eq!(registered, buyer.address, "test label {n} names another buyer");
-        DepositIntent { owner: buyer.key.address(), amount, deposit_id: id32(deposit) }
+        DepositIntent { owner: buyer.key.address().into(), amount, deposit_id: id32(deposit) }
     }
 
     fn deposit_args(&self, intent: &DepositIntent, owner: &Address) -> soroban_sdk::Vec<Val> {
@@ -380,9 +386,9 @@ impl World {
 
     fn withdraw_intent(&self, buyer: &Party, amount: i128, to: &Party, id: u8) -> WithdrawIntent {
         WithdrawIntent {
-            owner: buyer.key.address(),
+            owner: buyer.key.address().into(),
             amount,
-            destination: to.key.address(),
+            destination: to.key.address().into(),
             withdrawal_id: id32(id),
         }
     }
@@ -687,7 +693,7 @@ fn test_refused_single_charge_consumes_nothing() {
 
 fn charge_scval(env: &Env, request: &ChargeRequest) -> xdr::ScVal {
     let val: Val = Charge(
-        Address::from_str(env, request.owner.as_str()),
+        Address::from_str(env, &request.owner.to_string()),
         BytesN::from_array(env, &request.charge_id),
         request.amount,
         request.last_ledger,
@@ -1876,13 +1882,13 @@ fn test_gateway_reads_each_settled_charge_from_the_batch_event() {
         decoded,
         [
             SettledEntry {
-                owner: owner.clone(),
+                owner: owner.clone().into(),
                 charge_id: charge_id(1),
                 amount: USDC,
                 outcome: Decoded::Charged,
             },
             SettledEntry {
-                owner,
+                owner: owner.into(),
                 charge_id: charge_id(2),
                 amount: MAX_CHARGE + 1,
                 outcome: Decoded::AboveLimit,
@@ -2165,3 +2171,145 @@ fn test_solvency_tooling_reads_get_totals() {
 
 mod properties;
 mod recurring;
+
+// ---- contract-account buyers ---------------------------------------------
+
+/// A buyer whose wallet is a contract account authorized by one Ed25519
+/// key, as a smart wallet is through its own `__check_auth`.
+struct ContractBuyer {
+    key: SecretKey,
+    address: Address,
+}
+
+impl ContractBuyer {
+    fn owner(&self) -> fermah_pay_stellar_domain::ChainAddress {
+        fermah_pay_stellar_domain::ChainAddress::Contract(contract_bytes(&self.address))
+    }
+}
+
+impl World {
+    /// A new contract account holding `usdc`, which needs no trustline.
+    fn contract_buyer(&self, usdc: i128) -> ContractBuyer {
+        let key = SecretKey::generate().unwrap();
+        let address = self.env.register(
+            fermah_pay_stellar_example_account::ExampleAccount,
+            (BytesN::from_array(&self.env, key.address().public_key()),),
+        );
+        self.env.mock_all_auths();
+        token::StellarAssetClient::new(&self.env, &self.usdc).mint(&address, &usdc);
+        ContractBuyer { key, address }
+    }
+
+    /// `invocation` authorized for the contract account by `signer`'s
+    /// signature of the entry's payload, the credential its `__check_auth`
+    /// takes.
+    fn signed_for_contract(
+        &self,
+        account: &ContractBuyer,
+        signer: &SecretKey,
+        invocation: xdr::SorobanAuthorizedInvocation,
+    ) -> xdr::SorobanAuthorizationEntry {
+        let nonce = self.nonce.get();
+        self.nonce.set(nonce + 1);
+        let mut credentials = xdr::SorobanAddressCredentials {
+            address: xdr::ScAddress::from(&account.address),
+            nonce,
+            signature_expiration_ledger: self.env.ledger().sequence() + 100,
+            signature: xdr::ScVal::Void,
+        };
+        let payload = fermah_pay_stellar_chain::authorization::signature_payload(
+            self.env.ledger().network_id().to_array(),
+            &xdr::SorobanCredentials::AddressV2(credentials.clone()),
+            &invocation,
+        )
+        .unwrap();
+        credentials.signature =
+            xdr::ScVal::Bytes(xdr::ScBytes(signer.sign_raw(&payload).to_vec().try_into().unwrap()));
+        xdr::SorobanAuthorizationEntry {
+            credentials: xdr::SorobanCredentials::AddressV2(credentials),
+            root_invocation: invocation,
+        }
+    }
+
+    fn usdc_of(&self, address: &Address) -> i128 {
+        token::Client::new(&self.env, &self.usdc).balance(address)
+    }
+}
+
+#[test]
+fn test_a_contract_account_deposits_is_charged_and_withdraws_to_itself() {
+    let w = world();
+    let buyer = w.contract_buyer(3 * USDC);
+    let deposit = DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1) };
+    let auth =
+        w.signed_for_contract(&buyer, &buyer.key, w.deployment().deposit_authorization(&deposit));
+    w.invoke::<()>(DEPOSIT, w.deposit_args(&deposit, &buyer.address), &[auth]).unwrap();
+    assert_eq!(
+        (
+            w.usdc_of(&buyer.address),
+            w.usdc_balance(&w.treasury),
+            w.client().get_balance(&buyer.address)
+        ),
+        (USDC, 2 * USDC, 2 * USDC)
+    );
+
+    // The operator charges it like any buyer; the buyer signs nothing.
+    let charge = ChargeRequest {
+        owner: buyer.owner(),
+        charge_id: charge_id(1),
+        amount: USDC / 2,
+        last_ledger: w.env.ledger().sequence() + 1_000,
+    };
+    assert_eq!(w.charge_batch(&[charge]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Charged]);
+
+    // A withdrawal back to the contract account, authorized by it and the
+    // treasury.
+    let withdrawal = WithdrawIntent {
+        owner: buyer.owner(),
+        amount: USDC,
+        destination: buyer.owner(),
+        withdrawal_id: id32(2),
+    };
+    let owner_auth = w.signed_for_contract(
+        &buyer,
+        &buyer.key,
+        w.deployment().owner_withdraw_authorization(&withdrawal),
+    );
+    let treasury_auth =
+        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&withdrawal));
+    w.invoke::<()>(
+        "withdraw",
+        w.withdraw_args(&withdrawal, &buyer.address, &buyer.address),
+        &[owner_auth, treasury_auth],
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            w.usdc_of(&buyer.address),
+            w.usdc_balance(&w.treasury),
+            w.client().get_balance(&buyer.address)
+        ),
+        (2 * USDC, USDC, USDC / 2)
+    );
+}
+
+#[test]
+fn test_a_contract_account_deposit_signed_by_another_key_is_refused() {
+    let w = world();
+    let buyer = w.contract_buyer(3 * USDC);
+    let deposit = DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1) };
+    // The positive control above differs only in the key that signs.
+    let stranger = SecretKey::generate().unwrap();
+    let auth =
+        w.signed_for_contract(&buyer, &stranger, w.deployment().deposit_authorization(&deposit));
+    let refused = w.invoke::<()>(DEPOSIT, w.deposit_args(&deposit, &buyer.address), &[auth]);
+    assert_eq!(refused, Err(auth_failure()));
+    assert_eq!(
+        (
+            w.usdc_of(&buyer.address),
+            w.usdc_balance(&w.treasury),
+            w.client().get_balance(&buyer.address)
+        ),
+        (3 * USDC, 0, 0)
+    );
+}

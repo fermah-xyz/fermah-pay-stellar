@@ -174,8 +174,11 @@ impl Context {
         let FundedBuyer { key: buyer, .. } = self.funded_buyer(DEPOSIT).await?;
         let mut deposit_id = [0_u8; 32];
         getrandom::fill(&mut deposit_id)?;
-        let intent =
-            DepositIntent { owner: buyer.address(), amount: i128::from(DEPOSIT), deposit_id };
+        let intent = DepositIntent {
+            owner: buyer.address().into(),
+            amount: i128::from(DEPOSIT),
+            deposit_id,
+        };
         let function = HostFunction::InvokeContract(pinned.deposit_call(&intent));
         let auth = self
             .authorize(&submitter, &function, &[(&buyer, pinned.deposit_authorization(&intent))])
@@ -186,7 +189,7 @@ impl Context {
         let mut charge_id = [0_u8; 32];
         getrandom::fill(&mut charge_id)?;
         let charges = [ChargeRequest {
-            owner: buyer.address(),
+            owner: buyer.address().into(),
             charge_id,
             amount: i128::from(SMALL),
             last_ledger: self.rpc.get_latest_ledger().await? + CHARGE_VALIDITY_LEDGERS,

@@ -17,7 +17,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     SorobanAuthorizationEntry, SorobanCredentials,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::AccountAddress;
+use fermah_pay_stellar_domain::ChainAddress;
 use uuid::Uuid;
 
 use super::{Worker, WorkerError, address, deployment, hash32, store};
@@ -27,7 +27,7 @@ struct WithdrawalRow {
     id: Uuid,
     withdrawal_id: [u8; 32],
     expiration_ledger: i64,
-    owner: AccountAddress,
+    owner: ChainAddress,
     deployment: PrepaidDeployment,
 }
 

@@ -120,17 +120,16 @@ fn is_event(topics: &[ScVal], name: &[u8]) -> bool {
 pub async fn search_charge<L: EventLog>(
     log: &L,
     contract: &[u8; 32],
-    owner: &AccountAddress,
+    owner: &ChainAddress,
     charge_id: &[u8; 32],
     from: u32,
     to: u32,
 ) -> Result<ChargeSearch, RpcError> {
-    let owner = ChainAddress::Account(owner.clone());
     search(log, contract, b"charges", from, to, |event| match event {
         LedgerEvent::Charges(entries) => Some(
             entries
                 .into_iter()
-                .filter(|entry| entry.owner == owner && entry.charge_id == *charge_id)
+                .filter(|entry| entry.owner == *owner && entry.charge_id == *charge_id)
                 .collect(),
         ),
         _ => None,

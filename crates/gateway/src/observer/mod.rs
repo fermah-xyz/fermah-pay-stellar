@@ -1349,12 +1349,7 @@ async fn bound_role(
 }
 
 fn chain_address(text: &str) -> Result<ChainAddress, ObserverError> {
-    if let Ok(account) = text.parse::<AccountAddress>() {
-        return Ok(ChainAddress::Account(account));
-    }
-    stellar_strkey::Contract::from_string(text)
-        .map(|c| ChainAddress::Contract(c.0))
-        .map_err(|_| ObserverError::Corrupt("stored address"))
+    text.parse().map_err(|_| ObserverError::Corrupt("stored address"))
 }
 
 fn outcome_of(token: &str) -> Result<fermah_pay_stellar_chain::prepaid::Outcome, ObserverError> {

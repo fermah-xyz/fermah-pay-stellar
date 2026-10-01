@@ -2,16 +2,16 @@
 //! from the available balance when the signed entry is stored. The worker
 //! adds the treasury's authorization and submits them.
 
-use fermah_pay_stellar_chain::authorization::{signature_payload, verify_signed_entry};
+use fermah_pay_stellar_chain::authorization::signature_payload;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::WithdrawIntent;
+use fermah_pay_stellar_chain::prepaid::{PrepaidDeployment, WithdrawIntent};
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    Limits, ScAddress, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry,
-    SorobanCredentials, WriteXdr,
+    Limits, ScVal, SorobanAddressCredentials, SorobanAuthorizationEntry, SorobanCredentials,
+    WriteXdr,
 };
-use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::{AccountAddress, IdempotencyKey};
+use fermah_pay_stellar_chain::transaction::ScAddressOf;
+use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey};
 use fermah_pay_stellar_proto::v1::{
     GetWithdrawalRequest, GetWithdrawalResponse, PrepareWithdrawalRequest,
     PrepareWithdrawalResponse, SubmitWithdrawalRequest, SubmitWithdrawalResponse, Withdrawal,
@@ -26,7 +26,7 @@ use super::store::{
 };
 use super::{
     LatestLedger, LedgerApi, corrupt, decode_entry, internal, network_unavailable, parse_amount,
-    parse_id, parse_key, random, record_scope, signature_refusal, timestamp, unsigned, wire_ledger,
+    parse_id, parse_key, random, record_scope, timestamp, unsigned, wire_ledger,
 };
 use crate::auth::scope_of;
 use crate::refusal::Refusal;
@@ -61,7 +61,7 @@ fn signing(record: &WithdrawalRecord, signed: &SorobanAuthorizationEntry) -> Sig
     }
 }
 
-fn parse_destination(raw: &str, wallet: &AccountAddress) -> Result<AccountAddress, Refusal> {
+fn parse_destination(raw: &str, wallet: &ChainAddress) -> Result<ChainAddress, Refusal> {
     if raw.is_empty() {
         return Ok(wallet.clone());
     }
@@ -112,7 +112,7 @@ impl<L> LedgerApi<L> {
         let same_destination = if destination.is_empty() {
             existing.destination == existing.wallet
         } else {
-            existing.destination.as_str() == destination
+            existing.destination.to_string() == destination
         };
         if existing.buyer_id != buyer_id || existing.amount != amount || !same_destination {
             return Err(Refusal::IdempotencyConflict.into());
@@ -181,7 +181,7 @@ impl<L: LatestLedger> LedgerApi<L> {
         };
         let entry = SorobanAuthorizationEntry {
             credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
-                address: ScAddress::Account(account_id(&wallet)),
+                address: wallet.sc_address(),
                 nonce: i64::from_le_bytes(random()?),
                 signature_expiration_ledger: expiration_ledger,
                 signature: ScVal::Void,
@@ -266,16 +266,23 @@ impl<L: LatestLedger> LedgerApi<L> {
         if unsigned(&signed) != prepared {
             return Err(Refusal::AuthorizationMismatch.into());
         }
-        let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
-        verify_signed_entry(
-            &signed,
-            &record.wallet,
-            &prepared.root_invocation,
-            network_id(self.network),
-            latest,
-            self.policy.authorization_validity_ledgers,
-        )
-        .map_err(|refusal| signature_refusal(&refusal, Refusal::WithdrawalExpired))?;
+        let intent = WithdrawIntent {
+            owner: record.wallet.clone(),
+            amount: i128::from(record.amount),
+            destination: record.destination.clone(),
+            withdrawal_id: record.withdrawal_id,
+        };
+        // The treasury's authorization of the transfer out, as the worker
+        // gives it, sending from the treasury's own account.
+        let treasury = |deployment: &PrepaidDeployment| {
+            vec![SorobanAuthorizationEntry {
+                credentials: SorobanCredentials::SourceAccount,
+                root_invocation: deployment.treasury_withdraw_authorization(&intent),
+            }]
+        };
+        self.verify_buyer_entry(&scope, &record.wallet, &signed, &prepared, treasury)
+            .await
+            .map_err(|refusal| refusal.expired_as(Refusal::WithdrawalExpired))?;
 
         let signed_xdr = signed
             .to_xdr_base64(Limits::none())

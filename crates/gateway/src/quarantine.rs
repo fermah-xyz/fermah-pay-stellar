@@ -11,7 +11,7 @@ use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, Outcome, PrepaidDeployment, charge_record, settled_in,
 };
 use fermah_pay_stellar_chain::rpc::{RpcError, TransactionStatus, hex_lower};
-use fermah_pay_stellar_domain::AccountAddress;
+use fermah_pay_stellar_domain::ChainAddress;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -25,7 +25,7 @@ pub struct QuarantinedCharge {
     pub id: Uuid,
     pub buyer_id: Uuid,
     pub seller_deployment_id: Uuid,
-    pub owner: AccountAddress,
+    pub owner: ChainAddress,
     pub charge_id: [u8; 32],
     pub last_ledger: u32,
     /// The last ledger in which the authorization of the batch that carried
@@ -77,7 +77,7 @@ pub enum QuarantineError {
     #[error("transaction {0} is not a successful transaction known to the node")]
     TransactionNotSucceeded(String),
     #[error("transaction {hash} settles no charge {charge} of {owner}")]
-    NotInTransaction { hash: String, owner: AccountAddress, charge: String },
+    NotInTransaction { hash: String, owner: ChainAddress, charge: String },
     #[error("transaction {hash} settled charge {charge} for {found}, not {expected}")]
     AmountMismatch { hash: String, charge: String, found: i128, expected: i64 },
     #[error("transaction {hash} answered {outcome} for charge {charge}, which settles nothing")]

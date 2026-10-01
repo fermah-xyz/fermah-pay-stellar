@@ -525,6 +525,25 @@ impl RpcClient {
         source: &AccountAddress,
         call: InvokeContractArgs,
     ) -> Result<Option<ScVal>, RpcError> {
+        match self.simulate_call(source, call, vec![], AuthMode::Record).await? {
+            SimulationOutcome::Succeeded(simulation) => Ok(simulation.result),
+            SimulationOutcome::Failed { error, .. } => Err(RpcError::SimulationRefused(error)),
+            SimulationOutcome::RestoreRequired { .. } => {
+                Err(RpcError::SimulationRefused("the contract's state is archived".to_owned()))
+            }
+        }
+    }
+
+    /// Simulates `call` from `source` carrying `auth`, checked as `auth_mode`
+    /// says. `source` must be an existing account; nothing is signed or
+    /// sent, so its sequence number only makes the transaction well formed.
+    pub async fn simulate_call(
+        &self,
+        source: &AccountAddress,
+        call: InvokeContractArgs,
+        auth: Vec<SorobanAuthorizationEntry>,
+        auth_mode: AuthMode,
+    ) -> Result<SimulationOutcome, RpcError> {
         const METHOD: &str = "simulateTransaction";
         let key = LedgerKey::Account(LedgerKeyAccount {
             account_id: crate::transaction::account_id(source),
@@ -545,20 +564,14 @@ impl RpcClient {
             source,
             sequence + 1,
             HostFunction::InvokeContract(call),
-            vec![],
+            auth,
             100,
             u64::MAX,
         )
         .map_err(|e| RpcError::Decode { method: METHOD, detail: e.to_string() })?;
         let envelope =
             TransactionEnvelope::Tx(TransactionV1Envelope { tx, signatures: VecM::default() });
-        match self.simulate_transaction(&envelope, AuthMode::Record).await? {
-            SimulationOutcome::Succeeded(simulation) => Ok(simulation.result),
-            SimulationOutcome::Failed { error, .. } => Err(RpcError::SimulationRefused(error)),
-            SimulationOutcome::RestoreRequired { .. } => {
-                Err(RpcError::SimulationRefused("the contract's state is archived".to_owned()))
-            }
-        }
+        self.simulate_transaction(&envelope, auth_mode).await
     }
 
     pub async fn simulate_transaction(

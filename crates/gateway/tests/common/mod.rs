@@ -5,14 +5,14 @@
 #![allow(dead_code, clippy::unwrap_used)]
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use fermah_pay_stellar_chain::rpc::{
     ContractEventRecord, EventCursor, EventPage, EventsFrom, RpcError,
 };
-use fermah_pay_stellar_chain::stellar_xdr::ScVal;
-use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_chain::stellar_xdr::{InvokeContractArgs, ScVal, SorobanAuthorizationEntry};
+use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance;
 use fermah_pay_stellar_gateway::ledger::{LatestLedger, LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
@@ -29,9 +29,18 @@ pub const CHARGE_VALIDITY_LEDGERS: u32 = 720;
 pub const MIN_MANDATE_PERIOD_SECS: u64 = 60;
 pub const MAX_MANDATE_LEDGERS: u32 = 3_000_000;
 
-/// The latest ledger the API sees; `None` makes every read fail.
+/// The latest ledger the API sees (0 makes every read fail), and the
+/// network's answer to a contract account's authorization.
 #[derive(Clone, Default)]
-pub struct Ledger(Arc<AtomicU32>);
+pub struct Ledger(Arc<AtomicU32>, Arc<Mutex<Simulations>>);
+
+/// Calls simulated for contract accounts, and how the network answers.
+#[derive(Default)]
+pub struct Simulations {
+    /// The network's reason to refuse every call; `None` accepts them.
+    pub refusal: Option<String>,
+    pub seen: Vec<(AccountAddress, InvokeContractArgs, Vec<SorobanAuthorizationEntry>)>,
+}
 
 impl Ledger {
     pub fn set(&self, ledger: u32) {
@@ -40,6 +49,10 @@ impl Ledger {
 
     pub fn get(&self) -> u32 {
         self.0.load(Ordering::SeqCst)
+    }
+
+    pub fn simulations(&self) -> std::sync::MutexGuard<'_, Simulations> {
+        self.1.lock().unwrap()
     }
 }
 
@@ -57,6 +70,17 @@ impl LatestLedger for Ledger {
 
     async fn latest_close_time(&self) -> Result<i64, RpcError> {
         Ok(time::OffsetDateTime::now_utc().unix_timestamp())
+    }
+
+    async fn refusal_of(
+        &self,
+        source: &AccountAddress,
+        call: InvokeContractArgs,
+        auth: Vec<SorobanAuthorizationEntry>,
+    ) -> Result<Option<String>, RpcError> {
+        let mut simulations = self.simulations();
+        simulations.seen.push((source.clone(), call, auth));
+        Ok(simulations.refusal.clone())
     }
 }
 

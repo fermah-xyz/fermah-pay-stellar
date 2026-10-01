@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use fermah_pay_stellar_domain::AccountAddress;
 
 use crate::keys::SecretKey;
+use crate::transaction::ScAddressOf;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AuthorizationError {
@@ -238,15 +239,60 @@ pub fn verify_signed_entry(
     current_ledger: u32,
     max_validity_ledgers: u32,
 ) -> Result<(), SignedEntryRefusal> {
+    let creds = verify_entry_terms(
+        entry,
+        &signer.sc_address(),
+        invocation,
+        current_ledger,
+        max_validity_ledgers,
+    )?;
+    let (public_key, signature) =
+        single_signature(&creds.signature).ok_or(SignedEntryRefusal::UnsupportedSignature)?;
+    if public_key != *signer.public_key() {
+        return Err(SignedEntryRefusal::UnsupportedSignature);
+    }
+    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)
+        .map_err(|_| SignedEntryRefusal::NotAnAddressEntry)?;
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| SignedEntryRefusal::BadSignature)?;
+    key.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&signature))
+        .map_err(|_| SignedEntryRefusal::BadSignature)
+}
+
+/// [`verify_signed_entry`] for a contract account, which authorizes through
+/// its own `__check_auth` with a credential only it interprets: everything
+/// but the signature is checked here. Whether the signature satisfies the
+/// account is the network's to say, by simulating the call with the entry
+/// in enforcing mode before it is accepted.
+pub fn verify_contract_entry(
+    entry: &SorobanAuthorizationEntry,
+    contract: &[u8; 32],
+    invocation: &SorobanAuthorizedInvocation,
+    current_ledger: u32,
+    max_validity_ledgers: u32,
+) -> Result<(), SignedEntryRefusal> {
+    let signer = ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash(*contract)));
+    verify_entry_terms(entry, &signer, invocation, current_ledger, max_validity_ledgers).map(|_| ())
+}
+
+/// The checks every returned entry passes whoever signs it: address
+/// credentials for `signer`, the prepared invocation, and an expiration
+/// that is live but not beyond `max_validity_ledgers` from now.
+fn verify_entry_terms<'a>(
+    entry: &'a SorobanAuthorizationEntry,
+    signer: &ScAddress,
+    invocation: &SorobanAuthorizedInvocation,
+    current_ledger: u32,
+    max_validity_ledgers: u32,
+) -> Result<&'a SorobanAddressCredentials, SignedEntryRefusal> {
     let creds = match &entry.credentials {
         SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds) => creds,
         SorobanCredentials::SourceAccount | SorobanCredentials::AddressWithDelegates(_) => {
             return Err(SignedEntryRefusal::NotAnAddressEntry);
         }
     };
-    match &creds.address {
-        ScAddress::Account(account) if crate::transaction::address_of(account) == *signer => {}
-        _ => return Err(SignedEntryRefusal::WrongSigner),
+    if creds.address != *signer {
+        return Err(SignedEntryRefusal::WrongSigner);
     }
     if entry.root_invocation != *invocation {
         return Err(SignedEntryRefusal::InvocationMismatch);
@@ -259,18 +305,7 @@ pub fn verify_signed_entry(
     if expiration > latest {
         return Err(SignedEntryRefusal::ValidityTooLong { expiration, latest });
     }
-
-    let (public_key, signature) =
-        single_signature(&creds.signature).ok_or(SignedEntryRefusal::UnsupportedSignature)?;
-    if public_key != *signer.public_key() {
-        return Err(SignedEntryRefusal::UnsupportedSignature);
-    }
-    let payload = signature_payload(network_id, &entry.credentials, &entry.root_invocation)
-        .map_err(|_| SignedEntryRefusal::NotAnAddressEntry)?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
-        .map_err(|_| SignedEntryRefusal::BadSignature)?;
-    key.verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&signature))
-        .map_err(|_| SignedEntryRefusal::BadSignature)
+    Ok(creds)
 }
 
 /// The `(public_key, signature)` of a signature value holding exactly one
@@ -580,5 +615,56 @@ mod tests {
             creds.signature = signature;
         }
         assert_eq!(check(&forged, &buyer), Err(SignedEntryRefusal::UnsupportedSignature));
+    }
+
+    /// An entry for the contract account `account`, its credential an
+    /// opaque value only that account interprets.
+    fn contract_entry(account: [u8; 32], expiration: u32) -> SorobanAuthorizationEntry {
+        SorobanAuthorizationEntry {
+            credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
+                address: ScAddress::Contract(ContractId(stellar_xdr::Hash(account))),
+                nonce: 7,
+                signature_expiration_ledger: expiration,
+                signature: ScVal::Bytes(ScBytes(vec![5_u8; 64].try_into().unwrap())),
+            }),
+            root_invocation: invocation("deposit"),
+        }
+    }
+
+    #[test]
+    fn test_contract_entry_terms_are_checked_without_its_signature() {
+        let check = |entry: &SorobanAuthorizationEntry, current: u32| {
+            verify_contract_entry(entry, &[3; 32], &invocation("deposit"), current, 200)
+        };
+        assert_eq!(check(&contract_entry([3; 32], 1_100), 1_000), Ok(()));
+        assert_eq!(
+            check(&contract_entry([4; 32], 1_100), 1_000),
+            Err(SignedEntryRefusal::WrongSigner)
+        );
+        let mut other_call = contract_entry([3; 32], 1_100);
+        other_call.root_invocation = invocation("withdraw");
+        assert_eq!(check(&other_call, 1_000), Err(SignedEntryRefusal::InvocationMismatch));
+        assert_eq!(
+            check(&contract_entry([3; 32], 1_100), 1_101),
+            Err(SignedEntryRefusal::Expired { expiration: 1_100, current: 1_101 })
+        );
+        assert_eq!(
+            check(&contract_entry([3; 32], 1_300), 1_000),
+            Err(SignedEntryRefusal::ValidityTooLong { expiration: 1_300, latest: 1_200 })
+        );
+    }
+
+    #[test]
+    fn test_a_classic_account_entry_is_not_a_contract_accounts() {
+        let key = SecretKey::generate().unwrap();
+        assert_eq!(
+            verify_contract_entry(&prepared(&key), &[3; 32], &invocation("deposit"), 1_000, 200),
+            Err(SignedEntryRefusal::WrongSigner)
+        );
+        // Nor does a contract account's entry pass as a classic account's.
+        assert_eq!(
+            check(&contract_entry([3; 32], 1_100), &key),
+            Err(SignedEntryRefusal::WrongSigner)
+        );
     }
 }

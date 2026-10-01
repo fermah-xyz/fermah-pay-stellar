@@ -7,8 +7,8 @@ use stellar_strkey::Strkey;
 ///
 /// Muxed (`M...`) and contract (`C...`) addresses are rejected rather than
 /// normalised: a muxed address would silently collapse distinct buyers onto
-/// one underlying account, and contract accounts authorize through
-/// `__check_auth`, which the buyer signing flow does not support.
+/// one underlying account. A contract address is a
+/// [`crate::ChainAddress`], where one is accepted.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AccountAddress {
     public_key: [u8; 32],

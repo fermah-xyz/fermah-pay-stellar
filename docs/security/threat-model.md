@@ -49,6 +49,28 @@ buyer's wallet, which the key controls anyway.
 
 **Left.** Whoever holds the key can pay the seller with the buyer's credit, as the buyer could.
 
+## Hostile contract-account wallet
+
+**Can.** A buyer's wallet may be a [contract account](../api/ledger.md#contract-accounts),
+whose `__check_auth` is code its owner wrote. It runs when the gateway
+simulates the buyer's entry and again in the worker's transaction, which the
+operator pays for. Its owner can make it expensive, or accept an entry and
+then refuse it once the transaction is sent.
+
+**Stopped by.**
+- The network's per-transaction resource limits bound what one call costs.
+- An entry is accepted only after the network runs it in simulation, and the worker simulates again before sending.
+- Deposits and withdrawals count against the same per-buyer and per-deployment quotas and fee-account floor as any other.
+- Mandates and x402 do not accept contract accounts.
+
+**Seen.** `PayStellarFeeBurnHigh`, `PayStellarSubmissionsNotLanding`, and
+fees by kind on the dashboard.
+
+**Response.** Remove the buyer, or lower the deployment's quotas.
+
+**Left.** Up to the quotas a day of fees for transactions that fail. No
+USDC moves without the contract's checks.
+
 ## SAC allowance manipulation
 
 **Can.** A mandate approves the ledger contract, in the USDC contract, to move up to the mandate's total from the buyer's wallet until its last ledger.

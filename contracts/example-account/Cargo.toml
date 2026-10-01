@@ -1,6 +1,6 @@
 [package]
-name = "fermah-pay-stellar-prepaid"
-description = "Soroban prepaid ledger: buyer credit and seller revenue over USDC held in a separate treasury"
+name = "fermah-pay-stellar-example-account"
+description = "A minimal Soroban contract account authorized by one Ed25519 key: a stand-in for a smart wallet in tests and testnet evidence"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,8 +16,4 @@ doctest = false
 soroban-sdk = "28.0.0"
 
 [dev-dependencies]
-fermah-pay-stellar-chain.workspace = true
-fermah-pay-stellar-example-account = { path = "../example-account" }
-fermah-pay-stellar-domain.workspace = true
-proptest.workspace = true
 soroban-sdk = { version = "28.0.0", features = ["testutils"] }

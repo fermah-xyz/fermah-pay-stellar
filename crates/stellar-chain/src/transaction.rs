@@ -1,6 +1,6 @@
 //! Transaction envelope construction and signing.
 
-use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, Network};
 use stellar_xdr::{
     AccountId, DecoratedSignature, MuxedAccount, PublicKey, Transaction, TransactionEnvelope,
     TransactionSignaturePayload, TransactionSignaturePayloadTaggedTransaction,
@@ -85,6 +85,44 @@ pub fn muxed_account(address: &AccountAddress) -> MuxedAccount {
 pub fn address_of(account: &AccountId) -> AccountAddress {
     let AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(key))) = account;
     AccountAddress::from_public_key(*key)
+}
+
+/// What a contract call names an address by.
+pub trait ScAddressOf {
+    fn sc_address(&self) -> stellar_xdr::ScAddress;
+}
+
+impl ScAddressOf for AccountAddress {
+    fn sc_address(&self) -> stellar_xdr::ScAddress {
+        stellar_xdr::ScAddress::Account(account_id(self))
+    }
+}
+
+impl ScAddressOf for ChainAddress {
+    fn sc_address(&self) -> stellar_xdr::ScAddress {
+        match self {
+            Self::Account(account) => account.sc_address(),
+            Self::Contract(id) => {
+                stellar_xdr::ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash(*id)))
+            }
+        }
+    }
+}
+
+/// `value` as an account or a contract; `None` for the other kinds of
+/// address (muxed, claimable balance, liquidity pool), which own nothing in
+/// the ledger contract.
+#[must_use]
+pub fn chain_address(value: &stellar_xdr::ScAddress) -> Option<ChainAddress> {
+    match value {
+        stellar_xdr::ScAddress::Account(account) => {
+            Some(ChainAddress::Account(address_of(account)))
+        }
+        stellar_xdr::ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash(id))) => {
+            Some(ChainAddress::Contract(*id))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     SorobanCredentials,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::{AccountAddress, Network};
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, Network};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -136,7 +136,7 @@ fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> WorkerError {
     move |source| WorkerError::Store { operation, source }
 }
 
-fn address(raw: &str) -> Result<AccountAddress, WorkerError> {
+fn address<A: std::str::FromStr>(raw: &str) -> Result<A, WorkerError> {
     raw.parse().map_err(|_| WorkerError::Corrupt("address outside the CHECK constraint"))
 }
 
@@ -196,7 +196,7 @@ fn settled(outcome: Outcome) -> Option<ChargeDecision> {
 
 /// A charge whose settlement is looked for in the contract's events.
 struct SettledCharge<'a> {
-    owner: &'a AccountAddress,
+    owner: &'a ChainAddress,
     charge_id: &'a [u8; 32],
     amount: i64,
     last_ledger: i64,
@@ -211,7 +211,7 @@ struct DepositRow {
     id: Uuid,
     deposit_id: [u8; 32],
     expiration_ledger: i64,
-    owner: AccountAddress,
+    owner: ChainAddress,
     deployment: PrepaidDeployment,
 }
 
