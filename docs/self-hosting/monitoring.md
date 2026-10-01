@@ -8,13 +8,36 @@ Every process writes JSON logs to stdout, exports traces over OTLP, and serves P
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | all | export traces over OTLP/gRPC to this collector (for example `http://otel-collector:4317`); not exported when unset |
 | `PAY_STELLAR_METRICS_ADDR` | gateway, worker, observer | serve Prometheus metrics at `/metrics` on this address (for example `0.0.0.0:9464`); not served when unset |
 
-Scrape each process under a job named `pay-stellar-<process>`, and load the alert rules in [`deploy/monitoring/alerts.yml`](../../deploy/monitoring/alerts.yml).
+Scrape each process under a job named `pay-stellar-<process>`, and load the alert rules in [`deploy/monitoring/alerts.yml`](../../deploy/monitoring/alerts.yml). What each part of this watches, and why, is in the [monitoring plan](monitoring-plan.md).
+
+## Dashboard and alert delivery
+
+[`deploy/monitoring/`](../../deploy/monitoring) also holds a Grafana dashboard (`grafana/dashboards/pay-stellar.json`, with its provisioning) and an Alertmanager configuration. The dashboard has a row per threat the [threat model](../security/threat-model.md) names, plus health, solvency and charge patterns. The [dev stack](../quickstart/dev-stack.md)'s `monitoring` profile runs Prometheus, Alertmanager and Grafana with them.
+
+Alertmanager as shipped holds alerts without sending them anywhere. To be told, give it a receiver and route the alerts to it, for example:
+
+```yaml
+route:
+  receiver: operators
+  group_by: [alertname, deployment, seller_deployment_id]
+  routes:
+    - matchers: [severity="critical"]
+      receiver: operators
+      repeat_interval: 1h
+receivers:
+  - name: operators
+    webhook_configs:
+      - url: https://alerts.example/hook
+```
+
+The `Monitoring` workflow checks that every rule and dashboard query names a metric the code emits, that each query parses on Prometheus, and that Grafana loads the dashboard (`deploy/monitoring/check.py`).
 
 ## Metrics
 
 | Metric | Process | Meaning |
 |---|---|---|
 | `pay_stellar_submissions_closed_total{kind,state}` | worker | transactions that reached a final state: `succeeded`, `failed`, `expired`, `quarantined` |
+| `pay_stellar_fees_charged_stroops_total{kind}` | worker | fees the network charged for included transactions, succeeded or failed, by kind |
 | `pay_stellar_submission_seconds{kind,state}` | worker | time from building a transaction to its final state |
 | `pay_stellar_submissions_in_flight` | worker | transactions whose outcome is still open |
 | `pay_stellar_inclusion_bid_stroops` | worker | inclusion bid per operation of the last transaction built |
@@ -57,6 +80,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarChargeVolumeUnusual` | warning | A deployment admitted more than three times its usual hourly charge amount. Confirm with the seller; if unexpected, revoke its API key and lower its daily limits ([limits](limits.md)) |
 | `PayStellarWithdrawalsToOtherAccounts` | warning | A withdrawal to an account other than the buyer's wallet was prepared; confirm it was intended |
 | `PayStellarDeploymentQuotaReached` | warning | A deployment reached a daily quota; check its traffic before raising the quota ([limits](limits.md)) |
+| `PayStellarFeeBurnHigh` | warning | The worker paid more than 50 XLM of fees in an hour. See fees by kind on the dashboard: a burst of small deposits or mandates, or bids far above the network's, burns the fee account ([limits](limits.md)) |
 | `PayStellarSourceSequenceTaken` | critical | A transaction the worker did not send used a source account's sequence: its key is exposed. Rotate it ([limits](limits.md#source-accounts)) |
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |
 | `PayStellarFeeAccountLow` | warning | Fund the fee account before it reaches the floor. The rule assumes the default floor of 10 XLM; adjust it if `PAY_STELLAR_FEE_FLOOR_STROOPS` differs |

@@ -51,6 +51,12 @@ groups:
         annotations:
           summary: "A deployment reached its daily quota ({{ $labels.reason }})"
           action: "A burst of small deposits, mandates or buyers costs the operator fees: check the deployment's traffic before raising the quota"
+      - alert: PayStellarFeeBurnHigh
+        expr: sum(increase(pay_stellar_fees_charged_stroops_total[1h])) > 500000000
+        labels: { severity: warning }
+        annotations:
+          summary: "The worker paid more than 50 XLM of fees in the last hour"
+          action: "Check fees by kind on the dashboard: a burst of small deposits or mandates, or bids far above the network's, burns the fee account"
       - alert: PayStellarSourceSequenceTaken
         expr: sum by (source) (increase(pay_stellar_source_sequence_taken_total[1h])) > 0
         labels: { severity: critical }

@@ -6,7 +6,7 @@
 - the gateway, with gRPC and the x402 interface;
 - the settlement worker;
 - the chain observer;
-- optionally, Prometheus with the [alert rules](../self-hosting/monitoring.md).
+- optionally, Prometheus with the [alert rules](../self-hosting/monitoring.md), Alertmanager, and Grafana with the [dashboard](../self-hosting/monitoring.md#dashboard-and-alert-delivery).
 
 It is for development, not a production deployment.
 
@@ -23,7 +23,7 @@ The profile is mounted read-only. The key files keep their `0600` mode, and the 
 ## Up
 
 ```bash
-just dev-up                         # `just dev-up --profile monitoring` adds Prometheus
+just dev-up                         # `just dev-up --profile monitoring` adds Prometheus, Alertmanager and Grafana
 just dev-logs gateway worker        # follow the logs
 ```
 
@@ -42,6 +42,8 @@ Later starts reuse them. The database lives in a Docker volume, so `just dev-dow
 | Metrics: gateway, worker, observer | `http://127.0.0.1:9101/metrics`, `:9102`, `:9103` |
 | PostgreSQL (owner `pay_stellar_owner` / `dev-owner`) | `127.0.0.1:55434` |
 | Prometheus (monitoring profile) | `http://127.0.0.1:9090` |
+| Alertmanager (monitoring profile) | `http://127.0.0.1:9093` |
+| Grafana (monitoring profile) | `http://127.0.0.1:3000`, the dashboard as its home page |
 
 ## Calling the API
 
