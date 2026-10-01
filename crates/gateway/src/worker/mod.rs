@@ -1203,11 +1203,29 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         let function = HostFunction::InvokeContract(deployment.deposit_call(&intent));
         let prepared = match self.engine.prepare(Kind::Deposit, function, vec![entry]).await {
             Ok(prepared) => prepared,
-            Err(EngineError::RestoreRequired(restore)) => {
+            // The restore a buyer's transaction needs is bounded like the
+            // transaction itself: a contract-account wallet's own state can
+            // be what is archived.
+            Err(EngineError::RestoreRequired(restore))
+                if self.engine.check_buyer_resource_fee(restore.min_resource_fee).is_ok() =>
+            {
                 return self.restore(&restore, row.id).await;
             }
-            Err(error @ EngineError::SimulationFailed(_)) => {
-                tracing::warn!(deposit_id = %row.id, error = %error, "network refused the deposit in simulation");
+            Err(EngineError::RestoreRequired(restore)) => {
+                let error = EngineError::ResourceFeeAboveCap {
+                    fee: restore.min_resource_fee,
+                    cap: self.engine.max_buyer_resource_fee(),
+                };
+                tracing::warn!(deposit_id = %row.id, error = %error, "the deposit's restore costs too much");
+                self.note_deposit(row.id, &error.to_string()).await?;
+                self.set_aside(row.id);
+                return Ok(None);
+            }
+            Err(
+                error
+                @ (EngineError::SimulationFailed(_) | EngineError::ResourceFeeAboveCap { .. }),
+            ) => {
+                tracing::warn!(deposit_id = %row.id, error = %error, "network refused the deposit in simulation, or it costs too much");
                 self.note_deposit(row.id, &error.to_string()).await?;
                 self.set_aside(row.id);
                 return Ok(None);

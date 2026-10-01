@@ -89,6 +89,14 @@ labels! {
     }
 }
 
+impl Kind {
+    /// Whether a buyer's authorization is part of the transaction: the
+    /// buyer's wallet, which may be a contract account, takes part in it.
+    const fn carries_buyer_authorization(self) -> bool {
+        matches!(self, Self::Deposit | Self::Withdrawal | Self::Mandate | Self::Revocation)
+    }
+}
+
 labels! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum State as as_str {
@@ -174,6 +182,11 @@ impl Keys {
     }
 }
 
+/// 1 XLM: an order of magnitude above a deposit that creates the buyer's
+/// account on the contract, the costliest buyer transaction this system
+/// builds for a classic account.
+pub const DEFAULT_MAX_BUYER_RESOURCE_FEE: i64 = 10_000_000;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Policy {
     /// How each envelope's inclusion bid is chosen.
@@ -187,6 +200,11 @@ pub struct Policy {
     /// `validity`: a clock that far behind builds envelopes whose window has
     /// already closed on the network.
     pub max_clock_skew: Duration,
+    /// Largest resource fee, in stroops, of a transaction a buyer's
+    /// authorization is part of, and of a restore one needs. A buyer whose
+    /// wallet is a contract account runs its own code in that transaction,
+    /// and the operator pays for what it does; nothing else bounds it.
+    pub max_buyer_resource_fee: i64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +221,8 @@ pub enum EngineError {
     SimulationFailed(String),
     #[error("archived ledger state must be restored before this call")]
     RestoreRequired(Box<Restore>),
+    #[error("the transaction needs a resource fee of {fee} stroops, above the {cap} a buyer's may")]
+    ResourceFeeAboveCap { fee: i64, cap: i64 },
     #[error("assembling the transaction")]
     Assembly(#[source] AssemblyError),
     #[error("signing the transaction")]
@@ -445,6 +465,9 @@ impl<C: Chain, K: Clock> Engine<C, K> {
                     })));
                 }
             };
+        if kind.carries_buyer_authorization() {
+            self.check_buyer_resource_fee(simulation.min_resource_fee)?;
+        }
         let tx = soroban::assemble(
             unassembled,
             simulation.transaction_data,
@@ -453,6 +476,22 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         )
         .map_err(EngineError::Assembly)?;
         self.seal(kind, slot, tx).await
+    }
+
+    /// Refuses a resource fee above what a buyer's transaction may cost,
+    /// including the restore one needs: one built for a contract-account
+    /// wallet runs that account's code, which the operator pays for.
+    #[must_use]
+    pub const fn max_buyer_resource_fee(&self) -> i64 {
+        self.policy.max_buyer_resource_fee
+    }
+
+    pub fn check_buyer_resource_fee(&self, fee: i64) -> Result<(), EngineError> {
+        let cap = self.policy.max_buyer_resource_fee;
+        if fee > cap {
+            return Err(EngineError::ResourceFeeAboveCap { fee, cap });
+        }
+        Ok(())
     }
 
     /// Builds a transaction extending the life of `keys` to `extend_to`

@@ -263,6 +263,8 @@ impl Context {
                 min_mandate_period_secs: 60,
                 max_mandate_ledgers: 3_000_000,
                 withdrawals_to_other_accounts: false,
+                max_buyer_resource_fee:
+                    fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         );
         let mut gateway_stop = stopped.clone();
@@ -295,6 +297,8 @@ impl Context {
                 resource_fee_margin_percent: 20,
                 validity: Duration::from_secs(60),
                 max_clock_skew: Duration::from_secs(20),
+                max_buyer_resource_fee:
+                    fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         );
         let worker = Worker::new(

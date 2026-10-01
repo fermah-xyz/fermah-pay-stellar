@@ -101,6 +101,17 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_MAX_MANDATE_LEDGERS", default_value = "3000000")]
     pub max_mandate_ledgers: u32,
 
+    /// Largest resource fee, in stroops, of a contract-account buyer's
+    /// deposit or withdrawal, as its simulation reports it: the account runs
+    /// its own code in it at the operator's expense. The worker applies the
+    /// same bound to what it sends; set both alike.
+    #[arg(
+        long,
+        env = "PAY_STELLAR_MAX_BUYER_RESOURCE_FEE_STROOPS",
+        default_value_t = crate::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE
+    )]
+    pub max_buyer_resource_fee_stroops: i64,
+
     /// Requests processed at once, across all connections. Every request,
     /// authenticated or not, costs a database lookup, so this bounds the
     /// load unauthenticated traffic can put on the database; rate limiting

@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
             min_mandate_period_secs: config.min_mandate_period_secs,
             max_mandate_ledgers: config.max_mandate_ledgers,
             withdrawals_to_other_accounts: config.withdrawals_to_other_accounts,
+            max_buyer_resource_fee: config.max_buyer_resource_fee_stroops,
         },
     );
     let listener = TcpListener::bind(config.listen_addr)

@@ -415,9 +415,26 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     ) -> Result<Option<Uuid>, WorkerError> {
         let prepared = match self.engine.prepare(kind, function, vec![entry]).await {
             Ok(prepared) => prepared,
-            Err(EngineError::RestoreRequired(restore)) => return self.restore(&restore, id).await,
-            Err(error @ EngineError::SimulationFailed(_)) => {
-                tracing::warn!(id = %id, table, error = %error, "network refused it in simulation");
+            Err(EngineError::RestoreRequired(restore))
+                if self.engine.check_buyer_resource_fee(restore.min_resource_fee).is_ok() =>
+            {
+                return self.restore(&restore, id).await;
+            }
+            Err(EngineError::RestoreRequired(restore)) => {
+                let error = EngineError::ResourceFeeAboveCap {
+                    fee: restore.min_resource_fee,
+                    cap: self.engine.max_buyer_resource_fee(),
+                };
+                tracing::warn!(id = %id, table, error = %error, "its restore costs too much");
+                self.note(table, id, &error.to_string()).await?;
+                self.set_aside(id);
+                return Ok(None);
+            }
+            Err(
+                error
+                @ (EngineError::SimulationFailed(_) | EngineError::ResourceFeeAboveCap { .. }),
+            ) => {
+                tracing::warn!(id = %id, table, error = %error, "network refused it in simulation, or it costs too much");
                 self.note(table, id, &error.to_string()).await?;
                 self.set_aside(id);
                 return Ok(None);

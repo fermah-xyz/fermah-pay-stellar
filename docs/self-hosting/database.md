@@ -103,6 +103,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_MAX_INCLUSION_FEE` | highest inclusion bid per operation, in stroops, default 1000000 (0.1 XLM); equal to the lowest for a fixed bid |
 | Worker | `PAY_STELLAR_INCLUSION_FEE_PERCENTILE` | percentile of recent Soroban inclusion fees to bid at: `10` to `90` in steps of 10, `95`, `99` or `max`; default `90` |
 | Worker | `PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT` | headroom over the simulated resource fee, default 20; the unused part is refunded |
+| Gateway, worker | `PAY_STELLAR_MAX_BUYER_RESOURCE_FEE_STROOPS` | largest resource fee of a deposit, withdrawal, mandate or revocation, or of a restore one needs, default 10000000 (1 XLM); set both alike. A contract-account wallet runs its own code in these at the operator's expense; above the bound the gateway refuses the entry (`wallet_too_costly`) and the worker does not send it ([threat model](../security/threat-model.md#hostile-contract-account-wallet)) |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 98, default 98 |
 | Worker | `PAY_STELLAR_BUSY_POLL_MILLIS`, `PAY_STELLAR_IDLE_POLL_MILLIS` | wait between settlement rounds while there is work (default 1000) and while there is none (default 2000) |

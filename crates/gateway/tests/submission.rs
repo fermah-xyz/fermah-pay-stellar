@@ -391,6 +391,8 @@ impl Harness {
                 resource_fee_margin_percent: 15,
                 validity: VALIDITY,
                 max_clock_skew: MAX_SKEW,
+                max_buyer_resource_fee:
+                    fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         )
     }
@@ -415,6 +417,8 @@ impl Harness {
                 resource_fee_margin_percent: 15,
                 validity: VALIDITY,
                 max_clock_skew: MAX_SKEW,
+                max_buyer_resource_fee:
+                    fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         )
     }
@@ -832,6 +836,8 @@ async fn test_a_source_whose_sequence_was_taken_is_left_out_while_another_is_fre
             resource_fee_margin_percent: 15,
             validity: VALIDITY,
             max_clock_skew: MAX_SKEW,
+            max_buyer_resource_fee:
+                fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
         },
     );
     let owner = h.owner.clone();
