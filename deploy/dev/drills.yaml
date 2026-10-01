@@ -1,0 +1,21 @@
+# Settings for the monitoring drills (`fermah-pay-stellar-testnet drill`,
+# docs/self-hosting/monitoring-drills.md), layered over compose.yaml by
+# `just dev-drills-up`. Each makes a condition a threat leaves observable
+# within minutes rather than hours; none belongs in a real deployment.
+services:
+  gateway:
+    environment:
+      # The buyer-key drill prepares a withdrawal to another account.
+      PAY_STELLAR_WITHDRAWALS_TO_OTHER_ACCOUNTS: "true"
+      # The dust drill reaches this quota; the buyer-key drill uses one of
+      # the deposits.
+      PAY_STELLAR_MAX_DEPOSITS_PER_DEPLOYMENT_PER_DAY: "4"
+  observer:
+    environment:
+      # Judge a charge the gateway never admitted one minute after its
+      # ledger, rather than two hours.
+      PAY_STELLAR_OBSERVER_SETTLE_WITHIN_SECS: "60"
+      PAY_STELLAR_OBSERVER_RECONCILE_SECS: "20"
+      # The admin-code drill: code the contract does not run, as the
+      # observer would see after an upgrade nobody planned.
+      PAY_STELLAR_EXPECTED_WASM: "${DRILL_CONTRACT:?set by just dev-drills-up}:0000000000000000000000000000000000000000000000000000000000000000"

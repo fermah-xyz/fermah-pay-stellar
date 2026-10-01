@@ -30,7 +30,7 @@ receivers:
       - url: https://alerts.example/hook
 ```
 
-The `Monitoring` workflow checks that every rule and dashboard query names a metric the code emits, that each query parses on Prometheus, and that Grafana loads the dashboard (`deploy/monitoring/check.py`).
+[Drills](monitoring-drills.md) provoke each threat's condition on testnet and wait for its alert. The `Monitoring` workflow checks that every rule and dashboard query names a metric the code emits, that each query parses on Prometheus, and that Grafana loads the dashboard (`deploy/monitoring/check.py`).
 
 ## Metrics
 
@@ -80,6 +80,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarChargeVolumeUnusual` | warning | A deployment admitted more than three times its usual hourly charge amount. Confirm with the seller; if unexpected, revoke its API key and lower its daily limits ([limits](limits.md)) |
 | `PayStellarWithdrawalsToOtherAccounts` | warning | A withdrawal to an account other than the buyer's wallet was prepared; confirm it was intended |
 | `PayStellarDeploymentQuotaReached` | warning | A deployment reached a daily quota; check its traffic before raising the quota ([limits](limits.md)) |
+| `PayStellarMandateChangedOutsideGateway` | warning | A recurring charge found the buyer's USDC approval lowered (`allowance_short`) or the mandate revoked (`no_mandate`) by a call outside this gateway. Confirm with the buyer; a change nobody made means the buyer's key is exposed |
 | `PayStellarFeeBurnHigh` | warning | The worker paid more than 50 XLM of fees in an hour. See fees by kind on the dashboard: a burst of small deposits or mandates, or bids far above the network's, burns the fee account ([limits](limits.md)) |
 | `PayStellarSourceSequenceTaken` | critical | A transaction the worker did not send used a source account's sequence: its key is exposed. Rotate it ([limits](limits.md#source-accounts)) |
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |

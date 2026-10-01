@@ -4,7 +4,8 @@ What each party, key or piece of infrastructure could do if it turned
 hostile or leaked, what stops it, how it is seen, and what is left. Buyers
 and sellers are untrusted; so is any single key. The [monitoring
 plan](../self-hosting/monitoring-plan.md) lists the signals below with their
-alerts and dashboard panels.
+alerts and dashboard panels, and [drills](../self-hosting/monitoring-drills.md)
+raise them on testnet.
 
 The assets are the buyers' USDC: in their wallets, deposited as prepaid
 credit (held by the treasury account, owed by the contract as liabilities),
@@ -61,7 +62,7 @@ buyer's wallet, which the key controls anyway.
 - Replacing the contract's code needs two of the admin's three keys.
 
 **Seen.**
-- A buyer lowering the approval outside the gateway makes the next charge `allowance_short`; a buyer revoking makes it `no_mandate`, and the mandate is marked revoked. Both appear on the dashboard's recurring row.
+- A buyer lowering the approval outside the gateway makes the next charge `allowance_short`; a buyer revoking makes it `no_mandate`, and the mandate is marked revoked. Either raises `PayStellarMandateChangedOutsideGateway`.
 - A change of the contract's code is a critical `code_changed` finding when the observer is told the expected Wasm.
 
 **Response.** For a code change nobody planned, pause and treat the admin keys as exposed.

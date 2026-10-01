@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     let _telemetry = telemetry::init("fermah-pay-stellar-gateway", config.metrics_addr)?;
+    telemetry::register_gateway_counters();
 
     let pool = PgPoolOptions::new()
         .max_connections(config.database_max_connections.get())

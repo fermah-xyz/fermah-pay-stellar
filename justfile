@@ -48,6 +48,11 @@ contract-resources: contract-build
 dev-up *args:
     DEV_UID=$(id -u) docker compose -f deploy/dev/compose.yaml {{args}} up -d --build
 
+# The stack with monitoring and the drills' settings (docs/self-hosting/monitoring-drills.md).
+dev-drills-up:
+    DEV_UID=$(id -u) DRILL_CONTRACT=$(jq -r .contract "$PAY_STELLAR_TESTNET_PROFILE/deployment.json") \
+        docker compose -f deploy/dev/compose.yaml -f deploy/dev/drills.yaml --profile monitoring up -d --build
+
 dev-down:
     docker compose -f deploy/dev/compose.yaml down
 

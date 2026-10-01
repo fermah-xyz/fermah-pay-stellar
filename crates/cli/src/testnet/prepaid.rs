@@ -38,7 +38,10 @@ use super::ledger::balances;
 use super::profile::{Deployment, Profile};
 
 mod conformance;
+mod drill;
 mod e2e;
+
+pub use drill::{Stack as DrillStack, Vector as DrillVector};
 mod load;
 mod recurring;
 

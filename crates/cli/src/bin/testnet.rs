@@ -146,6 +146,24 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// Provoke the condition one threat leaves and wait for its alert to be
+    /// active in Alertmanager, against the development stack started with
+    /// `just dev-drills-up`. Writes a `drill-<vector>` record.
+    Drill {
+        #[arg(value_enum)]
+        vector: fermah_pay_stellar_cli::testnet::prepaid::DrillVector,
+        /// The development stack's gRPC API.
+        #[arg(long, default_value = "http://127.0.0.1:50051")]
+        gateway_url: String,
+        /// Its API key (`just dev-api-key`).
+        #[arg(long, env = "PAY_STELLAR_DEV_API_KEY", hide_env_values = true)]
+        api_key: String,
+        #[arg(long, default_value = "http://127.0.0.1:9093")]
+        alertmanager_url: String,
+        /// Seconds to wait for each alert.
+        #[arg(long, default_value = "600")]
+        timeout_secs: u64,
+    },
     /// Run the x402 conformance harness against the recorded deployment: a
     /// new zero-XLM buyer deposits through the gRPC API, then the harness
     /// calls the x402 interface over HTTP and checks the settlement
@@ -273,6 +291,15 @@ async fn main() -> anyhow::Result<()> {
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
         Command::RecurringEndToEnd { database_url } => {
             context()?.recurring_end_to_end(&database_url).await?;
+        }
+        Command::Drill { vector, gateway_url, api_key, alertmanager_url, timeout_secs } => {
+            let stack = fermah_pay_stellar_cli::testnet::prepaid::DrillStack {
+                gateway: gateway_url,
+                api_key: zeroize::Zeroizing::new(api_key),
+                alertmanager: alertmanager_url.trim_end_matches('/').to_owned(),
+                timeout: Duration::from_secs(timeout_secs),
+            };
+            context()?.drill(&stack, vector).await?;
         }
         Command::X402Conformance { database_url } => {
             context()?.x402_conformance(&database_url).await?;

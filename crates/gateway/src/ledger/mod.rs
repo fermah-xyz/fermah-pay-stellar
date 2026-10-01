@@ -9,6 +9,10 @@ mod mandates;
 pub mod store;
 mod withdrawals;
 
+/// How a prepared withdrawal's destination is counted: the buyer's own
+/// wallet, or another account.
+pub const WITHDRAWAL_DESTINATIONS: [&str; 2] = ["own", "other"];
+
 use std::future::Future;
 use std::sync::Arc;
 

@@ -1096,7 +1096,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         };
         let signed = sign_entry_with(&unsigned, network_id(self.network()), self.operator.as_ref())
             .await
-            .inspect_err(|_| crate::submission::signing_failed("operator"))
+            .inspect_err(|_| {
+                crate::submission::signing_failed(crate::submission::SigningRole::Operator)
+            })
             .map_err(WorkerError::Signing)?;
         let function =
             HostFunction::InvokeContract(deployment.charge_recurring_batch_call(&requests));

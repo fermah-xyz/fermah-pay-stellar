@@ -8,91 +8,52 @@ use fermah_pay_stellar_chain::prepaid::{
 };
 use serde_json::{Value, json};
 
-/// How urgently a finding needs a person.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    /// Money may be wrong: on-chain state the records contradict.
-    Critical,
-    /// Something needs a person's attention, but no balance is wrong because
-    /// of it on its own.
-    Warning,
-    Info,
-}
+use crate::labels::labels;
 
-impl Severity {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Critical => "critical",
-            Self::Warning => "warning",
-            Self::Info => "info",
-        }
+labels! {
+    /// How urgently a finding needs a person.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Severity as as_str {
+        /// Money may be wrong: on-chain state the records contradict.
+        Critical => "critical",
+        /// Something needs a person's attention, but no balance is wrong because
+        /// of it on its own.
+        Warning => "warning",
+        Info => "info",
     }
 }
 
-/// The kinds of finding; each is documented in
-/// `docs/self-hosting/observer.md`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FindingKind {
-    EventGap,
-    UnrecognizedEvent,
-    UnknownCharge,
-    ChargeAmountMismatch,
-    ChargeOutcomeMismatch,
-    ChargeUnsettled,
-    UnknownDeposit,
-    DepositAmountMismatch,
-    DepositOutcomeMismatch,
-    DepositUnsettled,
-    UnknownWithdrawal,
-    WithdrawalMismatch,
-    WithdrawalOutcomeMismatch,
-    UnknownRecurringCharge,
-    RecurringChargeMismatch,
-    RecurringOutcomeMismatch,
-    RecurringChargeUnsettled,
-    RoleChanged,
-    AdminChange,
-    BindingOutOfDate,
-    TreasuryDeficit,
-    TreasurySurplus,
-    TreasuryDeauthorized,
-    EventTotalsMismatch,
-    LedgerTotalsMismatch,
-    CodeChanged,
-}
-
-impl FindingKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::EventGap => "event_gap",
-            Self::UnrecognizedEvent => "unrecognized_event",
-            Self::UnknownCharge => "unknown_charge",
-            Self::ChargeAmountMismatch => "charge_amount_mismatch",
-            Self::ChargeOutcomeMismatch => "charge_outcome_mismatch",
-            Self::ChargeUnsettled => "charge_unsettled",
-            Self::UnknownDeposit => "unknown_deposit",
-            Self::DepositAmountMismatch => "deposit_amount_mismatch",
-            Self::DepositOutcomeMismatch => "deposit_outcome_mismatch",
-            Self::DepositUnsettled => "deposit_unsettled",
-            Self::UnknownWithdrawal => "unknown_withdrawal",
-            Self::WithdrawalMismatch => "withdrawal_mismatch",
-            Self::WithdrawalOutcomeMismatch => "withdrawal_outcome_mismatch",
-            Self::UnknownRecurringCharge => "unknown_recurring_charge",
-            Self::RecurringChargeMismatch => "recurring_charge_mismatch",
-            Self::RecurringOutcomeMismatch => "recurring_outcome_mismatch",
-            Self::RecurringChargeUnsettled => "recurring_charge_unsettled",
-            Self::RoleChanged => "role_changed",
-            Self::AdminChange => "admin_change",
-            Self::BindingOutOfDate => "binding_out_of_date",
-            Self::TreasuryDeficit => "treasury_deficit",
-            Self::TreasurySurplus => "treasury_surplus",
-            Self::TreasuryDeauthorized => "treasury_deauthorized",
-            Self::EventTotalsMismatch => "event_totals_mismatch",
-            Self::LedgerTotalsMismatch => "ledger_totals_mismatch",
-            Self::CodeChanged => "code_changed",
-        }
+labels! {
+    /// The kinds of finding; each is documented in
+    /// `docs/self-hosting/observer.md`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum FindingKind as as_str {
+        EventGap => "event_gap",
+        UnrecognizedEvent => "unrecognized_event",
+        UnknownCharge => "unknown_charge",
+        ChargeAmountMismatch => "charge_amount_mismatch",
+        ChargeOutcomeMismatch => "charge_outcome_mismatch",
+        ChargeUnsettled => "charge_unsettled",
+        UnknownDeposit => "unknown_deposit",
+        DepositAmountMismatch => "deposit_amount_mismatch",
+        DepositOutcomeMismatch => "deposit_outcome_mismatch",
+        DepositUnsettled => "deposit_unsettled",
+        UnknownWithdrawal => "unknown_withdrawal",
+        WithdrawalMismatch => "withdrawal_mismatch",
+        WithdrawalOutcomeMismatch => "withdrawal_outcome_mismatch",
+        UnknownRecurringCharge => "unknown_recurring_charge",
+        RecurringChargeMismatch => "recurring_charge_mismatch",
+        RecurringOutcomeMismatch => "recurring_outcome_mismatch",
+        RecurringChargeUnsettled => "recurring_charge_unsettled",
+        RoleChanged => "role_changed",
+        AdminChange => "admin_change",
+        BindingOutOfDate => "binding_out_of_date",
+        TreasuryDeficit => "treasury_deficit",
+        TreasurySurplus => "treasury_surplus",
+        TreasuryDeauthorized => "treasury_deauthorized",
+        EventTotalsMismatch => "event_totals_mismatch",
+        LedgerTotalsMismatch => "ledger_totals_mismatch",
+        CodeChanged => "code_changed",
     }
 }
 
