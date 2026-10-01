@@ -176,7 +176,7 @@ Use a fresh database for each run.
 ## On a local network
 
 Every command above also runs against a standalone network on this machine,
-with `--network stellar:local`:
+with `--network stellar:local` (or `PAY_STELLAR_TESTNET_NETWORK=stellar:local`):
 
 ```bash
 docker run -d --name stellar -p 8000:8000 stellar/quickstart:testing --local --enable core,rpc --limits testnet

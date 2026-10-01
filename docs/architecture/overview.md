@@ -24,15 +24,18 @@ operator tools ─────────────────────�
 ```
 
 - **Gateway** (`crates/gateway`, binary `fermah-pay-stellar-gateway`): the
-  authenticated gRPC API. It resolves each API key to one tenancy scope and
-  serves only data in that scope. It prepares the deposit authorizations
-  buyers sign, verifies what they return, and admits charges against the
-  buyer's available balance. It holds no Stellar signing keys.
+  authenticated gRPC API, and optionally the [x402 facilitator
+  interface](../api/x402.md). It resolves each API key to one tenancy scope
+  and serves only data in that scope. It prepares the deposit and withdrawal
+  authorizations buyers sign, verifies what they return, and admits charges
+  against the buyer's available balance. It holds no Stellar signing keys.
 - **Worker** (binary `fermah-pay-stellar-worker`): the only process that
-  signs and sends transactions. It submits signed deposits and batches of
-  admitted charges through the durable submission engine and applies each
-  outcome to the rows it settles; see
-  [settlement](transactions.md#settlement).
+  signs and sends transactions. It submits signed deposits, withdrawals and
+  batches of admitted charges through the durable submission engine, applies
+  each outcome to the rows it settles, keeps the contract alive, and sweeps
+  the treasury's surplus to a [cold reserve](../self-hosting/treasury.md);
+  see [settlement](transactions.md#settlement). Several workers may run; a
+  lease picks the one that acts.
 - **Chain observer** (binary `fermah-pay-stellar-observer`): reads every
   event of each deployment's contract, matches it against the gateway's
   records, and reconciles the treasury's USDC, the contract's totals and the
@@ -41,15 +44,23 @@ operator tools ─────────────────────�
 - **Stellar access** (`crates/stellar-chain`): key handling, transaction
   signing, the USDC asset identity per network, a typed Stellar RPC client,
   and sponsored buyer onboarding.
-- **Operator tools** (`crates/cli`): schema migration and tenant provisioning
-  (`fermah-pay-stellar-admin`), and testnet onboarding
-  (`fermah-pay-stellar-testnet`).
+- **Operator tools** (`crates/cli`):
+  - `fermah-pay-stellar-admin`: schema migration, tenant provisioning,
+    quarantine resolution (`resolve-charge`), re-binding after a role
+    rotation (`sync-ledger`) and reconciliation baselines
+    (`observer-baseline`);
+  - `fermah-pay-stellar-contract`: admin changes and transfers that need
+    several signatures (propose, sign, submit), Wasm upload, and checking a
+    key reference;
+  - `fermah-pay-stellar-testnet`: deployment, onboarding, end-to-end and
+    load runs on testnet or on a local network.
 
 ## Tenancy
 
 A **product** owns one or more **seller deployments**. Each deployment is
-pinned to exactly one Stellar network (`stellar:testnet` or
-`stellar:pubnet`). An **API key** belongs to exactly one deployment.
+pinned to exactly one Stellar network (`stellar:testnet`, `stellar:pubnet`,
+or `stellar:local` for a standalone development network). An **API key**
+belongs to exactly one deployment.
 
 A gateway process serves one network. A request is authenticated by its key,
 and the key determines the product, deployment and network the request acts
@@ -91,6 +102,10 @@ addresses Horizon reports for these assets:
 |---|---|---|
 | `stellar:testnet` | `GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5` | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
 | `stellar:pubnet` | `GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` |
+
+A local network (`stellar:local`) has no Circle issuer: its USDC is a
+stand-in issued by a key anyone can derive, for development and CI only
+([local network](../quickstart/testnet.md#on-a-local-network)).
 
 USDC on Stellar has seven decimals: one USDC is 10,000,000 base units.
 

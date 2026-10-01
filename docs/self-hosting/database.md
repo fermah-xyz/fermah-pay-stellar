@@ -101,6 +101,8 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT` | headroom over the simulated resource fee, default 20; the unused part is refunded |
 | Worker | `PAY_STELLAR_OPERATOR_AUTHORIZATION_LEDGERS` | how long the operator's authorization of a batch stays valid, default 24 ledgers |
 | Worker | `PAY_STELLAR_MAX_BATCH` | charges per batch, 1 to 98, default 98 |
+| Worker | `PAY_STELLAR_BUSY_POLL_MILLIS`, `PAY_STELLAR_IDLE_POLL_MILLIS` | wait between settlement rounds while there is work (default 1000) and while there is none (default 2000) |
+| Worker | `PAY_STELLAR_RETRY_AFTER_SECS` | how long a deposit, withdrawal or deployment the network refused in simulation is left aside before it is tried again, default 30 |
 | Observer | `PAY_STELLAR_OBSERVER_DATABASE_URL` | URL of the observer login role; the other settings are in [chain observer](observer.md#running-it) |
 
 Key files must not be readable by other users; the worker refuses to start

@@ -48,10 +48,13 @@ crates/stellar-chain  keys, transaction signing, USDC identity, Stellar RPC clie
 crates/gateway        gRPC API, settlement worker and chain observer daemons, authentication,
                       PostgreSQL store, durable submission, key issuance
 crates/proto          generated gRPC types
-crates/cli            operator tools: fermah-pay-stellar-admin, fermah-pay-stellar-testnet
+crates/cli            operator tools: fermah-pay-stellar-admin, fermah-pay-stellar-contract,
+                      fermah-pay-stellar-testnet
 proto/                gRPC API definitions
 db/migrations/        PostgreSQL schema
-deploy/local/         local development database
+deploy/local/         local development and test database
+deploy/dev/           the whole system on one machine with Docker Compose
+deploy/monitoring/    Prometheus alert rules
 docs/                 architecture, API, quickstart, self-hosting, evidence
 ```
 
