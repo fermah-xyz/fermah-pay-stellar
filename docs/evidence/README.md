@@ -55,7 +55,7 @@ lists the outer (fee-bump) and inner transaction hashes.
 
 | Record | Shows |
 |---|---|
-| [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation |
+| [`prepaid-deployment`](testnet/2026-09-29T044603-prepaid-deployment.json) | Wasm upload and contract creation of `CDDFMUZ7…GNPV`, the contract every other record in this table was produced on |
 | [`admin-multisig`](testnet/2026-09-30T041524-admin-multisig.json) | the admin account given two co-signers and a medium threshold of two: any two of its three keys, and never one, authorize an admin change; it still holds 0 XLM |
 | [`admin-pause-two-signatures`](testnet/2026-09-30T0416-admin-pause-two-signatures.json), [`admin-unpause-two-signatures`](testnet/2026-09-30T0416-admin-unpause-two-signatures.json) | a pause signed by the two co-signers and an unpause signed by the master key and one co-signer, each proposed, signed on its own and submitted with `fermah-pay-stellar-contract`; the same proposal with one signature was refused for missing weight before anything was sent |
 | [`prepaid-upgrade`](testnet/2026-09-29T143109-prepaid-upgrade.json) | the admin replaces the contract's code in place (Wasm `02d80b2f…` to `78e874a9…`, which announces pauses and limit changes): same contract address, totals unchanged; the running code hash equals the Wasm built in CI from the same source |
@@ -68,6 +68,7 @@ lists the outer (fee-bump) and inner transaction hashes.
 | [`charge-batch-98-second`](testnet/2026-09-29T051043-charge-batch-98-second.json) | one 98-entry transaction with mixed outcomes: 96 `Charged`, 2 `InsufficientBalance` (buyer 1, already charged twice, and buyer 2, after its withdrawal) |
 | [`treasury-solvency`](testnet/2026-09-29T051046-treasury-solvency.json) | the treasury's USDC equals buyer liabilities plus unwithdrawn revenue, read from the network: 2.985 USDC held, 0.555 owed to buyers and 2.43 earned by the seller |
 | [`charge-batch-98-first-replayed`](testnet/2026-09-29T051328-charge-batch-98-first-replayed.json) | the first batch's 98 charges sent again, included on-chain: every entry `Duplicate`, nothing debited |
+| [`prepaid-deployment` (2026-10-01)](testnet/2026-10-01T022132-prepaid-deployment.json) | a fresh contract, `CD3GESMY…7PSI`, built with recurring charges; the deployment the workflows use from then on. The earlier contract stays on the network with its records |
 
 Measured fees on testnet:
 

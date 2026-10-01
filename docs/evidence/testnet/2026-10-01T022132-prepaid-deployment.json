@@ -1,0 +1,49 @@
+{
+  "create": {
+    "fee_charged_stroops": 272812727,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "aa4ab8fcd447c2cd91fa7f1da82663cd4f7d0c3b8c9806f20ddce298dafcc4fc",
+    "ledger": 4959541,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/caabc8056c58a90be22753e4ca91a9114fe08397a7e4e19da6c8a0f5789190b9",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 1,
+      "footprint_read_write": 1,
+      "instructions": 1206739,
+      "write_bytes": 688
+    },
+    "transaction_hash": "caabc8056c58a90be22753e4ca91a9114fe08397a7e4e19da6c8a0f5789190b9"
+  },
+  "criterion": "prepaid-ledger-deployment",
+  "deployment": {
+    "admin": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+    "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+    "max_charge": 10000000,
+    "min_deposit": 100000,
+    "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
+    "seller": "GDLT7M7IAMPMGMDOQ2C6XOKTBLZ7Q7AXEZ6WFWRFKIMTGPOCPAN4EVYN",
+    "treasury": "GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN",
+    "usdc": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    "wasm_sha256": "fcdd05c493cf1b2f636583aa45fa26dac331ed98cf92da143ba5c0bcd9320050"
+  },
+  "expected": "contract created from the recorded Wasm with its constructor pinning the roles, Circle testnet USDC and limits",
+  "network": "stellar:testnet",
+  "recorded_at": "2026-10-01T02:21:32.799136532Z",
+  "upload": {
+    "fee_charged_stroops": 82773243,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "3e3d8df3ff62362fc0f194768c52220dcdced1375b81734a3fc73e5c0bba740f",
+    "ledger": 4959540,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/12e6d6052b0c747bc17d2262c91cda74d1955d55dea9d615c8c6cfd73314bb0d",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 0,
+      "footprint_read_write": 1,
+      "instructions": 25721900,
+      "write_bytes": 29380
+    },
+    "transaction_hash": "12e6d6052b0c747bc17d2262c91cda74d1955d55dea9d615c8c6cfd73314bb0d"
+  }
+}
