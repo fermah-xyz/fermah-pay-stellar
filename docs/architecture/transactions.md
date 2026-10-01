@@ -174,7 +174,7 @@ Keep the host clock synchronized (for example with NTP).
 
 ## Settlement
 
-The worker ([`crates/gateway/src/worker.rs`](../../crates/gateway/src/worker.rs))
+The worker ([`crates/gateway/src/worker/`](../../crates/gateway/src/worker/mod.rs))
 turns signed deposits and admitted charges into submissions and applies the
 outcomes:
 
