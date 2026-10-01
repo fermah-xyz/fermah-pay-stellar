@@ -1620,6 +1620,29 @@ fn revoke_event(owner: &AccountAddress, mandate: Option<[u8; 32]>) -> Event {
 }
 
 impl World {
+    /// A revocation `buyer` signed, valid until `expiration_ledger`, in
+    /// `state`.
+    async fn revocation(&self, buyer: Uuid, state: &str, expiration_ledger: i64) {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO pay_stellar.revocations
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, state,
+                 authorization_xdr, signed_authorization_xdr, signed_at, expiration_ledger,
+                 resolved_at)
+             VALUES ($1, $2, $3, 'stellar:testnet', $4, $5, 'AAAA', 'BBBB', now(), $6,
+                     CASE WHEN $5 IN ('confirmed', 'failed', 'expired') THEN now() END)",
+        )
+        .bind(id)
+        .bind(buyer)
+        .bind(self.deployment)
+        .bind(format!("revocation-{id}"))
+        .bind(state)
+        .bind(expiration_ledger)
+        .execute(&self.owner)
+        .await
+        .unwrap();
+    }
+
     /// An active mandate of `buyer` with contract identifier `mandate_id`.
     async fn mandate(&self, buyer: Uuid, mandate_id: [u8; 32]) -> Uuid {
         let id = Uuid::now_v7();
@@ -1702,16 +1725,43 @@ async fn test_recurring_charges_settled_as_recorded_are_matched(
             (&account(1), [1; 32], [7; 32], 0, 10, 1),
         ]),
     );
+    // Revoked through the gateway: the buyer signed it, valid until 1100.
+    w.revocation(alice, "signed", 1100).await;
     w.chain.emit(1030, revoke_event(&account(1), Some([7; 32])));
     w.observer().observe().await.unwrap();
     assert_eq!(w.findings().await, []);
-    assert_eq!(w.verdicts().await.len(), 3);
+    assert_eq!(w.verdicts().await.len(), 5);
     let kinds: Vec<String> =
         sqlx::query_scalar("SELECT kind FROM pay_stellar.chain_events ORDER BY event_id")
             .fetch_all(&w.owner)
             .await
             .unwrap();
     assert_eq!(kinds, ["mandate", "recurring", "revoke"]);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_mandates_and_revocations_the_gateway_did_not_prepare_are_findings(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    w.mandate(alice, [7; 32]).await;
+    // A revocation the buyer signed, whose signature lapsed at 1020.
+    w.revocation(alice, "expired", 1020).await;
+    // Another mandate authorized, then revoked, through another client.
+    w.chain.emit(1010, mandate_event(&account(1), [9; 32]));
+    w.chain.emit(1030, revoke_event(&account(1), Some([9; 32])));
+    w.observer().observe().await.unwrap();
+    assert_eq!(
+        w.findings().await,
+        [
+            pair("mandate_changed_elsewhere", "warning"),
+            pair("mandate_changed_elsewhere", "warning")
+        ]
+    );
+    let detail = w.finding_detail("mandate_changed_elsewhere").await;
+    assert_eq!(detail["ledger"], 1010);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

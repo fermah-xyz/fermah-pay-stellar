@@ -1,0 +1,32 @@
+{
+  "criterion": "admin-multisig-upgrade",
+  "network": "stellar:testnet",
+  "recorded_at": "2026-10-01T09:05:00Z",
+  "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+  "expected": "the contract runs the code merged to main (mandates kept until their last ledger; mandates above the largest charge, or reusing the current mandate identifier, refused), replaced in place by two of the admin account three keys; one signature is refused before anything is sent",
+  "previous_wasm": "fcdd05c493cf1b2f636583aa45fa26dac331ed98cf92da143ba5c0bcd9320050",
+  "upgraded_wasm": "38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e",
+  "upload": {
+    "transaction_hash": "6b598cd1623d75589909238780842396858312011e623721983ec34bd329e800",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/6b598cd1623d75589909238780842396858312011e623721983ec34bd329e800"
+  },
+  "one_signature": "refused by submit before sending: GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3 needs signatures weighing 2 (its medium threshold); these weigh 1",
+  "signers": [
+    {
+      "account": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+      "signed_by": [
+        "GAXQFXZ35FONMY37SNMQ22J3PGTGMCY3XQLBO2CXINPXZMBGYHUUWKYW",
+        "GBF6WBNCWSNXFEIXDRBOWL4IATLTS5EYICIXTT4GFOKJWSIM2ZMLINUI"
+      ]
+    }
+  ],
+  "summary": "call upgrade on CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI with 38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e",
+  "transaction_hash": "f5a2ea93060a6a89145bebcb5e697e868cd75ce46c1bf93838e761750e53d7cb",
+  "ledger": 4970096,
+  "fee_charged_stroops": 282261328,
+  "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/f5a2ea93060a6a89145bebcb5e697e868cd75ce46c1bf93838e761750e53d7cb",
+  "observed": {
+    "running_wasm_sha256": "38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e",
+    "read": "the contract code fetched back from the network after the upgrade hashes to the upgraded Wasm, the build of main at 3aec9fa"
+  }
+}

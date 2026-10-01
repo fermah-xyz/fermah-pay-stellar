@@ -577,6 +577,7 @@ async fn test_runtime_roles_hold_exactly_the_documented_privileges(
         ("pay_stellar_observer", "reconciliation_streaks", "SELECT"),
         ("pay_stellar_observer", "reconciliation_streaks", "UPDATE"),
         ("pay_stellar_observer", "recurring_charges", "SELECT"),
+        ("pay_stellar_observer", "revocations", "SELECT"),
         ("pay_stellar_observer", "withdrawals", "SELECT"),
         ("pay_stellar_operator", "buyers", "SELECT"),
         ("pay_stellar_operator", "chain_charge_entries", "SELECT"),

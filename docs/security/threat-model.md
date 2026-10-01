@@ -84,7 +84,7 @@ USDC moves without the contract's checks.
 - Replacing the contract's code needs two of the admin's three keys.
 
 **Seen.**
-- A buyer lowering the approval outside the gateway makes the next charge `allowance_short`; a buyer revoking makes it `no_mandate`, and the mandate is marked revoked. Either raises `PayStellarMandateChangedOutsideGateway`.
+- A mandate authorized or revoked outside the gateway is a `mandate_changed_elsewhere` finding as soon as the observer reads its event. A buyer lowering the approval in the USDC contract emits no event of this contract; the next charge is then refused as `allowance_short`. Both raise `PayStellarMandateChangedOutsideGateway`.
 - A change of the contract's code is a critical `code_changed` finding when the observer is told the expected Wasm.
 
 **Response.** For a code change nobody planned, pause and treat the admin keys as exposed.

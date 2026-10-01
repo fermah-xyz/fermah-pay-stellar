@@ -45,6 +45,9 @@ labels! {
         RecurringChargeMismatch => "recurring_charge_mismatch",
         RecurringOutcomeMismatch => "recurring_outcome_mismatch",
         RecurringChargeUnsettled => "recurring_charge_unsettled",
+        /// A mandate authorized or revoked on-chain that the gateway did not
+        /// prepare: the buyer's wallet acted through another client.
+        MandateChangedElsewhere => "mandate_changed_elsewhere",
         RoleChanged => "role_changed",
         AdminChange => "admin_change",
         BindingOutOfDate => "binding_out_of_date",

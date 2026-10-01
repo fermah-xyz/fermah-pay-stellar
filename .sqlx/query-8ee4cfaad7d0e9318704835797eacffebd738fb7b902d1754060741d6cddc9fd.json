@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM pay_stellar.mandates m\n            JOIN pay_stellar.buyers b ON b.id = m.buyer_id\n            WHERE m.seller_deployment_id = $1 AND b.wallet_address = $2 AND m.mandate_id = $3\n              AND m.state <> 'awaiting_signature'\n        ) AS \"known!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "known!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8ee4cfaad7d0e9318704835797eacffebd738fb7b902d1754060741d6cddc9fd"
+}

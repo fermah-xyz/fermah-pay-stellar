@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT count(*) AS \"ahead!\"\n            FROM pay_stellar.revocations r\n            JOIN pay_stellar.mandates m ON m.buyer_id = r.buyer_id\n            LEFT JOIN pay_stellar.submissions s ON s.id = m.submission_id\n            WHERE r.id = $1 AND m.state = 'active' AND m.mandate_id IS DISTINCT FROM $2\n              AND COALESCE(CASE WHEN s.state = 'succeeded' THEN s.ledger::bigint END,\n                           m.expiration_ledger + 1) > $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ahead!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ade33dcf4df5893aaf3040669f43ed3cf2ed257e44c3329f75c74567f0dc4d39"
+}
