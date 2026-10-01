@@ -69,14 +69,33 @@ pub trait LatestLedger: Send + Sync + 'static {
 
     /// Simulates `call` from `source` with the signed entries in `auth`, in
     /// enforcing mode: each entry must satisfy its address, a contract
-    /// account through its `__check_auth`. `None` when the network accepts
-    /// the call, its reason when it does not. Nothing is sent.
-    fn refusal_of(
+    /// account through its `__check_auth`. Nothing is sent.
+    fn simulate_buyer_call(
         &self,
         source: &AccountAddress,
         call: InvokeContractArgs,
         auth: Vec<SorobanAuthorizationEntry>,
-    ) -> impl Future<Output = Result<Option<String>, RpcError>> + Send;
+    ) -> impl Future<Output = Result<BuyerCall, RpcError>> + Send;
+}
+
+/// What the network answered to a simulated buyer call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BuyerCall {
+    /// It would succeed, at this resource fee in stroops.
+    Accepted { resource_fee: i64 },
+    /// It would fail, for the network's reason.
+    Refused(String),
+    /// Archived state must be restored before the call can run at all.
+    RestoreRequired,
+}
+
+impl BuyerCall {
+    /// Whether the network refused the call because an authorization did not
+    /// hold, rather than for the call's own reasons (a balance, a pause).
+    #[must_use]
+    pub fn refused_authorization(&self) -> bool {
+        matches!(self, Self::Refused(reason) if reason.contains("Error(Auth,"))
+    }
 }
 
 impl LatestLedger for RpcClient {
@@ -88,21 +107,19 @@ impl LatestLedger for RpcClient {
         Ok(self.get_latest_ledger_info().await?.close_time)
     }
 
-    async fn refusal_of(
+    async fn simulate_buyer_call(
         &self,
         source: &AccountAddress,
         call: InvokeContractArgs,
         auth: Vec<SorobanAuthorizationEntry>,
-    ) -> Result<Option<String>, RpcError> {
-        match self.simulate_call(source, call, auth, AuthMode::Enforce).await? {
-            SimulationOutcome::Succeeded(_) => Ok(None),
-            SimulationOutcome::Failed { error, .. } => Ok(Some(error)),
-            // Archived state stops the simulation before any authorization is
-            // checked: no answer yet, rather than an acceptance.
-            SimulationOutcome::RestoreRequired { .. } => Err(RpcError::SimulationRefused(
-                "the call needs archived state restored first".to_owned(),
-            )),
-        }
+    ) -> Result<BuyerCall, RpcError> {
+        Ok(match self.simulate_call(source, call, auth, AuthMode::Enforce).await? {
+            SimulationOutcome::Succeeded(simulation) => {
+                BuyerCall::Accepted { resource_fee: simulation.min_resource_fee }
+            }
+            SimulationOutcome::Failed { error, .. } => BuyerCall::Refused(error),
+            SimulationOutcome::RestoreRequired { .. } => BuyerCall::RestoreRequired,
+        })
     }
 }
 
@@ -129,6 +146,9 @@ pub struct LedgerPolicy {
     /// wallet. Off, a stolen buyer key can only return the buyer's own
     /// credit to the buyer's own wallet.
     pub withdrawals_to_other_accounts: bool,
+    /// Largest resource fee, in stroops, a contract-account buyer's deposit
+    /// or withdrawal may simulate at; the worker refuses to send one above.
+    pub max_buyer_resource_fee: i64,
 }
 
 pub struct LedgerApi<L> {
@@ -247,6 +267,11 @@ impl<L: LatestLedger> LedgerApi<L> {
     /// call is simulated with it in enforcing mode, as the network will run
     /// it when the worker sends it. The simulation is sent from the treasury,
     /// which gives the authorizations `treasury_entries` returns.
+    ///
+    /// Only what the simulation shows about the buyer refuses the entry: an
+    /// authorization that does not hold, or a cost above the bound the worker
+    /// applies too. Any other failure (a short balance, archived state) is
+    /// the call's own, decided by the worker as for a classic account.
     async fn verify_buyer_entry(
         &self,
         scope: &Scope,
@@ -288,17 +313,30 @@ impl<L: LatestLedger> LedgerApi<L> {
             .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
         let mut auth = vec![signed.clone()];
         auth.extend(treasury_entries(&deployment));
-        let refusal = self
+        let answer = self
             .ledger
-            .refusal_of(&deployment.treasury, call.clone(), auth)
+            .simulate_buyer_call(&deployment.treasury, call.clone(), auth)
             .await
             .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
-        match refusal {
-            None => Ok(()),
-            Some(reason) => {
+        match answer {
+            BuyerCall::Accepted { resource_fee }
+                if resource_fee > self.policy.max_buyer_resource_fee =>
+            {
+                tracing::info!(resource_fee, "a contract account's call costs too much");
+                Err(EntryRefusal::Network(Refusal::WalletTooCostly))
+            }
+            ref refused @ BuyerCall::Refused(ref reason) if refused.refused_authorization() => {
                 tracing::info!(reason, "the network refused a contract account's authorization");
                 Err(EntryRefusal::Network(Refusal::AuthorizationRefused))
             }
+            BuyerCall::Refused(reason) => {
+                tracing::info!(
+                    reason,
+                    "a contract account's call fails for now; the worker decides"
+                );
+                Ok(())
+            }
+            BuyerCall::Accepted { .. } | BuyerCall::RestoreRequired => Ok(()),
         }
     }
 }

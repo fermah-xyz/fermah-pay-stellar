@@ -30,6 +30,9 @@ labels! {
         /// A contract account's entry: the network refused the call with it
         /// when simulated.
         AuthorizationRefused => "authorization_refused",
+        /// A contract account's call would cost the operator more than a
+        /// buyer's transaction may.
+        WalletTooCostly => "wallet_too_costly",
         DepositExpired => "deposit_expired",
         DepositAlreadySigned => "deposit_already_signed",
         InvalidChargeId => "invalid_charge_id",
@@ -125,7 +128,8 @@ impl Refusal {
             | Self::RevocationAlreadySigned
             | Self::MandateNotActive
             | Self::MandateEnded
-            | Self::DestinationNotAllowed => Code::FailedPrecondition,
+            | Self::DestinationNotAllowed
+            | Self::WalletTooCostly => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

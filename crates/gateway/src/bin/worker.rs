@@ -81,6 +81,16 @@ struct Config {
     inclusion_fee_percentile: FeePercentile,
     #[arg(long, env = "PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT", default_value = "20")]
     resource_fee_margin_percent: u8,
+    /// Largest resource fee, in stroops, of a deposit, withdrawal, mandate or
+    /// revocation, or of a restore one needs: a contract-account wallet runs
+    /// its own code in it at the operator's expense. Above it, the request
+    /// is not sent and ends expired.
+    #[arg(
+        long,
+        env = "PAY_STELLAR_MAX_BUYER_RESOURCE_FEE_STROOPS",
+        default_value_t = fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE
+    )]
+    max_buyer_resource_fee_stroops: i64,
     /// Seconds a transaction may be included after it is built.
     #[arg(long, env = "PAY_STELLAR_TRANSACTION_VALIDITY_SECS", default_value = "60")]
     transaction_validity_secs: u64,
@@ -206,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
             resource_fee_margin_percent: config.resource_fee_margin_percent,
             validity: Duration::from_secs(config.transaction_validity_secs),
             max_clock_skew: Duration::from_secs(config.max_clock_skew_secs),
+            max_buyer_resource_fee: config.max_buyer_resource_fee_stroops,
         },
     );
     let mut worker = Worker::new(

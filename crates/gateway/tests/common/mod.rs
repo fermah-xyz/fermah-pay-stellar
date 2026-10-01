@@ -14,7 +14,7 @@ use fermah_pay_stellar_chain::rpc::{
 use fermah_pay_stellar_chain::stellar_xdr::{InvokeContractArgs, ScVal, SorobanAuthorizationEntry};
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance;
-use fermah_pay_stellar_gateway::ledger::{LatestLedger, LedgerApi, LedgerPolicy};
+use fermah_pay_stellar_gateway::ledger::{BuyerCall, LatestLedger, LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::{Quotas, Store};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -35,11 +35,16 @@ pub const MAX_MANDATE_LEDGERS: u32 = 3_000_000;
 pub struct Ledger(Arc<AtomicU32>, Arc<Mutex<Simulations>>);
 
 /// Calls simulated for contract accounts, and how the network answers.
-#[derive(Default)]
 pub struct Simulations {
-    /// The network's reason to refuse every call; `None` accepts them.
-    pub refusal: Option<String>,
+    /// The network's answer to every call.
+    pub answer: BuyerCall,
     pub seen: Vec<(AccountAddress, InvokeContractArgs, Vec<SorobanAuthorizationEntry>)>,
+}
+
+impl Default for Simulations {
+    fn default() -> Self {
+        Self { answer: BuyerCall::Accepted { resource_fee: 1_000 }, seen: Vec::new() }
+    }
 }
 
 impl Ledger {
@@ -72,15 +77,15 @@ impl LatestLedger for Ledger {
         Ok(time::OffsetDateTime::now_utc().unix_timestamp())
     }
 
-    async fn refusal_of(
+    async fn simulate_buyer_call(
         &self,
         source: &AccountAddress,
         call: InvokeContractArgs,
         auth: Vec<SorobanAuthorizationEntry>,
-    ) -> Result<Option<String>, RpcError> {
+    ) -> Result<BuyerCall, RpcError> {
         let mut simulations = self.simulations();
         simulations.seen.push((source.clone(), call, auth));
-        Ok(simulations.refusal.clone())
+        Ok(simulations.answer.clone())
     }
 }
 
@@ -182,6 +187,8 @@ pub async fn start_with_options<L: LatestLedger>(
             min_mandate_period_secs: MIN_MANDATE_PERIOD_SECS,
             max_mandate_ledgers: MAX_MANDATE_LEDGERS,
             withdrawals_to_other_accounts: other_destinations,
+            max_buyer_resource_fee:
+                fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
         },
     );
     let limits = ServerLimits {

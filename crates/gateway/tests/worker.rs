@@ -177,6 +177,8 @@ struct Net {
     archived: HashSet<AccountAddress>,
     /// Ledger-entry reads trail the latest ledger by this many ledgers.
     entries_behind: u32,
+    /// The resource fee a successful simulation reports.
+    resource_fee: i64,
     /// The treasury's USDC as a trailing read reports it, when it differs
     /// from what it holds now.
     stale_treasury: Option<i128>,
@@ -772,7 +774,7 @@ impl Chain for Stellar {
                     },
                     resource_fee: 0,
                 },
-                min_resource_fee: 1_000,
+                min_resource_fee: self.with(|n| n.resource_fee),
                 auth: vec![],
                 result: None,
                 latest_ledger,
@@ -1116,12 +1118,12 @@ impl LatestLedger for Stellar {
 
     // Buyers here hold classic accounts, whose entries are verified without
     // the network.
-    async fn refusal_of(
+    async fn simulate_buyer_call(
         &self,
         _source: &AccountAddress,
         _call: fermah_pay_stellar_chain::stellar_xdr::InvokeContractArgs,
         _auth: Vec<fermah_pay_stellar_chain::stellar_xdr::SorobanAuthorizationEntry>,
-    ) -> Result<Option<String>, RpcError> {
+    ) -> Result<fermah_pay_stellar_gateway::ledger::BuyerCall, RpcError> {
         unreachable!("no buyer here holds a contract account")
     }
 }
@@ -1209,6 +1211,7 @@ async fn world_with(
             simulation_barrier: None,
             archived: HashSet::new(),
             entries_behind: 0,
+            resource_fee: 1_000,
             stale_treasury: None,
             over_daily: HashSet::new(),
             clock: clock.clone(),
@@ -1276,6 +1279,8 @@ impl World {
                 resource_fee_margin_percent: 10,
                 validity: VALIDITY,
                 max_clock_skew: Duration::from_secs(20),
+                max_buyer_resource_fee:
+                    fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         );
         Worker::new(
@@ -1911,6 +1916,33 @@ async fn test_unreadable_batch_answer_is_settled_from_the_records(
     assert_eq!((first.state(), first.outcome.as_str()), (ChargeState::Charged, "charged"));
     assert_eq!((above.state(), above.outcome.as_str()), (ChargeState::Refused, "above_limit"));
     assert_eq!(w.balance(&x).await, (90, 0));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_buyer_transaction_above_the_resource_fee_cap_is_not_sent(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE;
+    let w = world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let charge = w.charge(&x, 10, "c-1").await;
+    let alice = w.buyer("alice", 100).await;
+    let deposit = w.deposit(&alice, 50, "d-1").await;
+    // Every call now simulates above what a buyer's transaction may cost,
+    // as a contract-account wallet's own code can make it.
+    w.stellar.with(|n| n.resource_fee = DEFAULT_MAX_BUYER_RESOURCE_FEE + 1);
+    let before = w.stellar.sent().len();
+    w.settle(&w.worker()).await;
+    // The operator's batch is sent and settles; the buyer's deposit is not
+    // sent, and waits until its authorization lapses.
+    assert_eq!(w.stellar.sent().len(), before + 1);
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Charged);
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Signed);
+    w.stellar.with(|n| n.resource_fee = DEFAULT_MAX_BUYER_RESOURCE_FEE);
+    w.clock.advance(Duration::from_secs(3_600));
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

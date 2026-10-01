@@ -15,6 +15,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
 };
 use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
+use fermah_pay_stellar_gateway::ledger::BuyerCall;
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
@@ -140,8 +141,10 @@ async fn test_a_contract_account_deposit_is_accepted_only_when_the_network_accep
         ))
     );
 
-    // The network refuses: so does the API, and nothing is stored.
-    h.ledger.simulations().refusal = Some("HostError: Error(Auth, InvalidAction)".to_owned());
+    // The network refuses the authorization: so does the API, and nothing
+    // is stored.
+    h.ledger.simulations().answer =
+        BuyerCall::Refused("HostError: Error(Auth, InvalidAction)".to_owned());
     let status = ledger(&h)
         .await
         .submit_deposit(authed(
@@ -156,7 +159,7 @@ async fn test_a_contract_account_deposit_is_accepted_only_when_the_network_accep
     assert_refused(&status, Code::InvalidArgument, "authorization_refused");
 
     // The same request, the network accepting.
-    h.ledger.simulations().refusal = None;
+    h.ledger.simulations().answer = BuyerCall::Accepted { resource_fee: 1_000 };
     let signed = with_credential(&entry, credential());
     let deposit = ledger(&h)
         .await
@@ -182,6 +185,73 @@ async fn test_a_contract_account_deposit_is_accepted_only_when_the_network_accep
         assert_eq!(source, &treasury());
         assert_eq!(call, &call_of(&entry));
         assert_eq!(auth, &vec![decode(&signed)]);
+    }
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_only_the_buyers_part_of_a_failed_simulation_refuses_the_entry(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE;
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, buyer_id) = setup(&h).await;
+    let cases = [
+        // The wallet's code would cost the operator too much.
+        (
+            "costly",
+            BuyerCall::Accepted { resource_fee: DEFAULT_MAX_BUYER_RESOURCE_FEE + 1 },
+            Some("wallet_too_costly"),
+        ),
+        (
+            "at-the-bound",
+            BuyerCall::Accepted { resource_fee: DEFAULT_MAX_BUYER_RESOURCE_FEE },
+            None,
+        ),
+        // The call's own failure, not the buyer's authorization: stored, and
+        // the worker decides, as for a classic account.
+        ("short", BuyerCall::Refused("HostError: Error(Contract, #10)".to_owned()), None),
+        // Archived state: stored, and the worker restores it.
+        ("archived", BuyerCall::RestoreRequired, None),
+    ];
+    for (key, answer, refusal) in cases {
+        let deposit = ledger(&h)
+            .await
+            .prepare_deposit(authed(
+                PrepareDepositRequest {
+                    buyer_id: buyer_id.clone(),
+                    amount: 1_000_000,
+                    idempotency_key: key.to_owned(),
+                },
+                &t.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .deposit
+            .unwrap();
+        h.ledger.simulations().answer = answer;
+        let entry = decode(&deposit.authorization_entry_xdr);
+        let submitted = ledger(&h)
+            .await
+            .submit_deposit(authed(
+                SubmitDepositRequest {
+                    deposit_id: deposit.deposit_id,
+                    signed_authorization_entry_xdr: with_credential(&entry, credential()),
+                },
+                &t.token,
+            ))
+            .await;
+        match refusal {
+            Some(reason) => {
+                assert_refused(&submitted.unwrap_err(), Code::FailedPrecondition, reason)
+            }
+            None => assert_eq!(
+                submitted.unwrap().into_inner().deposit.unwrap().state(),
+                DepositState::Signed,
+                "{key}"
+            ),
+        }
     }
 }
 

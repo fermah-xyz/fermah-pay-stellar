@@ -333,14 +333,29 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             .await
         {
             Ok(prepared) => prepared,
-            Err(EngineError::RestoreRequired(restore)) => {
+            Err(EngineError::RestoreRequired(restore))
+                if self.engine.check_buyer_resource_fee(restore.min_resource_fee).is_ok() =>
+            {
                 return self.restore(&restore, row.id).await;
+            }
+            Err(EngineError::RestoreRequired(restore)) => {
+                let error = EngineError::ResourceFeeAboveCap {
+                    fee: restore.min_resource_fee,
+                    cap: self.engine.max_buyer_resource_fee(),
+                };
+                tracing::warn!(withdrawal_id = %row.id, error = %error, "the withdrawal's restore costs too much");
+                self.note_withdrawal(row.id, &error.to_string()).await?;
+                self.set_aside(row.id);
+                return Ok(None);
             }
             // The treasury may be short of USDC until it is topped up, or
             // the destination may lack a trustline; the withdrawal is tried
             // again after the pause until the buyer's signature lapses.
-            Err(error @ EngineError::SimulationFailed(_)) => {
-                tracing::warn!(withdrawal_id = %row.id, error = %error, "network refused the withdrawal in simulation");
+            Err(
+                error
+                @ (EngineError::SimulationFailed(_) | EngineError::ResourceFeeAboveCap { .. }),
+            ) => {
+                tracing::warn!(withdrawal_id = %row.id, error = %error, "network refused the withdrawal in simulation, or it costs too much");
                 self.note_withdrawal(row.id, &error.to_string()).await?;
                 self.set_aside(row.id);
                 return Ok(None);

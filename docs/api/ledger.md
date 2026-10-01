@@ -72,10 +72,16 @@ authorized by one Ed25519 key, such as
 therefore checks everything else itself, then simulates the call with the
 entry in enforcing mode, as the network will run it, before accepting it.
 For a withdrawal, the simulation also carries the treasury's authorization.
-If the network refuses, the request is refused as `authorization_refused`
-and nothing is stored or held. The simulation also fails for other reasons
-the call would fail on-chain, such as a wallet holding too little USDC for
-a deposit.
+Two answers refuse the request, with nothing stored or held:
+- the network refuses the authorization: `authorization_refused`;
+- the call would cost the operator a resource fee above the bound a buyer's
+  transaction may have (`PAY_STELLAR_MAX_BUYER_RESOURCE_FEE_STROOPS`, 1 XLM
+  by default), because the account's own code is part of it:
+  `wallet_too_costly`.
+
+Any other failure of the simulation, such as a wallet short of USDC or
+archived state to restore, is the call's own: the entry is stored and the
+worker decides, as for a classic account.
 
 A contract account can change its own rules after the gateway accepts its
 entry. If the worker's own simulation is then refused, nothing is sent: the
@@ -218,7 +224,8 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `INVALID_ARGUMENT` | `invalid_authorization_entry` | not a base64 XDR authorization entry | send the entry as returned by the wallet |
 | `INVALID_ARGUMENT` | `authorization_mismatch` | the entry differs from the prepared one in more than its signature, or is for another account | sign the prepared entry unchanged |
 | `INVALID_ARGUMENT` | `invalid_signature` | the signature does not verify with the buyer's account key | sign with the buyer's wallet |
-| `INVALID_ARGUMENT` | `authorization_refused` | a contract account's entry: the network refused the call with it when simulated | sign with the account's own signer; check that the wallet holds the USDC |
+| `INVALID_ARGUMENT` | `authorization_refused` | a contract account's entry: the network refused its authorization when simulated | sign with the account's own signer |
+| `FAILED_PRECONDITION` | `wallet_too_costly` | a contract account's call would cost the operator more than a buyer's transaction may | use a wallet whose authorization does less |
 | `ALREADY_EXISTS` | `idempotency_conflict` | key already used with another buyer, amount or destination | use a new key |
 | `NOT_FOUND` | `buyer_not_found`, `deposit_not_found`, `charge_not_found`, `withdrawal_not_found` | no such resource in the caller's deployment | check the ID |
 | `FAILED_PRECONDITION` | `ledger_not_configured` | the deployment has no ledger contract bound | bind one |

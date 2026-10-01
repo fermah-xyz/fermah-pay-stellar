@@ -58,7 +58,7 @@ operator pays for. Its owner can make it expensive, or accept an entry and
 then refuse it once the transaction is sent.
 
 **Stopped by.**
-- The network's per-transaction resource limits bound what one call costs.
+- A bound on the resource fee of a buyer's transaction and of a restore it needs (1 XLM by default). The gateway refuses an entry whose simulation costs more, and the worker does not send one that does.
 - An entry is accepted only after the network runs it in simulation, and the worker simulates again before sending.
 - Deposits and withdrawals count against the same per-buyer and per-deployment quotas and fee-account floor as any other.
 - Mandates and x402 do not accept contract accounts.
@@ -68,8 +68,11 @@ fees by kind on the dashboard.
 
 **Response.** Remove the buyer, or lower the deployment's quotas.
 
-**Left.** Up to the quotas a day of fees for transactions that fail. No
-USDC moves without the contract's checks.
+**Left.** Up to the quotas a day of transactions at that bound. Each
+submitted entry costs the RPC node a simulation, and a refused entry can be
+submitted again: the seller's application, which forwards its buyers'
+entries, is what limits how often. No USDC moves without the contract's
+checks.
 
 ## SAC allowance manipulation
 
