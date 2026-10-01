@@ -118,11 +118,14 @@ jobs:
         run: |
           ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence end-to-end
       # Two-minute periods, so two of them and the end of the mandate fit in
-      # the run; the contract applies a month the same way.
+      # the run; the contract applies a month the same way. Its own database:
+      # a contract is bound to one deployment, which the run above created.
       - name: Run recurring charges end to end
         env:
-          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar
+          PGPASSWORD: ci-only
+          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_recurring
         run: |
+          psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar -c 'CREATE DATABASE pay_stellar_recurring'
           ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence recurring-end-to-end
       # The event decoders against what the deployed contract really emitted.
       - name: Read the contract's events
