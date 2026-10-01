@@ -256,6 +256,7 @@ jobs:
           tool deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
             --min-deposit 100000 --max-charge 10000000
           tool end-to-end
+          tool recurring-end-to-end
       - name: Node logs on failure
         if: failure()
         run: docker logs --tail 200 stellar

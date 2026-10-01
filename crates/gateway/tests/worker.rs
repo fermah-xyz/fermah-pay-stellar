@@ -4165,3 +4165,55 @@ async fn test_a_recurring_charge_not_sent_before_its_last_ledger_expires(
     );
     assert_eq!(w.wallet(&buyer), 100);
 }
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_quarantined_recurring_charge_is_resolved_from_the_contract_events_only(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use fermah_pay_stellar_gateway::quarantine::recurring::{
+        prove_recurring, quarantined_recurring, resolve_recurring,
+    };
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let charge = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    // Applied, unreadable, and no record: nothing is guessed.
+    w.stellar.with(|n| {
+        n.truncate_outcomes = true;
+        n.skip_records = true;
+    });
+    w.settle(&w.worker()).await;
+    assert_eq!(
+        w.get_recurring(&charge.recurring_charge_id).await.state(),
+        RecurringChargeState::Quarantined
+    );
+    // The period stays taken until it is resolved.
+    let taken = w.charge_period(&mandate, 10, "c-2").await.unwrap_err();
+    assert_refused(&taken, tonic::Code::AlreadyExists, "period_already_charged");
+    // The worker's role cannot take it out of quarantine.
+    let error = sqlx::query(
+        "UPDATE pay_stellar.recurring_charges SET state = 'charged', outcome = 'charged'
+         WHERE state = 'quarantined'",
+    )
+    .execute(&w.worker_pool)
+    .await
+    .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().unwrap(), "23514");
+
+    let quarantined = quarantined_recurring(&w.operator_pool, None).await.unwrap();
+    let q = &quarantined[0];
+    // Within its last ledger, nothing is established yet.
+    assert!(prove_recurring(&w.stellar, q).await.is_err());
+    w.stellar.set_latest(q.last_ledger + CHARGE_RECORD_GRACE + 1);
+    let (outcome, evidence) = prove_recurring(&w.stellar, q).await.unwrap();
+    assert_eq!(outcome, fermah_pay_stellar_chain::prepaid::RecurringOutcome::Charged);
+    assert!(evidence.contains("recurring event"), "{evidence}");
+    resolve_recurring(&w.operator_pool, q.id, outcome, &evidence).await.unwrap();
+    let resolved = w.get_recurring(&charge.recurring_charge_id).await;
+    assert_eq!(
+        (resolved.state(), resolved.outcome.as_str()),
+        (RecurringChargeState::Charged, "charged")
+    );
+    assert!(resolve_recurring(&w.operator_pool, q.id, outcome, &evidence).await.is_err());
+}

@@ -249,11 +249,9 @@ them:
 event (type `System`, attributed to the contract) whenever a contract's code
 is replaced, naming the previous and the new executable (for Wasm code,
 `["Wasm", hash]`). A refused call emits nothing.
-[`ledger_event`](../../crates/stellar-chain/src/prepaid.rs) decodes the
-deposit, charge, withdrawal and administrative events; the contract tests pin
-the decoding against the events the host records. The chain observer records
-any other event from the contract, the recurring ones included, as
-`unrecognized`.
+[`ledger_event`](../../crates/stellar-chain/src/prepaid.rs) decodes each of
+these; the contract tests pin the decoding against the events the host
+records.
 
 ## Errors
 

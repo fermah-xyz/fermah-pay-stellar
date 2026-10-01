@@ -1,0 +1,184 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.id, r.seller_deployment_id, r.charge_id, r.cycle, r.amount, r.last_ledger,\n               r.last_error, b.wallet_address, l.contract_address, l.usdc_address,\n               l.treasury_address, s.outer_hash AS \"outer_hash?\",\n               s.envelope_xdr AS \"envelope_xdr?\", s.authorized_from_ledger\n        FROM pay_stellar.recurring_charges r\n        JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n        JOIN pay_stellar.ledger_contracts l\n          ON l.seller_deployment_id = r.seller_deployment_id AND l.network = r.network\n        LEFT JOIN pay_stellar.submissions s ON s.id = r.submission_id\n        WHERE r.state = 'quarantined' AND ($1::uuid IS NULL OR r.id = $1)\n        ORDER BY r.settled_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seller_deployment_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "seller_deployment_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "charge_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "charge_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "cycle",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "cycle"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "last_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "last_error",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "outer_hash?",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "outer_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "envelope_xdr?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "envelope_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "authorized_from_ledger",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "authorized_from_ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "65e37cdd7e3fc978ed59569b3b7f3a85258eb7ed131db72e19e74e9f52d38f4d"
+}

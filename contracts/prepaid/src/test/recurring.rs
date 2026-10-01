@@ -5,7 +5,7 @@
 
 use fermah_pay_stellar_chain::prepaid::{
     ChainAddress, LedgerEvent, MandateIntent, MandateTerms, RecurringChargeRequest, RecurringEntry,
-    ledger_event, recurring_outcomes, recurring_record, stored_mandate,
+    allowance_of, ledger_event, recurring_outcomes, recurring_record, stored_mandate,
 };
 
 use super::*;
@@ -415,6 +415,13 @@ fn test_mandate_and_attempt_keys_match_the_contract_layout() {
     );
     // A prepaid charge record with the same identifier is a different entry.
     assert!(!present(&deployment.charge_record_key(&owner, &charge_id(1))));
+    // The USDC contract's allowance, as the mandate left it after one charge.
+    let allowance = snapshot
+        .ledger_entries
+        .iter()
+        .find(|(k, _)| **k == deployment.allowance_key(&owner))
+        .and_then(|(_, (entry, _))| allowance_of(&entry.data));
+    assert_eq!(allowance, Some((2 * USDC, w.env.ledger().sequence() + LIFETIME)));
 }
 
 /// The gateway reads mandates, attempt records, outcomes and events with its

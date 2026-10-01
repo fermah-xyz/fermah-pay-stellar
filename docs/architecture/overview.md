@@ -30,8 +30,9 @@ operator tools ─────────────────────�
   authorizations buyers sign, verifies what they return, and admits charges
   against the buyer's available balance. It holds no Stellar signing keys.
 - **Worker** (binary `fermah-pay-stellar-worker`): the only process that
-  signs and sends transactions. It submits signed deposits, withdrawals and
-  batches of admitted charges through the durable submission engine, applies
+  signs and sends transactions. It submits signed deposits, withdrawals,
+  mandates and revocations, and batches of admitted charges and recurring
+  charges, through the durable submission engine, applies
   each outcome to the rows it settles, keeps the contract alive, and sweeps
   the treasury's surplus to a [cold reserve](../self-hosting/treasury.md);
   see [settlement](transactions.md#settlement). Several workers may run; a

@@ -330,8 +330,7 @@ GRANT UPDATE (state, outcome, submission_id, batch_index, last_error, settled_at
 GRANT SELECT (id, buyer_id, seller_deployment_id, network, charge_id, mandate_row_id, cycle,
               amount, state, outcome)
     ON pay_stellar.recurring_charges TO pay_stellar_observer;
-GRANT SELECT (id, seller_deployment_id, state, amount, outcome, last_error)
-    ON pay_stellar.recurring_charges TO pay_stellar_operator;
+GRANT SELECT ON pay_stellar.recurring_charges TO pay_stellar_operator;
 
 -- Each entry of an observed `recurring` event, as `chain_charge_entries`
 -- holds those of `charges` events.

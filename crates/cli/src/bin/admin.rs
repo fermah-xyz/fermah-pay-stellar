@@ -132,6 +132,20 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_RPC_URL")]
         rpc_url: String,
     },
+    /// List quarantined recurring charges (operator role).
+    QuarantinedRecurringCharges,
+    /// Resolve a quarantined recurring charge (operator role), from the
+    /// network: the attempt's record while it can exist, then every
+    /// `recurring` event of the contract between the batch's authorization
+    /// and the attempt's last ledger.
+    ResolveRecurringCharge {
+        #[arg(long)]
+        recurring_charge_id: Uuid,
+        #[arg(long)]
+        network: Network,
+        #[arg(long, env = "PAY_STELLAR_RPC_URL")]
+        rpc_url: String,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -249,6 +263,51 @@ async fn main() -> anyhow::Result<()> {
             serde_json::json!({
                 "charge_id": charge_id.to_string(),
                 "resolution": format!("{resolution:?}"),
+                "evidence": evidence,
+            })
+        }
+        Command::QuarantinedRecurringCharges => {
+            let charges = quarantine::recurring::quarantined_recurring(&pool, None).await?;
+            serde_json::Value::Array(
+                charges
+                    .iter()
+                    .map(|charge| {
+                        serde_json::json!({
+                            "recurring_charge_id": charge.id.to_string(),
+                            "seller_deployment_id": charge.seller_deployment_id.to_string(),
+                            "owner": charge.owner.to_string(),
+                            "contract_charge_id": fermah_pay_stellar_chain::rpc::hex_lower(&charge.charge_id),
+                            "cycle": charge.cycle,
+                            "amount": charge.amount,
+                            "last_ledger": charge.last_ledger,
+                            "reason": charge.reason,
+                            "transaction_hash": charge.transaction_hash,
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        Command::ResolveRecurringCharge { recurring_charge_id, network, rpc_url } => {
+            let rpc = RpcClient::new(&rpc_url, Duration::from_secs(30))?;
+            rpc.verify_network(network).await.context("checking the RPC network")?;
+            let charge =
+                quarantine::recurring::quarantined_recurring(&pool, Some(recurring_charge_id))
+                    .await?
+                    .pop()
+                    .with_context(|| {
+                        format!("no quarantined recurring charge {recurring_charge_id}")
+                    })?;
+            let (outcome, evidence) = quarantine::recurring::prove_recurring(&rpc, &charge).await?;
+            quarantine::recurring::resolve_recurring(
+                &pool,
+                recurring_charge_id,
+                outcome,
+                &evidence,
+            )
+            .await?;
+            serde_json::json!({
+                "recurring_charge_id": recurring_charge_id.to_string(),
+                "outcome": outcome.token(),
                 "evidence": evidence,
             })
         }

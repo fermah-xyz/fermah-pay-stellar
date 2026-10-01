@@ -87,3 +87,26 @@ the network and refuses when the evidence does not establish it:
 
 Every resolution is kept in `pay_stellar.charge_resolutions`, which no role
 can update or delete.
+
+## Recurring charges
+
+A [recurring charge](../api/recurring.md) is quarantined for the same
+reasons. It holds nothing from the buyer's balance, so a quarantine only
+keeps its period taken: the seller cannot charge that period again until it
+is resolved. The same operator role resolves it, through
+`resolve_quarantined_recurring_charge`, which records each resolution in
+`pay_stellar.recurring_charge_resolutions`:
+
+```bash
+admin quarantined-recurring-charges
+admin resolve-recurring-charge --recurring-charge-id <CHARGE> \
+  --network stellar:testnet --rpc-url https://soroban-testnet.stellar.org
+```
+
+The tool decides from the network, as for prepaid charges: from the
+attempt's record while one can exist, once the node is past the ledger up to
+which its batch could land; then, once the record has lapsed, from every
+`recurring` event of the contract between the batch's signing ledger and the
+attempt's last ledger. It refuses while the attempt could still be settled,
+when the node no longer retains that range, and when the events show the
+attempt only as a duplicate.

@@ -439,6 +439,28 @@ impl PrepaidDeployment {
         self.persistent_key(vec_val(vec![symbol_val("Mandate"), account_val(owner)]))
     }
 
+    /// Ledger key of the USDC contract's allowance from `owner` to this
+    /// ledger contract, the approval a mandate makes.
+    #[must_use]
+    pub fn allowance_key(&self, owner: &AccountAddress) -> LedgerKey {
+        let field = |name: &str, val: ScVal| ScMapEntry { key: symbol_val(name), val };
+        let pair = ScVal::Map(Some(ScMap(
+            VecM::try_from(vec![
+                field("from", account_val(owner)),
+                field(
+                    "spender",
+                    ScVal::Address(ScAddress::Contract(ContractId(Hash(self.contract)))),
+                ),
+            ])
+            .expect("invariant: two fields"),
+        )));
+        LedgerKey::ContractData(LedgerKeyContractData {
+            contract: ScAddress::Contract(ContractId(Hash(self.usdc))),
+            key: vec_val(vec![symbol_val("Allowance"), pair]),
+            durability: ContractDataDurability::Temporary,
+        })
+    }
+
     /// Ledger key of the record of one recurring charge attempt.
     #[must_use]
     pub fn recurring_record_key(&self, owner: &AccountAddress, charge_id: &[u8; 32]) -> LedgerKey {
@@ -728,6 +750,25 @@ fn mandate_of(value: &ScVal) -> Option<MandateTerms> {
 pub fn stored_mandate(entry: &LedgerEntryData) -> Option<MandateTerms> {
     let LedgerEntryData::ContractData(ContractDataEntry { val, .. }) = entry else { return None };
     mandate_of(val)
+}
+
+/// The amount and last ledger of a USDC allowance entry read from the
+/// ledger. The USDC contract honours none of it after that ledger.
+#[must_use]
+pub fn allowance_of(entry: &LedgerEntryData) -> Option<(i128, u32)> {
+    let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
+        entry
+    else {
+        return None;
+    };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    let ScVal::U32(live_until) = field(b"live_until_ledger")? else { return None };
+    Some((i128_of(field(b"amount")?)?, *live_until))
 }
 
 /// The outcome in a recurring charge attempt's record read from the ledger.

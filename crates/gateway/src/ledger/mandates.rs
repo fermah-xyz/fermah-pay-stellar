@@ -114,7 +114,7 @@ fn mandate_signing(record: &MandateRecord, signed: &SorobanAuthorizationEntry) -
         record.state == MandateState::Expired,
         record.signed_authorization_xdr.as_deref(),
         signed,
-        (Refusal::MandateExpired, Refusal::MandateAlreadySigned),
+        (Refusal::MandateAuthorizationExpired, Refusal::MandateAlreadySigned),
     )
 }
 
@@ -425,7 +425,7 @@ impl<L: LatestLedger> LedgerApi<L> {
             latest,
             self.policy.authorization_validity_ledgers,
         )
-        .map_err(|refusal| signature_refusal(&refusal, Refusal::MandateExpired))?;
+        .map_err(|refusal| signature_refusal(&refusal, Refusal::MandateAuthorizationExpired))?;
         let signed_xdr = signed
             .to_xdr_base64(Limits::none())
             .map_err(|_| corrupt("signed authorization entry"))?;

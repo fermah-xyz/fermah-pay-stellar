@@ -137,6 +137,15 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// Run recurring charges through the gateway API against the recorded
+    /// deployment, with two-minute periods: a new zero-XLM buyer signs one
+    /// mandate, two periods are charged, the contract refuses a charge
+    /// before its period and after the last one, and the buyer revokes.
+    RecurringEndToEnd {
+        /// PostgreSQL URL of the database owner; the run applies migrations.
+        #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
     /// Load the recorded deployment through the gateway API: BUYERS new
     /// zero-XLM buyers deposit once each, then CHARGES_PER_BUYER charges each
     /// are admitted CONCURRENCY at a time and settled by the worker from
@@ -253,6 +262,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Withdraw { buyer, amount } => context()?.withdraw(buyer, amount).await?,
         Command::Solvency => context()?.solvency().await?,
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
+        Command::RecurringEndToEnd { database_url } => {
+            context()?.recurring_end_to_end(&database_url).await?;
+        }
         Command::KeyCheck { key } => context()?.key_check(&key).await?,
         Command::LoadTest { database_url, buyers, charges_per_buyer, channels, concurrency } => {
             let shape = LoadShape { buyers, charges_per_buyer, channels, concurrency };

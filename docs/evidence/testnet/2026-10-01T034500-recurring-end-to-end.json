@@ -1,0 +1,101 @@
+{
+  "api_refusal_after_last_period": "mandate_ended",
+  "buyer": "GCB3I6FERSZZIFUPBY5OC4VETIIBXKWIMOA6JROMR4VPSL2VF4W6WCRJ",
+  "charge_after_last_period": {
+    "attempt": "late",
+    "charge_id": "65d750ed8c8f9481f79562838ae935a54e2abe79015e0d09b88a953cec9bf9cf",
+    "cycle": 2,
+    "fee_charged_stroops": 26728,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "fdc9119795ae5a7880b15983e7dbb02e497f57087b887f42f910976eeef8b74d",
+    "ledger": 4960540,
+    "outcome": "mandate_expired",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/1ba61b41d41e81f8a5b258d39eb23974cf8b07417c6d8b97b4d61d098ff55695",
+    "resources": {
+      "disk_read_bytes": 188,
+      "footprint_read_only": 3,
+      "footprint_read_write": 3,
+      "instructions": 1640920,
+      "write_bytes": 1048
+    },
+    "transaction_hash": "1ba61b41d41e81f8a5b258d39eb23974cf8b07417c6d8b97b4d61d098ff55695"
+  },
+  "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+  "criterion": "recurring-end-to-end",
+  "early_charge": {
+    "attempt": "early",
+    "charge_id": "fd56f847e83b29934738d7a356bdc48ae08002540f4d0dce304ff5b3e872323e",
+    "cycle": 1,
+    "fee_charged_stroops": 26727,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "c600755b34b9f333fdbc873882b46a1bf5f446d2e4d95d93327fb62c5dd867b1",
+    "ledger": 4960495,
+    "outcome": "not_due",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/1b5a53cce47c7f90102dfc9f5738da6226d792e0fcdc95c06b6ed823b8318afb",
+    "resources": {
+      "disk_read_bytes": 188,
+      "footprint_read_only": 3,
+      "footprint_read_write": 3,
+      "instructions": 1640936,
+      "write_bytes": 1048
+    },
+    "transaction_hash": "1b5a53cce47c7f90102dfc9f5738da6226d792e0fcdc95c06b6ed823b8318afb"
+  },
+  "expected": "a buyer with 0 XLM authorizes a mandate with one signature; the seller charges the first and the second period without the buyer signing again; the contract refuses a charge before its period and a charge after the mandate's last period, on-chain; the buyer revokes and the allowance is zero",
+  "first_period": {
+    "amount": 100000,
+    "cycle": 0,
+    "ledger": 4960493,
+    "outcome": "charged",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/ce45bae8722360136455d388d14a90acc06814e9f7f464b559ccf1e163d7e547",
+    "transaction_hash": "ce45bae8722360136455d388d14a90acc06814e9f7f464b559ccf1e163d7e547"
+  },
+  "funding_transaction": "08495673834a885a5ac7c927f3cad1e0430e096cc61c6fcfe46a45fc4eaac2e3",
+  "mandate": {
+    "allowance": {
+      "amount": "200000",
+      "live_until_ledger": 4961269
+    },
+    "amount_per_period": 100000,
+    "cycles": 2,
+    "ledger": 4960491,
+    "live_until_ledger": 4961269,
+    "period_secs": 120,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/75135a4d1cb7270260ddc8e929e8672751ee7d188b0eb0edd05d9c5e86a6486e",
+    "starts_at": 1790826042,
+    "transaction_hash": "75135a4d1cb7270260ddc8e929e8672751ee7d188b0eb0edd05d9c5e86a6486e"
+  },
+  "network": "stellar:testnet",
+  "observed": {
+    "buyer_usdc_after": 100000,
+    "buyer_usdc_before": 300000,
+    "buyer_xlm_stroops_after": 0,
+    "buyer_xlm_stroops_before": 0,
+    "treasury_usdc_gained": 200000
+  },
+  "onboarding_transaction": "db20cb0b81e5406195b52738d6d354db776b7d799c8b3af8e63c8f6c92d33b01",
+  "period_compressed": {
+    "note": "periods last two minutes so the run shows them within minutes; the contract measures a period in ledger time, so a monthly mandate is the same code with period_secs = 2592000",
+    "period_secs": 120
+  },
+  "recorded_at": "2026-10-01T03:45:00.349568457Z",
+  "revocation": {
+    "allowance_after": {
+      "amount": "0",
+      "live_until_ledger": 0
+    },
+    "ledger": 4960542,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/dd9e1dd73b0156dae71210542a4914ccf9bb428b31d16a66f8450bbd3952c859",
+    "transaction_hash": "dd9e1dd73b0156dae71210542a4914ccf9bb428b31d16a66f8450bbd3952c859"
+  },
+  "second_period": {
+    "amount": 100000,
+    "cycle": 1,
+    "ledger": 4960517,
+    "outcome": "charged",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/9f067237273b911ba9b635dcb68bfb950c4722aa7caa516620b4f013fcc8e45e",
+    "transaction_hash": "9f067237273b911ba9b635dcb68bfb950c4722aa7caa516620b4f013fcc8e45e"
+  }
+}

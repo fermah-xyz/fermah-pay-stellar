@@ -39,7 +39,7 @@ pub enum Refusal {
     WithdrawalQuotaExceeded,
     InvalidMandateId,
     MandateNotFound,
-    MandateExpired,
+    MandateAuthorizationExpired,
     MandateAlreadySigned,
     InvalidPeriod,
     InvalidCycles,
@@ -96,7 +96,7 @@ impl Refusal {
             Self::WithdrawalQuotaExceeded => "withdrawal_quota_exceeded",
             Self::InvalidMandateId => "invalid_mandate_id",
             Self::MandateNotFound => "mandate_not_found",
-            Self::MandateExpired => "mandate_expired",
+            Self::MandateAuthorizationExpired => "mandate_authorization_expired",
             Self::MandateAlreadySigned => "mandate_already_signed",
             Self::InvalidPeriod => "invalid_period",
             Self::InvalidCycles => "invalid_cycles",
@@ -163,7 +163,7 @@ impl Refusal {
             | Self::DepositAlreadySigned
             | Self::WithdrawalExpired
             | Self::WithdrawalAlreadySigned
-            | Self::MandateExpired
+            | Self::MandateAuthorizationExpired
             | Self::MandateAlreadySigned
             | Self::RevocationExpired
             | Self::RevocationAlreadySigned
