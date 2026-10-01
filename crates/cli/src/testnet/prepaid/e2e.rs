@@ -210,7 +210,13 @@ impl Context {
             store.clone(),
             self.rpc.clone(),
             self.network,
-            LedgerPolicy { authorization_validity_ledgers: 720, charge_validity_ledgers: 720 },
+            LedgerPolicy {
+                authorization_validity_ledgers: 720,
+                charge_validity_ledgers: 720,
+                // Short periods, so a run can show several within minutes.
+                min_mandate_period_secs: 60,
+                max_mandate_ledgers: 3_000_000,
+            },
         );
         let mut gateway_stop = stopped.clone();
         let limits =

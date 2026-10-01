@@ -37,6 +37,24 @@ pub enum Refusal {
     BuyerQuotaExceeded,
     DepositQuotaExceeded,
     WithdrawalQuotaExceeded,
+    InvalidMandateId,
+    MandateNotFound,
+    MandateExpired,
+    MandateAlreadySigned,
+    InvalidPeriod,
+    InvalidCycles,
+    MandateTooLong,
+    MandateQuotaExceeded,
+    InvalidRevocationId,
+    RevocationNotFound,
+    RevocationExpired,
+    RevocationAlreadySigned,
+    MandateNotActive,
+    MandateEnded,
+    AboveMandate,
+    PeriodAlreadyCharged,
+    InvalidRecurringChargeId,
+    RecurringChargeNotFound,
     NetworkUnavailable,
     Internal,
 }
@@ -76,6 +94,24 @@ impl Refusal {
             Self::BuyerQuotaExceeded => "buyer_quota_exceeded",
             Self::DepositQuotaExceeded => "deposit_quota_exceeded",
             Self::WithdrawalQuotaExceeded => "withdrawal_quota_exceeded",
+            Self::InvalidMandateId => "invalid_mandate_id",
+            Self::MandateNotFound => "mandate_not_found",
+            Self::MandateExpired => "mandate_expired",
+            Self::MandateAlreadySigned => "mandate_already_signed",
+            Self::InvalidPeriod => "invalid_period",
+            Self::InvalidCycles => "invalid_cycles",
+            Self::MandateTooLong => "mandate_too_long",
+            Self::MandateQuotaExceeded => "mandate_quota_exceeded",
+            Self::InvalidRevocationId => "invalid_revocation_id",
+            Self::RevocationNotFound => "revocation_not_found",
+            Self::RevocationExpired => "revocation_expired",
+            Self::RevocationAlreadySigned => "revocation_already_signed",
+            Self::MandateNotActive => "mandate_not_active",
+            Self::MandateEnded => "mandate_ended",
+            Self::AboveMandate => "above_mandate",
+            Self::PeriodAlreadyCharged => "period_already_charged",
+            Self::InvalidRecurringChargeId => "invalid_recurring_charge_id",
+            Self::RecurringChargeNotFound => "recurring_charge_not_found",
             Self::NetworkUnavailable => "network_unavailable",
             Self::Internal => "internal",
         }
@@ -99,21 +135,40 @@ impl Refusal {
             | Self::InvalidChargeId
             | Self::InvalidWithdrawalId
             | Self::InvalidDestination
-            | Self::WithdrawalBelowMinimum => Code::InvalidArgument,
+            | Self::WithdrawalBelowMinimum
+            | Self::InvalidMandateId
+            | Self::InvalidPeriod
+            | Self::InvalidCycles
+            | Self::MandateTooLong
+            | Self::InvalidRevocationId
+            | Self::AboveMandate
+            | Self::InvalidRecurringChargeId => Code::InvalidArgument,
             Self::BuyerQuotaExceeded
             | Self::DepositQuotaExceeded
-            | Self::WithdrawalQuotaExceeded => Code::ResourceExhausted,
-            Self::BuyerConflict | Self::IdempotencyConflict => Code::AlreadyExists,
+            | Self::WithdrawalQuotaExceeded
+            | Self::MandateQuotaExceeded => Code::ResourceExhausted,
+            Self::BuyerConflict | Self::IdempotencyConflict | Self::PeriodAlreadyCharged => {
+                Code::AlreadyExists
+            }
             Self::BuyerNotFound
             | Self::DepositNotFound
             | Self::ChargeNotFound
-            | Self::WithdrawalNotFound => Code::NotFound,
+            | Self::WithdrawalNotFound
+            | Self::MandateNotFound
+            | Self::RevocationNotFound
+            | Self::RecurringChargeNotFound => Code::NotFound,
             Self::InsufficientBalance
             | Self::LedgerNotConfigured
             | Self::DepositExpired
             | Self::DepositAlreadySigned
             | Self::WithdrawalExpired
-            | Self::WithdrawalAlreadySigned => Code::FailedPrecondition,
+            | Self::WithdrawalAlreadySigned
+            | Self::MandateExpired
+            | Self::MandateAlreadySigned
+            | Self::RevocationExpired
+            | Self::RevocationAlreadySigned
+            | Self::MandateNotActive
+            | Self::MandateEnded => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

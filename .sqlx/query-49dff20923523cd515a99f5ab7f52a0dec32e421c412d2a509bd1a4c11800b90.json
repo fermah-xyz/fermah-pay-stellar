@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mandate_id FROM pay_stellar.mandates WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mandate_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "mandate_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "49dff20923523cd515a99f5ab7f52a0dec32e421c412d2a509bd1a4c11800b90"
+}

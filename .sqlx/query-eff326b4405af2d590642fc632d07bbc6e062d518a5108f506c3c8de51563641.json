@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE pay_stellar.recurring_charges\n                        SET state = $2, outcome = $3, settled_at = now()\n                        WHERE id = $1 AND state = 'submitted'\n                        RETURNING mandate_row_id\n                        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mandate_row_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "mandate_row_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "eff326b4405af2d590642fc632d07bbc6e062d518a5108f506c3c8de51563641"
+}

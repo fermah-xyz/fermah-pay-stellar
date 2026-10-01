@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.revocations\n            SET state = 'signed', signed_authorization_xdr = $4, signed_at = now()\n            WHERE id = $1 AND seller_deployment_id = $2 AND network = $3\n              AND state = 'awaiting_signature'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "51e234753ebac87694e700689eff0722c19b1823a5f4341cca1cfc8f44c1d4ab"
+}

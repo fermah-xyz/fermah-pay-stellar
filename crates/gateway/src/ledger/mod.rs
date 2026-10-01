@@ -5,6 +5,7 @@
 //! buyer signs, verifies what the buyer returns, and admits charges against
 //! the database balance; the worker settles both on-chain.
 
+mod mandates;
 pub mod store;
 mod withdrawals;
 
@@ -32,6 +33,13 @@ use fermah_pay_stellar_proto::v1::{
     PrepareWithdrawalResponse, SubmitDepositRequest, SubmitDepositResponse,
     SubmitWithdrawalRequest, SubmitWithdrawalResponse,
 };
+use fermah_pay_stellar_proto::v1::{
+    CreateRecurringChargeRequest, CreateRecurringChargeResponse, GetMandateRequest,
+    GetMandateResponse, GetRecurringChargeRequest, GetRecurringChargeResponse,
+    GetRevocationRequest, GetRevocationResponse, PrepareMandateRequest, PrepareMandateResponse,
+    PrepareRevocationRequest, PrepareRevocationResponse, SubmitMandateRequest,
+    SubmitMandateResponse, SubmitRevocationRequest, SubmitRevocationResponse,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tonic::{Request, Response, Status};
@@ -45,15 +53,23 @@ use crate::refusal::Refusal;
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 
-/// The one network read the API needs: the current ledger, which bounds how
-/// long a buyer's signature stays valid.
+/// The network reads the API needs: the current ledger, which bounds how
+/// long a buyer's signature stays valid, and its close time, the ledger time
+/// by which the contract decides a mandate's period.
 pub trait LatestLedger: Send + Sync + 'static {
     fn latest_ledger(&self) -> impl Future<Output = Result<u32, RpcError>> + Send;
+
+    /// Unix close time of the latest ledger.
+    fn latest_close_time(&self) -> impl Future<Output = Result<i64, RpcError>> + Send;
 }
 
 impl LatestLedger for RpcClient {
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         self.get_latest_ledger().await
+    }
+
+    async fn latest_close_time(&self) -> Result<i64, RpcError> {
+        Ok(self.get_latest_ledger_info().await?.close_time)
     }
 }
 
@@ -70,6 +86,12 @@ pub struct LedgerPolicy {
     /// contract accepts at most about a day, and the record of each charge
     /// costs rent for as long as this.
     pub charge_validity_ledgers: u32,
+    /// Shortest period a mandate may have, in seconds.
+    pub min_mandate_period_secs: u64,
+    /// Furthest ahead, in ledgers, a mandate's last ledger may be. The
+    /// network refuses an allowance beyond its longest entry lifetime, about
+    /// six months on testnet and mainnet.
+    pub max_mandate_ledgers: u32,
 }
 
 pub struct LedgerApi<L> {
@@ -569,5 +591,69 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         request: Request<GetWithdrawalRequest>,
     ) -> Result<Response<GetWithdrawalResponse>, Status> {
         self.get_withdrawal_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_mandate(
+        &self,
+        request: Request<PrepareMandateRequest>,
+    ) -> Result<Response<PrepareMandateResponse>, Status> {
+        self.prepare_mandate_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_mandate(
+        &self,
+        request: Request<SubmitMandateRequest>,
+    ) -> Result<Response<SubmitMandateResponse>, Status> {
+        self.submit_mandate_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_mandate(
+        &self,
+        request: Request<GetMandateRequest>,
+    ) -> Result<Response<GetMandateResponse>, Status> {
+        self.get_mandate_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_revocation(
+        &self,
+        request: Request<PrepareRevocationRequest>,
+    ) -> Result<Response<PrepareRevocationResponse>, Status> {
+        self.prepare_revocation_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_revocation(
+        &self,
+        request: Request<SubmitRevocationRequest>,
+    ) -> Result<Response<SubmitRevocationResponse>, Status> {
+        self.submit_revocation_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_revocation(
+        &self,
+        request: Request<GetRevocationRequest>,
+    ) -> Result<Response<GetRevocationResponse>, Status> {
+        self.get_revocation_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn create_recurring_charge(
+        &self,
+        request: Request<CreateRecurringChargeRequest>,
+    ) -> Result<Response<CreateRecurringChargeResponse>, Status> {
+        self.create_recurring_charge_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_recurring_charge(
+        &self,
+        request: Request<GetRecurringChargeRequest>,
+    ) -> Result<Response<GetRecurringChargeResponse>, Status> {
+        self.get_recurring_charge_request(request).await
     }
 }

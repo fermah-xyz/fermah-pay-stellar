@@ -19,6 +19,8 @@ use crate::transaction::account_id;
 /// The contract's limits the gateway must respect, mirrored from the
 /// contract and pinned against it by the contract's tests.
 pub const MAX_BATCH: usize = 98;
+/// Most recurring charges one `charge_recurring_batch` call accepts.
+pub const MAX_RECURRING_BATCH: usize = 35;
 /// Furthest ahead of the current ledger a charge's last ledger may be.
 pub const MAX_CHARGE_WINDOW: u32 = 17_280;
 /// Ledgers a charge record outlives the charge's last ledger.
@@ -601,6 +603,155 @@ impl Outcome {
     }
 }
 
+/// A recurring charge's result as `charge_recurring_batch` returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecurringOutcome {
+    Charged,
+    Duplicate,
+    Expired,
+    NoMandate,
+    MandateExpired,
+    AlreadyCharged,
+    NotDue,
+    PeriodOver,
+    AboveMandate,
+    AboveLimit,
+    AboveDailyLimit,
+    AllowanceShort,
+    WalletShort,
+    TransferRefused,
+}
+
+impl RecurringOutcome {
+    /// The contract encodes the enum as its `u32` discriminant.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => Self::Charged,
+            1 => Self::Duplicate,
+            2 => Self::Expired,
+            3 => Self::NoMandate,
+            4 => Self::MandateExpired,
+            5 => Self::AlreadyCharged,
+            6 => Self::NotDue,
+            7 => Self::PeriodOver,
+            8 => Self::AboveMandate,
+            9 => Self::AboveLimit,
+            10 => Self::AboveDailyLimit,
+            11 => Self::AllowanceShort,
+            12 => Self::WalletShort,
+            13 => Self::TransferRefused,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Charged => "charged",
+            Self::Duplicate => "duplicate",
+            Self::Expired => "expired",
+            Self::NoMandate => "no_mandate",
+            Self::MandateExpired => "mandate_expired",
+            Self::AlreadyCharged => "already_charged",
+            Self::NotDue => "not_due",
+            Self::PeriodOver => "period_over",
+            Self::AboveMandate => "above_mandate",
+            Self::AboveLimit => "above_limit",
+            Self::AboveDailyLimit => "above_daily_limit",
+            Self::AllowanceShort => "allowance_short",
+            Self::WalletShort => "wallet_short",
+            Self::TransferRefused => "transfer_refused",
+        }
+    }
+}
+
+/// The outcomes `charge_recurring_batch` returned, one per submitted charge
+/// in order; `None` if the value has any other shape.
+#[must_use]
+pub fn recurring_outcomes(value: &ScVal) -> Option<Vec<RecurringOutcome>> {
+    let ScVal::Vec(Some(ScVec(items))) = value else { return None };
+    items
+        .iter()
+        .map(|item| match item {
+            ScVal::U32(code) => RecurringOutcome::from_code(*code),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A mandate as the contract stores it and announces it: up to `amount` per
+/// `period_secs` of ledger time from `start`, for `cycles` periods, until
+/// ledger `live_until`; `next_cycle` is the first period not yet charged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MandateTerms {
+    pub mandate_id: [u8; 32],
+    pub amount: i128,
+    pub period_secs: u64,
+    pub start: u64,
+    pub cycles: u32,
+    pub live_until: u32,
+    pub next_cycle: u32,
+}
+
+fn mandate_of(value: &ScVal) -> Option<MandateTerms> {
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    let (ScVal::U64(period_secs), ScVal::U64(start)) = (field(b"period_secs")?, field(b"start")?)
+    else {
+        return None;
+    };
+    let (ScVal::U32(cycles), ScVal::U32(live_until), ScVal::U32(next_cycle)) =
+        (field(b"cycles")?, field(b"live_until")?, field(b"next_cycle")?)
+    else {
+        return None;
+    };
+    Some(MandateTerms {
+        mandate_id: bytes32_of(field(b"mandate_id")?)?,
+        amount: i128_of(field(b"amount")?)?,
+        period_secs: *period_secs,
+        start: *start,
+        cycles: *cycles,
+        live_until: *live_until,
+        next_cycle: *next_cycle,
+    })
+}
+
+/// The mandate in a mandate entry read from the ledger; `None` if the entry
+/// is not one.
+#[must_use]
+pub fn stored_mandate(entry: &LedgerEntryData) -> Option<MandateTerms> {
+    let LedgerEntryData::ContractData(ContractDataEntry { val, .. }) = entry else { return None };
+    mandate_of(val)
+}
+
+/// The outcome in a recurring charge attempt's record read from the ledger.
+#[must_use]
+pub fn recurring_record(entry: &LedgerEntryData) -> Option<RecurringOutcome> {
+    match entry {
+        LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::U32(code), .. }) => {
+            RecurringOutcome::from_code(*code)
+        }
+        _ => None,
+    }
+}
+
+/// One entry of the contract's `recurring` event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecurringEntry {
+    pub owner: ChainAddress,
+    pub charge_id: [u8; 32],
+    pub mandate_id: [u8; 32],
+    pub cycle: u32,
+    pub amount: i128,
+    pub outcome: RecurringOutcome,
+}
+
 /// The outcomes `charge_batch` returned, one per submitted charge in order;
 /// `None` if the value has any other shape.
 #[must_use]
@@ -751,6 +902,18 @@ pub enum LedgerEvent {
         previous: Option<DailyLimits>,
         current: DailyLimits,
     },
+    /// A buyer authorized a mandate, replacing any previous one.
+    MandateAuthorized {
+        owner: ChainAddress,
+        mandate: MandateTerms,
+    },
+    /// A buyer revoked their mandate; `None` if there was none.
+    MandateRevoked {
+        owner: ChainAddress,
+        mandate_id: Option<[u8; 32]>,
+    },
+    /// Every entry one `charge_recurring_batch` call settled or refused.
+    Recurring(Vec<RecurringEntry>),
 }
 
 /// What one account, and all the seller's accounts together, may be charged
@@ -800,6 +963,24 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
     if let (b"pause", [], ScVal::Bool(paused)) = (name.0.as_slice(), rest, data) {
         return Some(LedgerEvent::PauseChanged { paused: *paused });
     }
+    match (name.0.as_slice(), rest) {
+        (b"mandate", [owner]) => {
+            return Some(LedgerEvent::MandateAuthorized {
+                owner: ChainAddress::from_val(owner)?,
+                mandate: mandate_of(data)?,
+            });
+        }
+        (b"revoke", [owner]) => {
+            return Some(LedgerEvent::MandateRevoked {
+                owner: ChainAddress::from_val(owner)?,
+                mandate_id: match data {
+                    ScVal::Void => None,
+                    other => Some(bytes32_of(other)?),
+                },
+            });
+        }
+        _ => {}
+    }
     let fields = match data {
         ScVal::Vec(Some(ScVec(fields))) => fields.as_slice(),
         _ => return None,
@@ -830,6 +1011,35 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                 })
                 .collect::<Option<_>>()?,
         ),
+        (b"recurring", []) => {
+            LedgerEvent::Recurring(
+                fields
+                    .iter()
+                    .map(|entry| {
+                        let ScVal::Vec(Some(ScVec(entry))) = entry else { return None };
+                        let [
+                            owner,
+                            charge_id,
+                            mandate_id,
+                            ScVal::U32(cycle),
+                            amount,
+                            ScVal::U32(code),
+                        ] = entry.as_slice()
+                        else {
+                            return None;
+                        };
+                        Some(RecurringEntry {
+                            owner: ChainAddress::from_val(owner)?,
+                            charge_id: bytes32_of(charge_id)?,
+                            mandate_id: bytes32_of(mandate_id)?,
+                            cycle: *cycle,
+                            amount: i128_of(amount)?,
+                            outcome: RecurringOutcome::from_code(*code)?,
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+            )
+        }
         (b"withdraw", [owner]) => {
             let [destination, amount, withdrawal_id] = fields else { return None };
             LedgerEvent::Withdrawn {

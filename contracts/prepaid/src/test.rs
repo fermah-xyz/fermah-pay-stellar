@@ -1918,8 +1918,13 @@ fn test_gateway_reads_the_roles_from_get_config() {
 fn test_gateway_mirrors_the_contract_limits() {
     use fermah_pay_stellar_chain::prepaid as gateway;
     assert_eq!(
-        (gateway::MAX_BATCH as u32, gateway::MAX_CHARGE_WINDOW, gateway::CHARGE_RECORD_GRACE),
-        (MAX_BATCH, MAX_CHARGE_WINDOW, CHARGE_RECORD_GRACE)
+        (
+            gateway::MAX_BATCH as u32,
+            gateway::MAX_RECURRING_BATCH as u32,
+            gateway::MAX_CHARGE_WINDOW,
+            gateway::CHARGE_RECORD_GRACE
+        ),
+        (MAX_BATCH, MAX_RECURRING_BATCH, MAX_CHARGE_WINDOW, CHARGE_RECORD_GRACE)
     );
 }
 

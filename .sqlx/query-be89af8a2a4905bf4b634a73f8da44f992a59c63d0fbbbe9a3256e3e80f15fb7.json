@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.mandates\n            SET state = 'replaced', closed_at = now(),\n                last_error = 'a newer mandate of the buyer became active'\n            WHERE buyer_id = $1 AND state = 'active' AND id <> $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be89af8a2a4905bf4b634a73f8da44f992a59c63d0fbbbe9a3256e3e80f15fb7"
+}

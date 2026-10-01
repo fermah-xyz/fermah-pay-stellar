@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.revocations SET state = 'submitted', submission_id = $2,\n                    last_error = NULL\n                WHERE id = $1 AND state = 'signed'\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "19539962a6cef41c5b41b8d9872b023e6d9bda0238c52772f0174eb61d7fab95"
+}

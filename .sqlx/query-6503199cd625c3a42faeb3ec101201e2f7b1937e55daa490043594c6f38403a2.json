@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.mandates\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, mandate_id, amount,\n                 period_secs, cycles, live_until, authorization_xdr, expiration_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bytea",
+        "Int8",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6503199cd625c3a42faeb3ec101201e2f7b1937e55daa490043594c6f38403a2"
+}

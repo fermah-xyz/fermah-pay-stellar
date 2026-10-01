@@ -13,7 +13,7 @@ use common::{
 use fermah_pay_stellar_chain::authorization::{sign_entry, signature_payload};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::{DepositIntent, PrepaidDeployment};
+use fermah_pay_stellar_chain::prepaid::{DepositIntent, MandateIntent, PrepaidDeployment};
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::stellar_xdr::{
     BytesM, Limits, ReadXdr, ScBytes, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec,
@@ -24,8 +24,10 @@ use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
-    ChargeState, CreateBuyerRequest, CreateChargeRequest, Deposit, DepositState, GetBalanceRequest,
-    GetChargeRequest, GetDepositRequest, PrepareDepositRequest, SubmitDepositRequest,
+    ChargeState, CreateBuyerRequest, CreateChargeRequest, CreateRecurringChargeRequest, Deposit,
+    DepositState, GetBalanceRequest, GetChargeRequest, GetDepositRequest, GetMandateRequest,
+    Mandate, MandateState, PrepareDepositRequest, PrepareMandateRequest, PrepareRevocationRequest,
+    SubmitDepositRequest, SubmitMandateRequest,
 };
 use sha2::Digest as _;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -992,4 +994,259 @@ async fn test_binding_follows_a_rotation_only_through_the_audited_sync(
 
 fn treasury_of_setup() -> String {
     treasury().as_str().to_owned()
+}
+
+// ---- mandates -----------------------------------------------------------------
+
+const DAY: u64 = 86_400;
+
+fn mandate_request(
+    buyer_id: &str,
+    amount: i64,
+    period: u64,
+    cycles: u32,
+    key: &str,
+) -> PrepareMandateRequest {
+    PrepareMandateRequest {
+        buyer_id: buyer_id.to_owned(),
+        amount,
+        period_secs: period,
+        cycles,
+        idempotency_key: key.to_owned(),
+    }
+}
+
+async fn prepare_mandate(
+    h: &Harness,
+    t: &Tenant,
+    request: PrepareMandateRequest,
+) -> Result<(Mandate, bool), tonic::Status> {
+    let reply = ledger(h).await.prepare_mandate(authed(request, &t.token)).await?.into_inner();
+    Ok((reply.mandate.unwrap(), reply.created))
+}
+
+fn mandate_entry(mandate: &Mandate) -> SorobanAuthorizationEntry {
+    SorobanAuthorizationEntry::from_xdr_base64(&mandate.authorization_entry_xdr, Limits::none())
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_prepared_mandate_authorizes_exactly_the_mandate_and_its_approval(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    let (mandate, created) =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 5_000_000, 30 * DAY, 2, "m-1"))
+            .await
+            .unwrap();
+    assert!(created);
+    assert_eq!(mandate.state(), MandateState::AwaitingSignature);
+    let latest = h.ledger.get();
+    assert_eq!(mandate.expiration_ledger, latest + AUTHORIZATION_VALIDITY_LEDGERS);
+    // Every period has ended by the last ledger even at four seconds a
+    // ledger, after the time the buyer has to sign.
+    let periods_ledgers = u32::try_from((2 * 30 * DAY).div_ceil(4)).unwrap();
+    assert_eq!(
+        mandate.live_until_ledger,
+        latest + AUTHORIZATION_VALIDITY_LEDGERS + periods_ledgers
+    );
+    let mandate_id: Vec<u8> = sqlx::query_scalar("SELECT mandate_id FROM pay_stellar.mandates")
+        .fetch_one(&h.owner)
+        .await
+        .unwrap();
+    let usdc = fermah_pay_stellar_chain::usdc::asset_contract_id(
+        &fermah_pay_stellar_chain::usdc::circle_usdc(Network::Testnet),
+        Network::Testnet,
+    );
+    let expected = PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() }
+        .authorize_recurring_authorization(&MandateIntent {
+            owner: b.key.address(),
+            mandate_id: mandate_id.try_into().unwrap(),
+            amount: 5_000_000,
+            period_secs: 30 * DAY,
+            cycles: 2,
+            live_until: mandate.live_until_ledger,
+        });
+    let entry = mandate_entry(&mandate);
+    assert_eq!(entry.root_invocation, expected);
+    let payload =
+        signature_payload(network_id(Network::Testnet), &entry.credentials, &entry.root_invocation)
+            .unwrap();
+    assert_eq!(mandate.signature_payload, hex_lower(&payload));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_mandate_requests_outside_the_policy_or_the_scope_are_refused(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    let refused = [
+        (mandate_request(&b.id, 0, DAY, 2, "a"), Code::InvalidArgument, "invalid_amount"),
+        (mandate_request(&b.id, 10, 59, 2, "b"), Code::InvalidArgument, "invalid_period"),
+        (mandate_request(&b.id, 10, DAY, 0, "c"), Code::InvalidArgument, "invalid_cycles"),
+        // About 140 days at four seconds a ledger: past the network's limit.
+        (mandate_request(&b.id, 10, DAY, 140, "d"), Code::InvalidArgument, "mandate_too_long"),
+        (mandate_request(&b.id, 10, u64::MAX, 2, "e"), Code::InvalidArgument, "mandate_too_long"),
+        (mandate_request("not-a-uuid", 10, DAY, 2, "f"), Code::InvalidArgument, "invalid_buyer_id"),
+    ];
+    for (request, code, reason) in refused {
+        let status = prepare_mandate(&h, &t, request).await.unwrap_err();
+        assert_refused(&status, code, reason);
+    }
+    // A buyer of another deployment does not exist for this one.
+    let other = h.tenant("shop", "other", Network::Testnet).await;
+    let stranger = buyer(&h, &other, "bob").await;
+    let status =
+        prepare_mandate(&h, &t, mandate_request(&stranger.id, 10, DAY, 2, "g")).await.unwrap_err();
+    assert_refused(&status, Code::NotFound, "buyer_not_found");
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pay_stellar.mandates")
+        .fetch_one(&h.owner)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_mandate_retry_returns_the_first_and_other_reuse_conflicts(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    let (first, _) =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, "m-1")).await.unwrap();
+    let (again, created) =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, "m-1")).await.unwrap();
+    assert_eq!((again.mandate_id, created), (first.mandate_id, false));
+    let status =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 3, "m-1")).await.unwrap_err();
+    assert_refused(&status, Code::AlreadyExists, "idempotency_conflict");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_mandates_and_revocations_share_a_daily_quota_per_buyer(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    for i in 0..4 {
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, &format!("m-{i}")))
+            .await
+            .unwrap();
+    }
+    let revocation =
+        PrepareRevocationRequest { buyer_id: b.id.clone(), idempotency_key: "r-1".to_owned() };
+    ledger(&h).await.prepare_revocation(authed(revocation, &t.token)).await.unwrap();
+    let status =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, "m-5")).await.unwrap_err();
+    assert_refused(&status, Code::ResourceExhausted, "mandate_quota_exceeded");
+    let revocation =
+        PrepareRevocationRequest { buyer_id: b.id.clone(), idempotency_key: "r-2".to_owned() };
+    let status =
+        ledger(&h).await.prepare_revocation(authed(revocation, &t.token)).await.unwrap_err();
+    assert_refused(&status, Code::ResourceExhausted, "mandate_quota_exceeded");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_signed_mandate_is_verified_stored_once_and_invisible_to_other_deployments(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    let (mandate, _) =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, "m-1")).await.unwrap();
+    let entry = mandate_entry(&mandate);
+    let payload =
+        signature_payload(network_id(Network::Testnet), &entry.credentials, &entry.root_invocation)
+            .unwrap();
+    // The buyer's public key with this key's signature over the right
+    // payload: only the signature check itself can refuse a stranger's.
+    let sign = |key: &SecretKey| {
+        with_signature(&entry, *b.key.address().public_key(), key.sign_raw(&payload))
+    };
+    let submit = |signed: String| SubmitMandateRequest {
+        mandate_id: mandate.mandate_id.clone(),
+        signed_authorization_entry_xdr: signed,
+    };
+    let stranger = SecretKey::generate().unwrap();
+    let status = ledger(&h)
+        .await
+        .submit_mandate(authed(submit(sign(&stranger)), &t.token))
+        .await
+        .unwrap_err();
+    assert_refused(&status, Code::InvalidArgument, "invalid_signature");
+    let signed = sign(&b.key);
+    let stored = ledger(&h)
+        .await
+        .submit_mandate(authed(submit(signed.clone()), &t.token))
+        .await
+        .unwrap()
+        .into_inner()
+        .mandate
+        .unwrap();
+    assert_eq!(stored.state(), MandateState::Signed);
+    let again = ledger(&h).await.submit_mandate(authed(submit(signed), &t.token)).await.unwrap();
+    assert_eq!(again.into_inner().mandate.unwrap().state(), MandateState::Signed);
+
+    let other = h.tenant("shop", "other", Network::Testnet).await;
+    let request = GetMandateRequest { mandate_id: mandate.mandate_id.clone() };
+    let status = ledger(&h).await.get_mandate(authed(request, &other.token)).await.unwrap_err();
+    assert_refused(&status, Code::NotFound, "mandate_not_found");
+    let request = CreateRecurringChargeRequest {
+        mandate_id: mandate.mandate_id.clone(),
+        amount: 5,
+        idempotency_key: "c-1".to_owned(),
+    };
+    let status =
+        ledger(&h).await.create_recurring_charge(authed(request, &other.token)).await.unwrap_err();
+    assert_refused(&status, Code::NotFound, "mandate_not_found");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_api_role_cannot_activate_mandates_or_settle_recurring_charges(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let (t, b) = setup(&h).await;
+    let (mandate, _) =
+        prepare_mandate(&h, &t, mandate_request(&b.id, 10, DAY, 2, "m-1")).await.unwrap();
+    let id = Uuid::parse_str(&mandate.mandate_id).unwrap();
+    let code_of =
+        |error: sqlx::Error| error.as_database_error().unwrap().code().unwrap().into_owned();
+    // Activation needs a start only the worker may write.
+    let error = sqlx::query(
+        "UPDATE pay_stellar.mandates SET state = 'active', starts_at = 1 WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&h.api)
+    .await
+    .unwrap_err();
+    assert_eq!(code_of(error), "42501");
+    let error = sqlx::query("UPDATE pay_stellar.mandates SET state = 'active' WHERE id = $1")
+        .bind(id)
+        .execute(&h.api)
+        .await
+        .unwrap_err();
+    assert_eq!(code_of(error), "23514", "an active mandate needs its start");
+    let error = sqlx::query(
+        "INSERT INTO pay_stellar.recurring_charges
+             (id, mandate_row_id, buyer_id, seller_deployment_id, network, idempotency_key, cycle,
+              charge_id, amount, last_ledger, state)
+         VALUES ($1, $2, $3, $4, 'stellar:testnet', 'k', 0, sha256('k'), 5, 5, 'charged')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(id)
+    .bind(Uuid::parse_str(&b.id).unwrap())
+    .bind(t.deployment_id)
+    .execute(&h.api)
+    .await
+    .unwrap_err();
+    assert_eq!(code_of(error), "42501");
 }

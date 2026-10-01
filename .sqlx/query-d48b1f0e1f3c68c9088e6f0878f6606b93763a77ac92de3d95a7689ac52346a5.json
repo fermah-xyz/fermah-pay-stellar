@@ -1,0 +1,90 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.id, r.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.revocations r\n            JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = r.seller_deployment_id AND l.network = r.network\n            WHERE r.network = $1 AND l.operator_address = $2 AND r.state = 'signed'\n              AND r.id <> ALL($3)\n            ORDER BY r.created_at\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.revocations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "signed_authorization_xdr!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.revocations",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d48b1f0e1f3c68c9088e6f0878f6606b93763a77ac92de3d95a7689ac52346a5"
+}

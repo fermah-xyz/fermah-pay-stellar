@@ -3,7 +3,9 @@
 //! Each judgment is a pure function of the event and the rows it matches, so
 //! the rules can be read, and tested, apart from how they are stored.
 
-use fermah_pay_stellar_chain::prepaid::{ChargeEntry, Outcome, Role};
+use fermah_pay_stellar_chain::prepaid::{
+    ChargeEntry, Outcome, RecurringEntry, RecurringOutcome, Role,
+};
 use serde_json::{Value, json};
 
 /// How urgently a finding needs a person.
@@ -45,6 +47,10 @@ pub enum FindingKind {
     UnknownWithdrawal,
     WithdrawalMismatch,
     WithdrawalOutcomeMismatch,
+    UnknownRecurringCharge,
+    RecurringChargeMismatch,
+    RecurringOutcomeMismatch,
+    RecurringChargeUnsettled,
     RoleChanged,
     AdminChange,
     BindingOutOfDate,
@@ -72,6 +78,10 @@ impl FindingKind {
             Self::UnknownWithdrawal => "unknown_withdrawal",
             Self::WithdrawalMismatch => "withdrawal_mismatch",
             Self::WithdrawalOutcomeMismatch => "withdrawal_outcome_mismatch",
+            Self::UnknownRecurringCharge => "unknown_recurring_charge",
+            Self::RecurringChargeMismatch => "recurring_charge_mismatch",
+            Self::RecurringOutcomeMismatch => "recurring_outcome_mismatch",
+            Self::RecurringChargeUnsettled => "recurring_charge_unsettled",
             Self::RoleChanged => "role_changed",
             Self::AdminChange => "admin_change",
             Self::BindingOutOfDate => "binding_out_of_date",
@@ -132,6 +142,95 @@ pub struct WithdrawalRow {
     pub amount: i64,
     pub destination: String,
     pub state: String,
+}
+
+/// A recurring charge row as the observer reads it, with its mandate's
+/// contract identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecurringRow {
+    pub id: uuid::Uuid,
+    pub mandate_id: [u8; 32],
+    pub cycle: i32,
+    pub amount: i64,
+    pub state: String,
+    pub outcome: Option<String>,
+}
+
+/// Judges one entry of a `recurring` event against the recurring charge the
+/// gateway recorded under the same account and attempt identifier.
+#[must_use]
+pub fn judge_recurring(
+    entry: &RecurringEntry,
+    row: Option<&RecurringRow>,
+    overdue: bool,
+) -> Verdict {
+    let hex = fermah_pay_stellar_chain::rpc::hex_lower;
+    let base = || {
+        json!({
+            "owner": entry.owner.to_string(),
+            "charge_id": hex(&entry.charge_id),
+            "mandate_id": hex(&entry.mandate_id),
+            "cycle": entry.cycle,
+            "amount": entry.amount.to_string(),
+            "outcome": entry.outcome.token(),
+        })
+    };
+    let with_row = |row: &RecurringRow| {
+        let mut detail = base();
+        detail["recurring_charge"] = json!({
+            "id": row.id.to_string(),
+            "mandate_id": hex(&row.mandate_id),
+            "cycle": row.cycle,
+            "amount": row.amount.to_string(),
+            "state": row.state,
+            "outcome": row.outcome,
+        });
+        detail
+    };
+    let moved = entry.outcome == RecurringOutcome::Charged;
+    let Some(row) = row else {
+        // The operator key settled a charge the gateway never admitted; only
+        // a charged entry moved USDC out of a wallet.
+        let severity = if moved { Severity::Critical } else { Severity::Warning };
+        return Verdict::Finding(Finding::new(
+            FindingKind::UnknownRecurringCharge,
+            severity,
+            base(),
+        ));
+    };
+    if i128::from(row.amount) != entry.amount
+        || row.mandate_id != entry.mandate_id
+        || i64::from(row.cycle) != i64::from(entry.cycle)
+    {
+        return Verdict::Finding(Finding::new(
+            FindingKind::RecurringChargeMismatch,
+            Severity::Critical,
+            with_row(row),
+        ));
+    }
+    if matches!(entry.outcome, RecurringOutcome::Duplicate | RecurringOutcome::Expired) {
+        return Verdict::Matched;
+    }
+    let mismatch = |severity| {
+        Verdict::Finding(Finding::new(
+            FindingKind::RecurringOutcomeMismatch,
+            severity,
+            with_row(row),
+        ))
+    };
+    match row.state.as_str() {
+        "charged" if moved => Verdict::Matched,
+        "charged" => mismatch(Severity::Critical),
+        "refused" if moved => mismatch(Severity::Critical),
+        "refused" if row.outcome.as_deref() == Some(entry.outcome.token()) => Verdict::Matched,
+        "refused" => mismatch(Severity::Warning),
+        _ if overdue => Verdict::Finding(Finding::new(
+            FindingKind::RecurringChargeUnsettled,
+            Severity::Warning,
+            with_row(row),
+        )),
+        _ => Verdict::Pending,
+    }
 }
 
 /// Whether the entry debited the buyer's balance on-chain.

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.recurring_charges\n                (id, mandate_row_id, buyer_id, seller_deployment_id, network, idempotency_key,\n                 cycle, charge_id, amount, last_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Bytea",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ffa39c4480537a79aa0dd317e764a64b6c2caad7503d446b4b31fc769dc80dc6"
+}

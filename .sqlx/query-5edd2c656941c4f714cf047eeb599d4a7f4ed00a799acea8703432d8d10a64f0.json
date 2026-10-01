@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT m.id, m.expiration_ledger, b.wallet_address,\n                   l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.mandates m\n            JOIN pay_stellar.buyers b ON b.id = m.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = m.seller_deployment_id AND l.network = m.network\n            WHERE m.submission_id = $1 AND m.state = 'submitted'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "expiration_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "expiration_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5edd2c656941c4f714cf047eeb599d4a7f4ed00a799acea8703432d8d10a64f0"
+}

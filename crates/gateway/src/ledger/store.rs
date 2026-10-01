@@ -12,6 +12,13 @@ use uuid::Uuid;
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 
+mod mandates;
+
+pub use mandates::{
+    MandateRecord, MandateState, NewMandate, NewRecurringCharge, NewRevocation, RecurringAdmission,
+    RecurringChargeRecord, RecurringChargeState, RevocationRecord, RevocationState,
+};
+
 const DEPOSIT_KEY: &str = "deposits_idempotency_key";
 const CHARGE_KEY: &str = "charges_idempotency_key";
 const WITHDRAWAL_KEY: &str = "withdrawals_idempotency_key";
@@ -391,6 +398,22 @@ impl Store {
                     r#"
                 SELECT count(*) AS "recent!" FROM pay_stellar.withdrawals
                 WHERE buyer_id = $1 AND created_at > now() - interval '1 day'
+                "#,
+                    buyer_id,
+                )
+                .fetch_one(&mut *tx)
+                .await
+            }
+            // Mandates and revocations share one quota: each is a change to
+            // the buyer's standing authorization the operator pays to send.
+            "mandates" => {
+                sqlx::query_scalar!(
+                    r#"
+                SELECT (SELECT count(*) FROM pay_stellar.mandates
+                        WHERE buyer_id = $1 AND created_at > now() - interval '1 day')
+                     + (SELECT count(*) FROM pay_stellar.revocations
+                        WHERE buyer_id = $1 AND created_at > now() - interval '1 day')
+                       AS "recent!"
                 "#,
                     buyer_id,
                 )

@@ -26,6 +26,7 @@ const QUOTAS: Quotas = Quotas {
     deposits_per_buyer: 2,
     withdrawals_per_buyer: 1,
     min_withdrawal: 50,
+    mandate_changes_per_buyer: 2,
 };
 
 async fn start(opts: PgPoolOptions, connect: PgConnectOptions) -> (Harness, Tenant) {

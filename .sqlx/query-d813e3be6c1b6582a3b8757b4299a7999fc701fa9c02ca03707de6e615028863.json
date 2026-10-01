@@ -1,0 +1,150 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT m.id, m.mandate_id, m.amount, m.period_secs, m.cycles, m.live_until,\n                   m.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.mandates m\n            JOIN pay_stellar.buyers b ON b.id = m.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = m.seller_deployment_id AND l.network = m.network\n            WHERE m.network = $1 AND l.operator_address = $2 AND m.state = 'signed'\n              AND m.id <> ALL($3)\n            ORDER BY m.created_at\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "mandate_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "mandate_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "period_secs",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "period_secs"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "cycles",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "cycles"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "live_until",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "live_until"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "signed_authorization_xdr!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.mandates",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d813e3be6c1b6582a3b8757b4299a7999fc701fa9c02ca03707de6e615028863"
+}

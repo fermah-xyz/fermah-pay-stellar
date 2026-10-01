@@ -59,9 +59,12 @@ use fermah_pay_stellar_gateway::worker::{Reserve, Settings, Step, Worker};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
-    Charge, ChargeState, CreateBuyerRequest, CreateChargeRequest, Deposit, DepositState,
-    GetBalanceRequest, GetChargeRequest, GetDepositRequest, GetWithdrawalRequest,
-    PrepareDepositRequest, PrepareWithdrawalRequest, SubmitDepositRequest, SubmitWithdrawalRequest,
+    Charge, ChargeState, CreateBuyerRequest, CreateChargeRequest, CreateRecurringChargeRequest,
+    Deposit, DepositState, GetBalanceRequest, GetChargeRequest, GetDepositRequest,
+    GetMandateRequest, GetRecurringChargeRequest, GetRevocationRequest, GetWithdrawalRequest,
+    Mandate, MandateState, PrepareDepositRequest, PrepareMandateRequest, PrepareRevocationRequest,
+    PrepareWithdrawalRequest, RecurringCharge, RecurringChargeState, Revocation, RevocationState,
+    SubmitDepositRequest, SubmitMandateRequest, SubmitRevocationRequest, SubmitWithdrawalRequest,
     Withdrawal, WithdrawalState,
 };
 use sqlx::PgPool;
@@ -102,6 +105,39 @@ struct ContractState {
     /// plain USDC transfer needs at its destination.
     lines: HashSet<AccountAddress>,
     used_nonces: HashSet<(AccountAddress, i64)>,
+    /// owner -> the mandate the contract holds.
+    mandates: HashMap<AccountAddress, FakeMandate>,
+    /// owner -> the contract's USDC allowance and its last ledger.
+    allowances: HashMap<AccountAddress, (i128, u32)>,
+    /// Recurring charge attempt records: outcome code and last ledger.
+    recurring: HashMap<(AccountAddress, [u8; 32]), (u32, u32)>,
+}
+
+/// The state after a call, its return value, and the event it emitted, by
+/// name.
+type Executed = (ContractState, ScVal, Option<(&'static str, ScVal)>);
+
+#[derive(Clone, Debug)]
+struct FakeMandate {
+    id: [u8; 32],
+    amount: i128,
+    period_secs: u64,
+    start: u64,
+    cycles: u32,
+    live_until: u32,
+    next_cycle: u32,
+    /// Ledger it was recorded in: a read at an earlier ledger misses it.
+    since: u32,
+}
+
+fn field<'a>(map: &'a ScVal, name: &str) -> &'a ScVal {
+    let ScVal::Map(Some(ScMap(fields))) = map else { panic!("not a map: {map:?}") };
+    &fields.iter().find(|f| f.key == symbol(name)).unwrap_or_else(|| panic!("no {name}")).val
+}
+
+fn bytes32(value: &ScVal) -> [u8; 32] {
+    let ScVal::Bytes(bytes) = value else { panic!("not bytes") };
+    bytes.as_slice().try_into().unwrap()
 }
 
 struct Net {
@@ -209,11 +245,16 @@ fn invocation(
 }
 
 impl Net {
-    /// Publishes the contract's `charges` event in the latest ledger.
-    fn log_charges(&mut self, data: ScVal) {
+    /// Publishes the contract's `name` event in the latest ledger.
+    fn log_event(&mut self, name: &str, data: ScVal) {
         let closed =
             self.clock.now().format(&time::format_description::well_known::Rfc3339).unwrap();
-        self.events.emit(CONTRACT, self.latest, closed, vec![symbol("charges")], data);
+        self.events.emit(CONTRACT, self.latest, closed, vec![symbol(name)], data);
+    }
+
+    /// Ledger time: the clock, in Unix seconds.
+    fn timestamp(&self) -> u64 {
+        u64::try_from(self.clock.now().unix_timestamp()).unwrap()
     }
 
     /// Archived buyer accounts the call would read or write.
@@ -246,7 +287,7 @@ impl Net {
         call: &InvokeContractArgs,
         auth: &[SorobanAuthorizationEntry],
         operator: &AccountAddress,
-    ) -> Result<(ContractState, ScVal, Option<ScVal>), String> {
+    ) -> Result<Executed, String> {
         let mut state = self.state.clone();
         let mut authorized = HashSet::new();
         for entry in auth {
@@ -395,7 +436,152 @@ impl Net {
                 // The contract's event carries every entry, whatever the
                 // return value holds.
                 let event = ScVal::Vec(Some(ScVec(settled.try_into().unwrap())));
-                Ok((state, ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap()))), Some(event)))
+                Ok((
+                    state,
+                    ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap()))),
+                    Some(("charges", event)),
+                ))
+            }
+            b"authorize_recurring" => {
+                let owner = owner_of(&args[0]);
+                if !authorized.contains(&owner) {
+                    return Err("owner did not authorize".to_owned());
+                }
+                let amount = i128_of(&args[2]);
+                let (ScVal::U64(period_secs), ScVal::U32(cycles), ScVal::U32(live_until)) =
+                    (&args[3], &args[4], &args[5])
+                else {
+                    panic!("mandate terms")
+                };
+                if *live_until < self.latest {
+                    return Err("Error(Contract, #120)".to_owned());
+                }
+                let mandate = FakeMandate {
+                    id: bytes32(&args[1]),
+                    amount,
+                    period_secs: *period_secs,
+                    start: self.timestamp(),
+                    cycles: *cycles,
+                    live_until: *live_until,
+                    next_cycle: 0,
+                    since: self.latest,
+                };
+                state.allowances.insert(owner.clone(), (amount * i128::from(*cycles), *live_until));
+                state.mandates.insert(owner, mandate);
+                Ok((state, ScVal::Void, None))
+            }
+            b"revoke_recurring" => {
+                let owner = owner_of(&args[0]);
+                if !authorized.contains(&owner) {
+                    return Err("owner did not authorize".to_owned());
+                }
+                state.mandates.remove(&owner);
+                state.allowances.insert(owner, (0, 0));
+                Ok((state, ScVal::Void, None))
+            }
+            b"charge_recurring_batch" => {
+                if !authorized.contains(operator) {
+                    return Err("operator did not authorize".to_owned());
+                }
+                let ScVal::Vec(Some(ScVec(charges))) = &args[0] else { panic!("charges") };
+                let now = self.latest;
+                let ts = self.timestamp();
+                let mut outcomes = Vec::new();
+                let mut settled = Vec::new();
+                for charge in charges.iter() {
+                    let owner = owner_of(field(charge, "owner"));
+                    let id = bytes32(field(charge, "charge_id"));
+                    let mandate_id = bytes32(field(charge, "mandate_id"));
+                    let ScVal::U32(cycle) = *field(charge, "cycle") else { panic!("cycle") };
+                    let amount = i128_of(field(charge, "amount"));
+                    let ScVal::U32(last_ledger) = *field(charge, "last_ledger") else {
+                        panic!("last ledger")
+                    };
+                    if last_ledger > now + MAX_CHARGE_WINDOW {
+                        return Err("Error(Contract, #118)".to_owned());
+                    }
+                    let recorded = state
+                        .recurring
+                        .get(&(owner.clone(), id))
+                        .is_some_and(|(_, live_until)| *live_until >= now);
+                    let code = if recorded {
+                        1
+                    } else if last_ledger < now {
+                        2
+                    } else {
+                        let allowance = state
+                            .allowances
+                            .get(&owner)
+                            .filter(|(_, until)| *until >= now)
+                            .map_or(0, |(a, _)| *a);
+                        let wallet = state.usdc.get(&owner).copied().unwrap_or(0);
+                        let code = match state.mandates.get_mut(&owner) {
+                            Some(m) if m.id == mandate_id => {
+                                let due = (ts - m.start) / m.period_secs;
+                                if now > m.live_until
+                                    || cycle >= m.cycles
+                                    || due >= u64::from(m.cycles)
+                                {
+                                    4
+                                } else if cycle < m.next_cycle {
+                                    5
+                                } else if u64::from(cycle) > due {
+                                    6
+                                } else if u64::from(cycle) < due {
+                                    7
+                                } else if amount > m.amount {
+                                    8
+                                } else if amount > MAX_CHARGE {
+                                    9
+                                } else if self.over_daily.contains(&owner) {
+                                    10
+                                } else if amount > allowance {
+                                    11
+                                } else if amount > wallet {
+                                    12
+                                } else {
+                                    m.next_cycle = cycle + 1;
+                                    0
+                                }
+                            }
+                            _ => 3,
+                        };
+                        if code == 0 {
+                            state.allowances.get_mut(&owner).unwrap().0 -= amount;
+                            *state.usdc.get_mut(&owner).unwrap() -= amount;
+                            state.treasury_usdc += amount;
+                        }
+                        if !self.skip_records {
+                            state.recurring.insert(
+                                (owner.clone(), id),
+                                (code, last_ledger + CHARGE_RECORD_GRACE),
+                            );
+                        }
+                        code
+                    };
+                    outcomes.push(ScVal::U32(code));
+                    settled.push(ScVal::Vec(Some(ScVec(
+                        vec![
+                            field(charge, "owner").clone(),
+                            field(charge, "charge_id").clone(),
+                            field(charge, "mandate_id").clone(),
+                            ScVal::U32(cycle),
+                            field(charge, "amount").clone(),
+                            ScVal::U32(code),
+                        ]
+                        .try_into()
+                        .unwrap(),
+                    ))));
+                }
+                if self.truncate_outcomes {
+                    outcomes.pop();
+                }
+                let event = ScVal::Vec(Some(ScVec(settled.try_into().unwrap())));
+                Ok((
+                    state,
+                    ScVal::Vec(Some(ScVec(outcomes.try_into().unwrap()))),
+                    Some(("recurring", event)),
+                ))
             }
             other => panic!("unexpected call {}", String::from_utf8_lossy(other)),
         }
@@ -407,8 +593,8 @@ fn outer_hash(envelope: &TransactionEnvelope) -> [u8; 32] {
     fee_bump_hash(&bump.tx, Network::Testnet).unwrap()
 }
 
-/// The operation meta holding the contract's `charges` event.
-fn charges_event(data: ScVal) -> OperationMetaV2 {
+/// The operation meta holding the contract's `name` event.
+fn contract_event(name: &str, data: ScVal) -> OperationMetaV2 {
     OperationMetaV2 {
         ext: ExtensionPoint::V0,
         changes: LedgerEntryChanges(VecM::default()),
@@ -417,7 +603,7 @@ fn charges_event(data: ScVal) -> OperationMetaV2 {
             contract_id: Some(ContractId(Hash(CONTRACT))),
             type_: ContractEventType::Contract,
             body: ContractEventBody::V0(ContractEventV0 {
-                topics: vec![symbol("charges")].try_into().unwrap(),
+                topics: vec![symbol(name)].try_into().unwrap(),
                 data,
             }),
         }]
@@ -497,7 +683,9 @@ impl Stellar {
                 .try_into()
                 .unwrap(),
         )));
-        self.with(|n| n.log_charges(ScVal::Vec(Some(ScVec(vec![entry].try_into().unwrap())))));
+        self.with(|n| {
+            n.log_event("charges", ScVal::Vec(Some(ScVec(vec![entry].try_into().unwrap()))));
+        });
     }
 
     fn include_elsewhere(&self, envelope: &TransactionEnvelope) {
@@ -506,8 +694,8 @@ impl Stellar {
         self.with(|n| {
             let (state, _, event) = n.execute(&call, &auth, &operator).unwrap();
             n.state = state;
-            if let Some(data) = event {
-                n.log_charges(data);
+            if let Some((name, data)) = event {
+                n.log_event(name, data);
             }
         });
     }
@@ -645,14 +833,15 @@ impl Chain for Stellar {
                     match n.execute(&call, &auth, &operator) {
                         Ok((state, value, event)) => {
                             n.state = state;
-                            if let Some(data) = &event {
-                                n.log_charges(data.clone());
+                            if let Some((name, data)) = &event {
+                                n.log_event(name, data.clone());
                             }
                             let mut tx = included(envelope, n.latest, true, Some(value));
-                            if let (Some(data), Some(TransactionMeta::V4(meta))) =
+                            if let (Some((name, data)), Some(TransactionMeta::V4(meta))) =
                                 (event, tx.meta.as_mut())
                             {
-                                meta.operations = vec![charges_event(data)].try_into().unwrap();
+                                meta.operations =
+                                    vec![contract_event(name, data)].try_into().unwrap();
                             }
                             TransactionStatus::Success(tx)
                         }
@@ -776,6 +965,31 @@ impl Chain for Stellar {
         for (owner, id) in &state.deposits {
             existing.insert(self.deployment.deposit_key(owner, id), ScVal::Void);
         }
+        for (owner, m) in state.mandates.iter().filter(|(_, m)| m.since <= read_at) {
+            let entry = |name: &str, val: ScVal| ScMapEntry { key: symbol(name), val };
+            let value = ScVal::Map(Some(ScMap(
+                vec![
+                    entry(
+                        "amount",
+                        ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(m.amount).unwrap() }),
+                    ),
+                    entry("cycles", ScVal::U32(m.cycles)),
+                    entry("live_until", ScVal::U32(m.live_until)),
+                    entry("mandate_id", ScVal::Bytes(m.id.to_vec().try_into().unwrap())),
+                    entry("next_cycle", ScVal::U32(m.next_cycle)),
+                    entry("period_secs", ScVal::U64(m.period_secs)),
+                    entry("start", ScVal::U64(m.start)),
+                ]
+                .try_into()
+                .unwrap(),
+            )));
+            existing.insert(self.deployment.mandate_key(owner), value);
+        }
+        for ((owner, id), (code, live_until)) in &state.recurring {
+            if *live_until >= read_at {
+                existing.insert(self.deployment.recurring_record_key(owner, id), ScVal::U32(*code));
+            }
+        }
         let fee_balance = self.with(|n| n.fee_balance);
         let (instance_until, code_until) =
             self.with(|n| (n.instance_live_until, n.code_live_until));
@@ -889,6 +1103,10 @@ impl EventLog for Stellar {
 impl LatestLedger for Stellar {
     async fn latest_ledger(&self) -> Result<u32, RpcError> {
         Ok(self.latest())
+    }
+
+    async fn latest_close_time(&self) -> Result<i64, RpcError> {
+        Ok(self.with(|n| n.clock.now().unix_timestamp()))
     }
 }
 
@@ -3286,8 +3504,8 @@ fn maybe_include_elsewhere(w: &World, envelope: &TransactionEnvelope) {
     w.stellar.with(|n| {
         if let Ok((state, _, event)) = n.execute(call, &op.auth, &operator) {
             n.state = state;
-            if let Some(data) = event {
-                n.log_charges(data);
+            if let Some((name, data)) = event {
+                n.log_event(name, data);
             }
         }
     });
@@ -3521,4 +3739,429 @@ async fn test_random_faults_leave_the_database_and_the_contract_in_agreement(
         drop(w);
         drop_database(&connect, &name).await;
     }
+}
+
+// ---- recurring charges ------------------------------------------------------
+
+/// A period short enough for a test to cross several.
+const PERIOD: u64 = 120;
+
+impl World {
+    fn sign(&self, buyer: &TestBuyer, entry_xdr: &str) -> String {
+        let entry = SorobanAuthorizationEntry::from_xdr_base64(entry_xdr, Limits::none()).unwrap();
+        let signed = sign_entry(&entry, network_id(Network::Testnet), &[&buyer.key]).unwrap();
+        signed.to_xdr_base64(Limits::none()).unwrap()
+    }
+
+    /// A mandate of `cycles` periods of up to `amount`, signed and stored.
+    async fn mandate(&self, buyer: &TestBuyer, amount: i64, cycles: u32, key: &str) -> Mandate {
+        let request = PrepareMandateRequest {
+            buyer_id: buyer.id.clone(),
+            amount,
+            period_secs: PERIOD,
+            cycles,
+            idempotency_key: key.to_owned(),
+        };
+        let mut ledger = self.ledger().await;
+        let prepared = ledger
+            .prepare_mandate(authed(request, &self.tenant.token))
+            .await
+            .unwrap()
+            .into_inner()
+            .mandate
+            .unwrap();
+        let request = SubmitMandateRequest {
+            mandate_id: prepared.mandate_id.clone(),
+            signed_authorization_entry_xdr: self.sign(buyer, &prepared.authorization_entry_xdr),
+        };
+        ledger
+            .submit_mandate(authed(request, &self.tenant.token))
+            .await
+            .unwrap()
+            .into_inner()
+            .mandate
+            .unwrap()
+    }
+
+    async fn get_mandate(&self, id: &str) -> Mandate {
+        self.ledger()
+            .await
+            .get_mandate(authed(
+                GetMandateRequest { mandate_id: id.to_owned() },
+                &self.tenant.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .mandate
+            .unwrap()
+    }
+
+    async fn revoke(&self, buyer: &TestBuyer, key: &str) -> Revocation {
+        let request = PrepareRevocationRequest {
+            buyer_id: buyer.id.clone(),
+            idempotency_key: key.to_owned(),
+        };
+        let mut ledger = self.ledger().await;
+        let prepared = ledger
+            .prepare_revocation(authed(request, &self.tenant.token))
+            .await
+            .unwrap()
+            .into_inner()
+            .revocation
+            .unwrap();
+        let request = SubmitRevocationRequest {
+            revocation_id: prepared.revocation_id.clone(),
+            signed_authorization_entry_xdr: self.sign(buyer, &prepared.authorization_entry_xdr),
+        };
+        ledger
+            .submit_revocation(authed(request, &self.tenant.token))
+            .await
+            .unwrap()
+            .into_inner()
+            .revocation
+            .unwrap()
+    }
+
+    async fn get_revocation(&self, id: &str) -> Revocation {
+        self.ledger()
+            .await
+            .get_revocation(authed(
+                GetRevocationRequest { revocation_id: id.to_owned() },
+                &self.tenant.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .revocation
+            .unwrap()
+    }
+
+    async fn charge_period(
+        &self,
+        mandate: &Mandate,
+        amount: i64,
+        key: &str,
+    ) -> Result<RecurringCharge, tonic::Status> {
+        let request = CreateRecurringChargeRequest {
+            mandate_id: mandate.mandate_id.clone(),
+            amount,
+            idempotency_key: key.to_owned(),
+        };
+        Ok(self
+            .ledger()
+            .await
+            .create_recurring_charge(authed(request, &self.tenant.token))
+            .await?
+            .into_inner()
+            .recurring_charge
+            .unwrap())
+    }
+
+    async fn get_recurring(&self, id: &str) -> RecurringCharge {
+        self.ledger()
+            .await
+            .get_recurring_charge(authed(
+                GetRecurringChargeRequest { recurring_charge_id: id.to_owned() },
+                &self.tenant.token,
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .recurring_charge
+            .unwrap()
+    }
+
+    fn wallet(&self, buyer: &TestBuyer) -> i128 {
+        self.stellar.with(|n| n.state.usdc.get(&buyer.key.address()).copied().unwrap_or(0))
+    }
+
+    fn treasury_usdc(&self) -> i128 {
+        self.stellar.with(|n| n.state.treasury_usdc)
+    }
+
+    /// Moves ledger time `secs` ahead, and the ledger with it.
+    fn later(&self, secs: u64) {
+        self.clock.advance(Duration::from_secs(secs));
+        self.stellar.with(|n| n.latest += u32::try_from(secs / 5).unwrap());
+    }
+
+    /// An active mandate of `cycles` periods of up to `amount`.
+    async fn active_mandate(&self, buyer: &TestBuyer, amount: i64, cycles: u32) -> Mandate {
+        let mandate = self.mandate(buyer, amount, cycles, &format!("m-{}", buyer.id)).await;
+        self.settle(&self.worker()).await;
+        let active = self.get_mandate(&mandate.mandate_id).await;
+        assert_eq!(active.state(), MandateState::Active);
+        active
+    }
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_mandate_is_activated_and_each_period_charged_once_from_the_wallet(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    assert!(mandate.starts_at > 0, "the contract's start is recorded");
+    assert_eq!(w.stellar.with(|n| n.state.allowances[&buyer.key.address()].0), 30);
+
+    let first = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    assert_eq!((first.cycle, first.state()), (0, RecurringChargeState::Admitted));
+    // The period is taken while its charge is in flight or charged.
+    let again = w.charge_period(&mandate, 10, "c-2").await.unwrap_err();
+    assert_refused(&again, tonic::Code::AlreadyExists, "period_already_charged");
+    w.settle(&w.worker()).await;
+    let charged = w.get_recurring(&first.recurring_charge_id).await;
+    assert_eq!(
+        (charged.state(), charged.outcome.as_str()),
+        (RecurringChargeState::Charged, "charged")
+    );
+
+    w.later(PERIOD);
+    let second = w.charge_period(&mandate, 7, "c-3").await.unwrap();
+    assert_eq!(second.cycle, 1);
+    w.settle(&w.worker()).await;
+    assert_eq!(
+        w.get_recurring(&second.recurring_charge_id).await.state(),
+        RecurringChargeState::Charged
+    );
+    // From the wallet to the treasury; the prepaid balance is untouched.
+    assert_eq!((w.wallet(&buyer), w.treasury_usdc(), w.balance(&buyer).await), (83, 17, (0, 0)));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_refused_period_can_be_attempted_again_while_it_lasts(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 5).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let short = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    w.settle(&w.worker()).await;
+    let refused = w.get_recurring(&short.recurring_charge_id).await;
+    assert_eq!(
+        (refused.state(), refused.outcome.as_str()),
+        (RecurringChargeState::Refused, "wallet_short")
+    );
+    w.stellar.with(|n| n.state.usdc.insert(buyer.key.address(), 20));
+    let retried = w.charge_period(&mandate, 10, "c-2").await.unwrap();
+    assert_eq!(retried.cycle, 0);
+    w.settle(&w.worker()).await;
+    assert_eq!(
+        w.get_recurring(&retried.recurring_charge_id).await.state(),
+        RecurringChargeState::Charged
+    );
+    assert_eq!(w.wallet(&buyer), 10);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_api_refuses_charges_the_mandate_does_not_allow(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let pending = w.mandate(&buyer, 10, 2, "m-1").await;
+    let refused = w.charge_period(&pending, 5, "c-0").await.unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "mandate_not_active");
+    w.settle(&w.worker()).await;
+    let mandate = w.get_mandate(&pending.mandate_id).await;
+    let refused = w.charge_period(&mandate, 11, "c-1").await.unwrap_err();
+    assert_refused(&refused, tonic::Code::InvalidArgument, "above_mandate");
+    // Past both periods the mandate is over, for the API and the worker.
+    w.later(2 * PERIOD);
+    let refused = w.charge_period(&mandate, 5, "c-2").await.unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "mandate_ended");
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Ended);
+    assert_eq!(w.wallet(&buyer), 100);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_mandate_included_elsewhere_is_activated_from_the_contract_once_its_entry_lapses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.mandate(&buyer, 10, 3, "m-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 1);
+    worker.step().await.unwrap();
+    w.stellar.include_elsewhere(&w.stellar.sent()[0]);
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.settle(&worker).await;
+    // Sending it again is refused (the nonce is spent); it waits.
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Signed);
+    w.stellar.set_latest(mandate.expiration_ledger + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Active);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_mandate_never_included_expires_once_its_entry_lapses(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.mandate(&buyer, 10, 3, "m-1").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.fail_inclusions = 1);
+    worker.step().await.unwrap();
+    w.settle(&worker).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Submitted);
+    w.stellar.set_latest(mandate.expiration_ledger + 1);
+    w.settle(&worker).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Failed);
+    assert!(w.stellar.with(|n| n.state.mandates.is_empty()));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_successful_mandate_is_not_decided_from_a_read_older_than_its_ledger(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.mandate(&buyer, 10, 3, "m-1").await;
+    w.stellar.with(|n| n.entries_behind = 5);
+    let worker = w.worker();
+    w.settle(&worker).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Submitted);
+    w.stellar.with(|n| n.entries_behind = 0);
+    w.settle(&worker).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Active);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_new_mandate_replaces_the_active_one_and_its_charges_are_refused(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let first = w.active_mandate(&buyer, 10, 3).await;
+    // A charge admitted for the old mandate, then a new mandate lands first.
+    let stale = w.charge_period(&first, 10, "c-1").await.unwrap();
+    let second = w.mandate(&buyer, 4, 2, "m-2").await;
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 0);
+    w.settle(&worker).await;
+    assert_eq!(
+        (
+            w.get_mandate(&first.mandate_id).await.state(),
+            w.get_mandate(&second.mandate_id).await.state()
+        ),
+        (MandateState::Replaced, MandateState::Active)
+    );
+    let refused = w.get_recurring(&stale.recurring_charge_id).await;
+    assert_eq!(
+        (refused.state(), refused.outcome.as_str()),
+        (RecurringChargeState::Refused, "no_mandate")
+    );
+    assert_eq!(w.stellar.with(|n| n.state.allowances[&buyer.key.address()].0), 8);
+    assert_eq!(w.wallet(&buyer), 100);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_revocation_ends_the_mandate_and_zeroes_the_allowance(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let revocation = w.revoke(&buyer, "r-1").await;
+    w.settle(&w.worker()).await;
+    assert_eq!(
+        w.get_revocation(&revocation.revocation_id).await.state(),
+        RevocationState::Confirmed
+    );
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Revoked);
+    assert_eq!(w.stellar.with(|n| n.state.allowances[&buyer.key.address()].0), 0);
+    let refused = w.charge_period(&mandate, 10, "c-1").await.unwrap_err();
+    assert_refused(&refused, tonic::Code::FailedPrecondition, "mandate_not_active");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_mandate_revoked_outside_the_gateway_is_closed_by_the_refused_charge(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    // The buyer revoked through another client.
+    w.stellar.with(|n| n.state.mandates.remove(&buyer.key.address()));
+    let charge = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    w.settle(&w.worker()).await;
+    let refused = w.get_recurring(&charge.recurring_charge_id).await;
+    assert_eq!(refused.outcome, "no_mandate");
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Revoked);
+    assert_eq!(w.wallet(&buyer), 100);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_recurring_batch_applied_elsewhere_is_settled_from_its_record_not_charged_again(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let charge = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    w.stellar.include_elsewhere(&w.stellar.sent().last().unwrap().clone());
+    // After the operator's authorization lapses the record decides.
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.stellar.with(|n| n.latest += OPERATOR_LEDGERS + 1);
+    w.settle(&worker).await;
+    let settled = w.get_recurring(&charge.recurring_charge_id).await;
+    assert_eq!(settled.state(), RecurringChargeState::Charged);
+    assert_eq!((w.wallet(&buyer), w.treasury_usdc()), (90, 10));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_recurring_batch_never_applied_is_sent_again_within_its_last_ledger(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let charge = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    let worker = w.worker();
+    w.stellar.with(|n| n.drop_sends = 2);
+    worker.step().await.unwrap();
+    w.clock.advance(VALIDITY + Duration::from_secs(1));
+    w.stellar.with(|n| n.latest += OPERATOR_LEDGERS + 1);
+    w.settle(&worker).await;
+    let settled = w.get_recurring(&charge.recurring_charge_id).await;
+    assert_eq!(settled.state(), RecurringChargeState::Charged);
+    assert_eq!(w.wallet(&buyer), 90, "charged once");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_recurring_charge_not_sent_before_its_last_ledger_expires(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.buyer("alice", 100).await;
+    let mandate = w.active_mandate(&buyer, 10, 3).await;
+    let charge = w.charge_period(&mandate, 10, "c-1").await.unwrap();
+    w.stellar.with(|n| n.latest += common::CHARGE_VALIDITY_LEDGERS + 1);
+    w.settle(&w.worker()).await;
+    let expired = w.get_recurring(&charge.recurring_charge_id).await;
+    assert_eq!(
+        (expired.state(), expired.outcome.as_str()),
+        (RecurringChargeState::Refused, "expired")
+    );
+    assert_eq!(w.wallet(&buyer), 100);
 }

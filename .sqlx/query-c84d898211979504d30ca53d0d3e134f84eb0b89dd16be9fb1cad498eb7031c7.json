@@ -1,0 +1,131 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.id, r.charge_id, r.last_ledger, r.amount, r.batch_index AS \"batch_index!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address,\n                   (SELECT count(*) FROM pay_stellar.recurring_charges a\n                    WHERE a.submission_id = r.submission_id) AS \"batch_size!\"\n            FROM pay_stellar.recurring_charges r\n            JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = r.seller_deployment_id AND l.network = r.network\n            WHERE r.submission_id = $1 AND r.state = 'submitted'\n            ORDER BY r.batch_index\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "charge_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "charge_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "last_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "last_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "batch_index!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.recurring_charges",
+            "name": "batch_index"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "contract_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "contract_address"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "usdc_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "treasury_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "treasury_address"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "batch_size!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c84d898211979504d30ca53d0d3e134f84eb0b89dd16be9fb1cad498eb7031c7"
+}

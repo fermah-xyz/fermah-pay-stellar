@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.recurring_charges r\n            SET state = 'submitted', submission_id = $1, batch_index = u.batch_index,\n                last_error = NULL\n            FROM unnest($2::uuid[], $3::int2[]) AS u(id, batch_index)\n            WHERE r.id = u.id AND r.state = 'admitted'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "Int2Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad70209dea9d2a4bc81049c9d930bffd83351668bd5b8cd6e1c9ffa5ef6ead96"
+}
