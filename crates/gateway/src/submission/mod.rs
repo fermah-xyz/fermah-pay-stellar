@@ -49,6 +49,8 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::labels::labels;
+
 pub use chain::{Chain, SourceSequence};
 pub use fees::{Bid, FeePolicy, FeePolicyError};
 
@@ -67,60 +69,38 @@ impl Clock for SystemClock {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Deposit,
-    ChargeBatch,
-    Withdrawal,
-    Restore,
-    /// Extends the life of contract entries before they would be archived.
-    Extend,
-    /// Moves the treasury's USDC above its ceiling to the cold reserve.
-    Sweep,
-    /// Records a buyer's mandate and its USDC approval.
-    Mandate,
-    /// Ends a buyer's mandate and its USDC approval.
-    Revocation,
-    /// Charges periods of mandates.
-    RecurringBatch,
-}
-
-impl Kind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Deposit => "deposit",
-            Self::ChargeBatch => "charge_batch",
-            Self::Withdrawal => "withdrawal",
-            Self::Restore => "restore",
-            Self::Extend => "extend",
-            Self::Sweep => "sweep",
-            Self::Mandate => "mandate",
-            Self::Revocation => "revocation",
-            Self::RecurringBatch => "recurring_batch",
-        }
+labels! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind as as_str {
+        Deposit => "deposit",
+        ChargeBatch => "charge_batch",
+        Withdrawal => "withdrawal",
+        Restore => "restore",
+        /// Extends the life of contract entries before they would be archived.
+        Extend => "extend",
+        /// Moves the treasury's USDC above its ceiling to the cold reserve.
+        Sweep => "sweep",
+        /// Records a buyer's mandate and its USDC approval.
+        Mandate => "mandate",
+        /// Ends a buyer's mandate and its USDC approval.
+        Revocation => "revocation",
+        /// Charges periods of mandates.
+        RecurringBatch => "recurring_batch",
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
-    Installed,
-    Succeeded,
-    Failed,
-    Expired,
-    Quarantined,
+labels! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum State as as_str {
+        Installed => "installed",
+        Succeeded => "succeeded",
+        Failed => "failed",
+        Expired => "expired",
+        Quarantined => "quarantined",
+    }
 }
 
 impl State {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Installed => "installed",
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-            Self::Expired => "expired",
-            Self::Quarantined => "quarantined",
-        }
-    }
-
     fn parse(raw: &str) -> Result<Self, EngineError> {
         Ok(match raw {
             "installed" => Self::Installed,
@@ -729,7 +709,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let TransactionEnvelope::Tx(inner) =
             transaction::sign_with(tx, self.network, &[source_key])
                 .await
-                .inspect_err(|_| signing_failed("source"))
+                .inspect_err(|_| signing_failed(SigningRole::Source))
                 .map_err(EngineError::Signing)?
         else {
             unreachable!("transaction::sign produces a v1 envelope")
@@ -741,7 +721,7 @@ impl<C: Chain, K: Clock> Engine<C, K> {
         let envelope =
             soroban::sign_fee_bump_with(bump, self.network, self.keys.fee_source.as_ref())
                 .await
-                .inspect_err(|_| signing_failed("fee_source"))
+                .inspect_err(|_| signing_failed(SigningRole::FeeSource))
                 .map_err(EngineError::Assembly)?;
         let envelope_xdr = envelope
             .to_xdr_base64(Limits::none())
@@ -1114,10 +1094,21 @@ impl<C: Chain, K: Clock> Engine<C, K> {
     }
 }
 
+labels! {
+    /// The key a signer holds, as signing failures are counted.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SigningRole as as_str {
+        Operator => "operator",
+        Treasury => "treasury",
+        Source => "source",
+        FeeSource => "fee_source",
+    }
+}
+
 /// A signer, local or in a key management service, failed or answered with
 /// a signature that does not verify.
-pub fn signing_failed(role: &'static str) {
-    metrics::counter!("pay_stellar_signing_failures_total", "role" => role).increment(1);
+pub fn signing_failed(role: SigningRole) {
+    metrics::counter!("pay_stellar_signing_failures_total", "role" => role.as_str()).increment(1);
 }
 
 /// [`Engine::authorization_horizon`] of a stored envelope, for readers that

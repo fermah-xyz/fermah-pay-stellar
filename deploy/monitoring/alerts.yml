@@ -45,6 +45,12 @@ groups:
         annotations:
           summary: "A withdrawal to an account other than the buyer's wallet was prepared"
           action: "Expected only if PAY_STELLAR_WITHDRAWALS_TO_OTHER_ACCOUNTS is on for a reason; confirm with the seller"
+      - alert: PayStellarMandateChangedOutsideGateway
+        expr: sum by (result) (increase(pay_stellar_recurring_settled_total{result=~"allowance_short|no_mandate"}[1h])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A recurring charge found the buyer's USDC approval lowered or revoked outside this gateway"
+          action: "The buyer's wallet changed the approval in the USDC contract directly. Confirm with the buyer; a change nobody made means the buyer's key is exposed"
       - alert: PayStellarDeploymentQuotaReached
         expr: sum by (reason) (increase(pay_stellar_api_refusals_total{reason=~"deployment_.*_quota_exceeded|buyer_quota_exceeded"}[1h])) > 0
         labels: { severity: warning }

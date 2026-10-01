@@ -20,6 +20,7 @@ use fermah_pay_stellar_proto::v1::{
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use super::WITHDRAWAL_DESTINATIONS;
 use super::store::{
     Insertion, NewWithdrawal, WithdrawalRecord, WithdrawalSigning, WithdrawalState,
 };
@@ -208,7 +209,8 @@ impl<L: LatestLedger> LedgerApi<L> {
             .map_err(|e| internal(&e))?;
         let id = match inserted {
             Insertion::Created(id) => {
-                let to = if destination == wallet { "own" } else { "other" };
+                let [own, other] = WITHDRAWAL_DESTINATIONS;
+                let to = if destination == wallet { own } else { other };
                 metrics::counter!("pay_stellar_withdrawals_prepared_total", "destination" => to)
                     .increment(1);
                 id

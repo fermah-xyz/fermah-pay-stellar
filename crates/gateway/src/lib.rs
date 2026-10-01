@@ -7,6 +7,7 @@ pub mod buyers;
 pub mod config;
 pub mod events;
 pub mod issuance;
+mod labels;
 pub mod lease;
 pub mod ledger;
 pub mod observer;

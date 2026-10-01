@@ -1,0 +1,28 @@
+{
+  "action": {
+    "description": "deposits were prepared for the deployment until its daily quota refused one; none was signed or sent",
+    "prepared_before_refusal": 3,
+    "refusal": "deployment_deposit_quota_exceeded"
+  },
+  "alert": {
+    "annotations": {
+      "action": "A burst of small deposits, mandates or buyers costs the operator fees: check the deployment's traffic before raising the quota",
+      "summary": "A deployment reached its daily quota (deployment_deposit_quota_exceeded)"
+    },
+    "labels": {
+      "alertname": "PayStellarDeploymentQuotaReached",
+      "reason": "deployment_deposit_quota_exceeded",
+      "severity": "warning"
+    },
+    "name": "PayStellarDeploymentQuotaReached",
+    "starts_at": "2026-10-01T06:47:22.720Z",
+    "state": "active"
+  },
+  "criterion": "monitoring-drill",
+  "expected": "the alert PayStellarDeploymentQuotaReached becomes active in Alertmanager",
+  "network": "stellar:testnet",
+  "observed_after_secs": 60,
+  "recorded_at": "2026-10-01T06:47:25.220356951Z",
+  "threat": "denial of service through dust deposits",
+  "vector": "dust"
+}

@@ -195,7 +195,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         };
         let entry = sign_entry_with(&unsigned, network_id(self.network()), treasury.as_ref())
             .await
-            .inspect_err(|_| crate::submission::signing_failed("treasury"))
+            .inspect_err(|_| {
+                crate::submission::signing_failed(crate::submission::SigningRole::Treasury)
+            })
             .map_err(WorkerError::Signing)?;
         let function = HostFunction::InvokeContract(
             deployment.treasury_transfer_call(&reserve.cold, i128::from(amount)),

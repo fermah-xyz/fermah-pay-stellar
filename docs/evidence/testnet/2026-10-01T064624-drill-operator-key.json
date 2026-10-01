@@ -1,0 +1,58 @@
+{
+  "action": {
+    "charge": {
+      "fee_charged_stroops": 27682,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "26c86a12ec240622409249ec06f656e62c2a42e358b3510ad48c2d703b77d7ac",
+      "ledger": 4962711,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/1e33ebba8b2dad2eaa2fdee58b974b3d85e102bd4cbe7486da2b0e4f2bd66f74",
+      "resources": {
+        "disk_read_bytes": 188,
+        "footprint_read_only": 2,
+        "footprint_read_write": 4,
+        "instructions": 1638786,
+        "write_bytes": 1280
+      },
+      "transaction_hash": "1e33ebba8b2dad2eaa2fdee58b974b3d85e102bd4cbe7486da2b0e4f2bd66f74"
+    },
+    "deposit": {
+      "fee_charged_stroops": 877460,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "cabbbdcb472d73921ab9ef6784ca314d1be330912c6bc76d6f82c39040e67efb",
+      "ledger": 4962710,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/29cb0d65f61b5fc0ec4d14b7d6f59360d6d7b3d04a9e03b5c2e0c2fee6e97d2a",
+      "resources": {
+        "disk_read_bytes": 508,
+        "footprint_read_only": 3,
+        "footprint_read_write": 6,
+        "instructions": 1732495,
+        "write_bytes": 1596
+      },
+      "transaction_hash": "29cb0d65f61b5fc0ec4d14b7d6f59360d6d7b3d04a9e03b5c2e0c2fee6e97d2a"
+    },
+    "description": "a buyer deposited straight to the contract, and the operator key charged it outside the gateway"
+  },
+  "alert": {
+    "annotations": {
+      "action": "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md",
+      "summary": "The observer recorded a critical unknown_charge finding"
+    },
+    "labels": {
+      "alertname": "PayStellarCriticalFinding",
+      "kind": "unknown_charge",
+      "severity": "critical"
+    },
+    "name": "PayStellarCriticalFinding",
+    "starts_at": "2026-10-01T06:46:22.720Z",
+    "state": "active"
+  },
+  "criterion": "monitoring-drill",
+  "expected": "the alert PayStellarCriticalFinding becomes active in Alertmanager",
+  "network": "stellar:testnet",
+  "observed_after_secs": 61,
+  "recorded_at": "2026-10-01T06:46:24.231573208Z",
+  "threat": "compromised operator key",
+  "vector": "operator-key"
+}

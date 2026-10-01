@@ -529,6 +529,20 @@ impl PrepaidDeployment {
         })
     }
 
+    /// A buyer's own call to the USDC contract setting its approval of the
+    /// ledger contract, outside any mandate, and what the buyer signs for
+    /// it: that call alone.
+    #[must_use]
+    pub fn buyer_approval_authorization(
+        &self,
+        owner: &AccountAddress,
+        amount: i128,
+        live_until: u32,
+    ) -> (InvokeContractArgs, SorobanAuthorizedInvocation) {
+        let call = self.approve(owner, amount, live_until);
+        (call.clone(), invocation(call, vec![]))
+    }
+
     /// The USDC approval of the ledger contract as spender of `owner`'s USDC.
     fn approve(&self, owner: &AccountAddress, amount: i128, live_until: u32) -> InvokeContractArgs {
         call(

@@ -146,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     let fee_source =
         signing::open(&config.fee_source_key_file).await.context("opening the fee key")?;
     let keys = Keys::new(sources, fee_source).context("source account settings")?;
+    telemetry::register_worker_counters(&keys.source_addresses());
     let operator =
         signing::open(&config.operator_key_file).await.context("opening the operator key")?;
     let reserve = match config.cold_reserve.clone() {

@@ -82,6 +82,7 @@ struct Config {
 async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     let _telemetry = telemetry::init("fermah-pay-stellar-observer", config.metrics_addr)?;
+    telemetry::register_observer_counters();
     if config.page_size == 0 || config.page_size > MAX_EVENTS_PER_PAGE {
         bail!("page size must be between 1 and {MAX_EVENTS_PER_PAGE}");
     }
