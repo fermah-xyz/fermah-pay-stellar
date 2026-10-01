@@ -146,6 +146,15 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// Run the x402 conformance harness against the recorded deployment: a
+    /// new zero-XLM buyer deposits through the gRPC API, then the harness
+    /// calls the x402 interface over HTTP and checks the settlement
+    /// on-chain. Writes an `x402-conformance` record.
+    X402Conformance {
+        /// PostgreSQL URL of the database owner; the run applies migrations.
+        #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
     /// Load the recorded deployment through the gateway API: BUYERS new
     /// zero-XLM buyers deposit once each, then CHARGES_PER_BUYER charges each
     /// are admitted CONCURRENCY at a time and settled by the worker from
@@ -264,6 +273,9 @@ async fn main() -> anyhow::Result<()> {
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
         Command::RecurringEndToEnd { database_url } => {
             context()?.recurring_end_to_end(&database_url).await?;
+        }
+        Command::X402Conformance { database_url } => {
+            context()?.x402_conformance(&database_url).await?;
         }
         Command::KeyCheck { key } => context()?.key_check(&key).await?,
         Command::LoadTest { database_url, buyers, charges_per_buyer, channels, concurrency } => {

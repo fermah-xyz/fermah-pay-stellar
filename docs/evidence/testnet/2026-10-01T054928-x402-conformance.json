@@ -1,0 +1,1477 @@
+{
+  "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+  "cases": [
+    {
+      "case": "supported",
+      "expected": "HTTP 200 listing x402 v2 batch-settlement on stellar:testnet, with extensions and signers",
+      "observed": {
+        "body": {
+          "extensions": [],
+          "kinds": [
+            {
+              "network": "stellar:testnet",
+              "scheme": "batch-settlement",
+              "x402Version": 2
+            }
+          ],
+          "signers": {}
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "no_api_key",
+      "expected": "HTTP 401, unauthenticated",
+      "observed": {
+        "body": {
+          "error": "unauthenticated"
+        },
+        "status": 401
+      },
+      "passed": true
+    },
+    {
+      "case": "unknown_api_key",
+      "expected": "HTTP 401, unauthenticated",
+      "observed": {
+        "body": {
+          "error": "unauthenticated"
+        },
+        "status": 401
+      },
+      "passed": true
+    },
+    {
+      "case": "altered_amount",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_signature",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_signature",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "altered_commitment",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_signature",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_signature",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "other_pay_to",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_payment_requirements",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "other_asset",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_payment_requirements",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "accepted_differs",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_payment_requirements",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "other_network",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_network",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_network",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "x402_version_1",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_x402_version",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_x402_version",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "scheme_exact",
+      "expected": "HTTP 200, isValid false, invalidReason unsupported_scheme",
+      "observed": {
+        "body": {
+          "invalidReason": "unsupported_scheme",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "malformed_signature",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_payload",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_payload",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "unknown_payer",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_unknown_payer",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_unknown_payer",
+          "isValid": false,
+          "payer": "GA2KISQUVD6MA4BCG5WUVDUMFSIHNFZEWOW3N7GFPY54A66MYHEE4NSO"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "expired",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_expired",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_expired",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "valid_until_too_far",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_valid_until_too_far",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_valid_until_too_far",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "insufficient_funds",
+      "expected": "HTTP 200, isValid false, invalidReason insufficient_funds",
+      "observed": {
+        "body": {
+          "invalidReason": "insufficient_funds",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "unparseable_body",
+      "expected": "HTTP 400, invalid_payload",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_payload",
+          "isValid": false
+        },
+        "status": 400
+      },
+      "passed": true
+    },
+    {
+      "case": "verify",
+      "expected": "HTTP 200, isValid true, payer GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+      "observed": {
+        "body": {
+          "isValid": true,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "settle",
+      "expected": "HTTP 200, success true, payer GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+      "observed": {
+        "body": {
+          "amount": "50000",
+          "extensions": {
+            "prepaidLedger": {
+              "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+              "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+              "ledger": null,
+              "outcome": null,
+              "replayed": false,
+              "state": "admitted",
+              "transactionHash": null
+            }
+          },
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": true,
+          "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "settle_identifier",
+      "expected": "transaction is the commitment; network, amount and the charge in extensions.prepaidLedger",
+      "observed": {
+        "amount": "50000",
+        "extensions": {
+          "prepaidLedger": {
+            "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+            "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+            "ledger": null,
+            "outcome": null,
+            "replayed": false,
+            "state": "admitted",
+            "transactionHash": null
+          }
+        },
+        "network": "stellar:testnet",
+        "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+        "success": true,
+        "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+      },
+      "passed": true
+    },
+    {
+      "case": "settle_again",
+      "expected": "HTTP 200, success true, payer GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+      "observed": {
+        "body": {
+          "amount": "50000",
+          "extensions": {
+            "prepaidLedger": {
+              "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+              "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+              "ledger": null,
+              "outcome": null,
+              "replayed": true,
+              "state": "admitted",
+              "transactionHash": null
+            }
+          },
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": true,
+          "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "settle_again_same_charge",
+      "expected": "replayed true, the same charge",
+      "observed": {
+        "amount": "50000",
+        "extensions": {
+          "prepaidLedger": {
+            "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+            "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+            "ledger": null,
+            "outcome": null,
+            "replayed": true,
+            "state": "admitted",
+            "transactionHash": null
+          }
+        },
+        "network": "stellar:testnet",
+        "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+        "success": true,
+        "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+      },
+      "passed": true
+    },
+    {
+      "case": "verify_settled",
+      "expected": "HTTP 200, isValid false, invalidReason invalid_batch_settlement_stellar_commitment_used",
+      "observed": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_commitment_used",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "settle_conflict",
+      "expected": "HTTP 200, success false, errorReason invalid_batch_settlement_stellar_commitment_conflict",
+      "observed": {
+        "body": {
+          "errorReason": "invalid_batch_settlement_stellar_commitment_conflict",
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": false,
+          "transaction": ""
+        },
+        "status": 200
+      },
+      "passed": true
+    },
+    {
+      "case": "settled_on_chain",
+      "expected": "transaction 91c23a336ab18f767814445f0a0278a78492b8a5b9989cfa2018462b96cb7552 succeeded and its charges event charges the payer 50000 under c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+      "observed": {
+        "entry": {
+          "amount": "50000",
+          "contract_charge_id": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+          "outcome": "charged",
+          "owner": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "transaction_hash": "91c23a336ab18f767814445f0a0278a78492b8a5b9989cfa2018462b96cb7552"
+      },
+      "passed": true
+    }
+  ],
+  "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+  "criterion": "x402-conformance",
+  "deposit": {
+    "amount": 1000000,
+    "ledger": 4962035,
+    "transaction_hash": "eb70e9751162de3bb9891a16ba2175df4dc80cf3a48319a79aa015032cabb919"
+  },
+  "endpoint": "in-process gateway",
+  "exchange": [
+    {
+      "case": "supported",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": null,
+        "body": null,
+        "method": "GET",
+        "path": "/supported"
+      },
+      "response": {
+        "body": {
+          "extensions": [],
+          "kinds": [
+            {
+              "network": "stellar:testnet",
+              "scheme": "batch-settlement",
+              "x402Version": 2
+            }
+          ],
+          "signers": {}
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "no_api_key",
+      "elapsed_ms": 0,
+      "request": {
+        "authorization": null,
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "error": "unauthenticated"
+        },
+        "status": 401
+      }
+    },
+    {
+      "case": "unknown_api_key",
+      "elapsed_ms": 0,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "error": "unauthenticated"
+        },
+        "status": 401
+      }
+    },
+    {
+      "case": "altered_amount",
+      "elapsed_ms": 9,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50001",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50001",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_signature",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "altered_commitment",
+      "elapsed_ms": 8,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "00138ef6dd0148b4d508418b614ca0a84b570d590662c9dcb56c98575d2af802",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_signature",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "other_pay_to",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "uMpQiJZGnKeog7pP/lkYvVRo4CL42ucbNRVChYtfNrO1P+h3mPl4YV4ARv7LCR7Qds24wo1xg0rLIif5XzawAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "other_asset",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "5E1Onal7SNHx17GqkCd63W0lOUekiSH2tDZwF+7zVgjJx7lxgoPwS9t+bWZH/GpzcwGHaFoZyuvcl3kYooTVBg==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "accepted_differs",
+      "elapsed_ms": 0,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "100000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_payment_requirements",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "other_network",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:pubnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "YLvl0TaDB+D38U3J5r3Zt74PnQctQ7GFK6Hdvu1yWwT154axjtzmyBYNK7oGeN4mJwcRMdm5Ap+XsC2aGm4lCg==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:pubnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_network",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "x402_version_1",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 1
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 1
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_x402_version",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "scheme_exact",
+      "elapsed_ms": 0,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "exact"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "exact"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "unsupported_scheme",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "malformed_signature",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "AAAA",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_payload",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "unknown_payer",
+      "elapsed_ms": 8,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GA2KISQUVD6MA4BCG5WUVDUMFSIHNFZEWOW3N7GFPY54A66MYHEE4NSO",
+              "signature": "QwK0DMtDKJJYt8ZxBzfW+sPvKPOFn7kVS2EClkjusCvTWu00oVC55D7P4trUOrrR1uSvBUbY3Uj5GThZUfPnBg==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_unknown_payer",
+          "isValid": false,
+          "payer": "GA2KISQUVD6MA4BCG5WUVDUMFSIHNFZEWOW3N7GFPY54A66MYHEE4NSO"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "expired",
+      "elapsed_ms": 10,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "713c16ab29cc3bbd50878069da343a5f3d0b23e6f71de6df8348aad228620359",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "jyaIwGbkVThPOB7EKI5U4WeOySBK83lRFbGmInsYEmVsp/QlfT7SHTaEPwCSF+j68IfJf6+60FlkRlSR8FOnCQ==",
+              "validUntil": "1790833703"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_expired",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "valid_until_too_far",
+      "elapsed_ms": 9,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "494690a0038d4e38729740187fed58fd7389b84d3b00ccc3794ea3fe693aa318",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "/LNfmzaJf+qe/CL6q6VNYZGQufOVIcVsNBlVIsygcCMZ3PDk/SpXcHWv8ZJA6k2voRNMURiHy440g51Kjtq0Cw==",
+              "validUntil": "1790834663"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_valid_until_too_far",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "insufficient_funds",
+      "elapsed_ms": 9,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "1000000000000000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "eefcffed83b01c5ea75b5c8417df7ccc20728d9694651e48f0f7eee2f8c899af",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "0Miujc1AAFDPAfB372RSpELwAxmH2zqafcycvA/5K+U0P6KtmzKChkq6IzY8Onk7kBVA8ty2t9vxwzqor3A5CQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "1000000000000000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "insufficient_funds",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "unparseable_body",
+      "elapsed_ms": 0,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_payload",
+          "isValid": false
+        },
+        "status": 400
+      }
+    },
+    {
+      "case": "verify",
+      "elapsed_ms": 9,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "isValid": true,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "settle",
+      "elapsed_ms": 169,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/settle"
+      },
+      "response": {
+        "body": {
+          "amount": "50000",
+          "extensions": {
+            "prepaidLedger": {
+              "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+              "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+              "ledger": null,
+              "outcome": null,
+              "replayed": false,
+              "state": "admitted",
+              "transactionHash": null
+            }
+          },
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": true,
+          "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "settle_again",
+      "elapsed_ms": 8,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/settle"
+      },
+      "response": {
+        "body": {
+          "amount": "50000",
+          "extensions": {
+            "prepaidLedger": {
+              "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+              "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+              "ledger": null,
+              "outcome": null,
+              "replayed": true,
+              "state": "admitted",
+              "transactionHash": null
+            }
+          },
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": true,
+          "transaction": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "verify_settled",
+      "elapsed_ms": 8,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "50000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "CRQqXfGtay0DlvsjEN3K66AQZd4p++qG0JF2ymAtujmfhY/L3BbLISqALhiZgjapdsfe38cFy9sc/Bg1d6wcAQ==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "50000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/verify"
+      },
+      "response": {
+        "body": {
+          "invalidReason": "invalid_batch_settlement_stellar_commitment_used",
+          "isValid": false,
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ"
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "settle_conflict",
+      "elapsed_ms": 9,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": {
+          "paymentPayload": {
+            "accepted": {
+              "amount": "100000",
+              "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "maxTimeoutSeconds": 300,
+              "network": "stellar:testnet",
+              "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+              "scheme": "batch-settlement"
+            },
+            "payload": {
+              "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+              "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+              "signature": "lYqsSMG0zYk6upOpXEwPmD3+BQTksUIC6rRKypp/e3h4YmokVEwob/8138nC21HzFGr0NR++duMn/QbFG20CCA==",
+              "validUntil": "1790833883"
+            },
+            "resource": {
+              "url": "https://seller.example/api/answer"
+            },
+            "x402Version": 2
+          },
+          "paymentRequirements": {
+            "amount": "100000",
+            "asset": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+            "maxTimeoutSeconds": 300,
+            "network": "stellar:testnet",
+            "payTo": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+            "scheme": "batch-settlement"
+          },
+          "x402Version": 2
+        },
+        "method": "POST",
+        "path": "/settle"
+      },
+      "response": {
+        "body": {
+          "errorReason": "invalid_batch_settlement_stellar_commitment_conflict",
+          "network": "stellar:testnet",
+          "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+          "success": false,
+          "transaction": ""
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "settlement",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": null,
+        "method": "GET",
+        "path": "/settlements/6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+      },
+      "response": {
+        "body": {
+          "amount": "50000",
+          "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+          "network": "stellar:testnet",
+          "settlement": {
+            "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+            "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+            "ledger": null,
+            "outcome": null,
+            "replayed": false,
+            "state": "admitted",
+            "transactionHash": null
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "case": "settlement",
+      "elapsed_ms": 1,
+      "request": {
+        "authorization": "Bearer <redacted>",
+        "body": null,
+        "method": "GET",
+        "path": "/settlements/6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f"
+      },
+      "response": {
+        "body": {
+          "amount": "50000",
+          "commitment": "6d8af04effdddc87972aa26279c6ce7a66182748ce767245f971458434ad078f",
+          "network": "stellar:testnet",
+          "settlement": {
+            "chargeId": "01a0f602-a776-7137-97fb-1ccf358d434f",
+            "contractChargeId": "c42ce9a1f2e8e8e352cf5385ba51aefc5c07569e793b2c264b7847a534f4b1ca",
+            "ledger": null,
+            "outcome": null,
+            "replayed": false,
+            "state": "submitted",
+            "transactionHash": "91c23a336ab18f767814445f0a0278a78492b8a5b9989cfa2018462b96cb7552"
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "expected": "the x402 v2 facilitator interface, called as a black box: discovery, authentication, every refusal the binding documents, verify, settle, an idempotent retry, reuse refused, and the settlement checked on-chain through an independent RPC read",
+  "failed_cases": [],
+  "network": "stellar:testnet",
+  "passed": true,
+  "pay_to": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+  "payer": "GDUJX7LRJQR76GPSGQA7KWDZ3WRY3CNIITXIC5WPA2QM4SKNHWTZVFQQ",
+  "recorded_at": "2026-10-01T05:49:28.477587334Z",
+  "transaction_hash": "91c23a336ab18f767814445f0a0278a78492b8a5b9989cfa2018462b96cb7552"
+}

@@ -262,6 +262,10 @@ jobs:
             -c 'CREATE DATABASE pay_stellar_recurring'
           PAY_STELLAR_E2E_DATABASE_URL=postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_recurring \
             tool recurring-end-to-end
+          PGPASSWORD=ci-only psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar \
+            -c 'CREATE DATABASE pay_stellar_x402'
+          PAY_STELLAR_E2E_DATABASE_URL=postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_x402 \
+            tool x402-conformance
       - name: Node logs on failure
         if: failure()
         run: docker logs --tail 200 stellar

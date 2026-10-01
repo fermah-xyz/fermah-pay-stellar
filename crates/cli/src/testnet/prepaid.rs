@@ -37,6 +37,7 @@ use super::evidence::{self, tx_url};
 use super::ledger::balances;
 use super::profile::{Deployment, Profile};
 
+mod conformance;
 mod e2e;
 mod load;
 mod recurring;
