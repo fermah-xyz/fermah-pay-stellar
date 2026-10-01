@@ -65,6 +65,25 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_MIN_WITHDRAWAL", default_value = "100000")]
     pub min_withdrawal: i64,
 
+    /// Deposits all buyers of one seller deployment may prepare in 24 hours.
+    #[arg(long, env = "PAY_STELLAR_MAX_DEPOSITS_PER_DEPLOYMENT_PER_DAY", default_value = "2000")]
+    pub max_deposits_per_deployment_per_day: u32,
+
+    /// Mandates and revocations all buyers of one seller deployment may
+    /// prepare in 24 hours.
+    #[arg(
+        long,
+        env = "PAY_STELLAR_MAX_MANDATE_CHANGES_PER_DEPLOYMENT_PER_DAY",
+        default_value = "2000"
+    )]
+    pub max_mandate_changes_per_deployment_per_day: u32,
+
+    /// Let withdrawals pay an account other than the buyer's wallet. Off by
+    /// default: a stolen buyer key can then only send the buyer's credit
+    /// back to the buyer's own wallet.
+    #[arg(long, env = "PAY_STELLAR_WITHDRAWALS_TO_OTHER_ACCOUNTS", default_value_t = false)]
+    pub withdrawals_to_other_accounts: bool,
+
     /// Mandates and revocations a buyer may prepare in 24 hours; each one
     /// the worker sends costs the operator a fee and the allowance's rent.
     #[arg(long, env = "PAY_STELLAR_MAX_MANDATE_CHANGES_PER_BUYER_PER_DAY", default_value = "5")]

@@ -373,6 +373,9 @@ impl<L: LatestLedger> LedgerApi<L> {
         let id = match inserted {
             Insertion::Created(id) => id,
             Insertion::QuotaExceeded => return Err(Refusal::MandateQuotaExceeded.into()),
+            Insertion::DeploymentQuotaExceeded => {
+                return Err(Refusal::DeploymentMandateQuotaExceeded.into());
+            }
             Insertion::KeyTaken => {
                 let existing = self
                     .existing_mandate(&scope, None, Some(&key))
@@ -502,6 +505,9 @@ impl<L: LatestLedger> LedgerApi<L> {
         let id = match inserted {
             Insertion::Created(id) => id,
             Insertion::QuotaExceeded => return Err(Refusal::MandateQuotaExceeded.into()),
+            Insertion::DeploymentQuotaExceeded => {
+                return Err(Refusal::DeploymentMandateQuotaExceeded.into());
+            }
             Insertion::KeyTaken => {
                 let existing = self
                     .existing_revocation(&scope, None, Some(&key))
@@ -649,7 +655,10 @@ impl<L: LatestLedger> LedgerApi<L> {
             .await
             .map_err(|e| internal(&e))?;
         let id = match admitted {
-            RecurringAdmission::Created(id) => id,
+            RecurringAdmission::Created(id) => {
+                super::record_admission("recurring", &scope, amount);
+                id
+            }
             RecurringAdmission::PeriodTaken => return Err(Refusal::PeriodAlreadyCharged.into()),
             RecurringAdmission::KeyTaken => {
                 let existing = self

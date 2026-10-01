@@ -6,7 +6,7 @@
 |---|---|---|
 | Operator | the settlement worker | charges to any buyer of the operator's deployments, within each buyer's balance and the per-charge limit |
 | Fee account | the settlement worker | its XLM can be spent |
-| Source (channel) accounts | the settlement worker | their sequence numbers can be consumed; they hold no XLM and authorize nothing |
+| Source (channel) accounts | the settlement worker | their sequence numbers can be consumed, which the worker detects and answers by leaving the source out ([limits](limits.md#source-accounts)); they hold no XLM and authorize nothing |
 | Treasury | the settlement worker, only if it pays withdrawals (`PAY_STELLAR_TREASURY_KEY_FILE`) | everything the treasury holds can be moved: up to the sweep ceiling with a [cold reserve](treasury.md) |
 | Cold reserve | its signers, never the worker | one key alone moves nothing; the reserve's threshold needs several |
 | Admin | not the worker | the contract's code and roles can be replaced |

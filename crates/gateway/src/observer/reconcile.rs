@@ -39,7 +39,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use fermah_pay_stellar_chain::prepaid::{InstanceState, PrepaidDeployment, instance_state};
+use fermah_pay_stellar_chain::prepaid::{
+    InstanceState, PrepaidDeployment, instance_state, instance_wasm,
+};
 use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, LedgerKey, TrustLineFlags};
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_key};
 use fermah_pay_stellar_domain::AccountAddress;
@@ -61,6 +63,8 @@ struct Reading {
     /// balance, read at the same ledger; `None` without a trustline.
     reserve: Option<(AccountAddress, Option<i64>)>,
     state: InstanceState,
+    /// The hash of the Wasm the contract runs.
+    wasm: Option<[u8; 32]>,
 }
 
 /// The database and event-stream side of one check.
@@ -210,6 +214,28 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             (held > owed)
                 .then(|| Finding::new(FindingKind::TreasurySurplus, Severity::Info, solvency)),
         ));
+        // The admin can replace the contract's code, and with it what every
+        // balance means. An operator who names the code they audited is told
+        // as soon as the contract runs any other.
+        if let Some(expected) = self.expected_code.get(&deployment.contract) {
+            let matches = reading.wasm.as_ref() == Some(expected);
+            metrics::gauge!("pay_stellar_contract_code_expected", "deployment" => deployment.id.to_string())
+                .set(if matches { 1.0 } else { 0.0 });
+            checks.push((
+                FindingKind::CodeChanged,
+                (!matches).then(|| {
+                    Finding::new(
+                        FindingKind::CodeChanged,
+                        Severity::Critical,
+                        json!({
+                            "ledger": reading.ledger,
+                            "expected_wasm": fermah_pay_stellar_chain::rpc::hex_lower(expected),
+                            "running_wasm": reading.wasm.as_ref().map(|w| fermah_pay_stellar_chain::rpc::hex_lower(w)),
+                        }),
+                    )
+                }),
+            ));
+        }
         // USDC's issuer can revoke a trustline's authorization. The balance
         // then still covers what is owed, but the asset contract refuses
         // every transfer into or out of the treasury: no deposit or
@@ -396,12 +422,13 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             let mut keys = vec![probe.instance_key(), line.clone()];
             keys.extend(reserve_line.clone());
             let read = self.chain.ledger_entries(&keys).await.map_err(ObserverError::Chain)?;
-            let state = read
+            let instance = read
                 .entries
                 .iter()
                 .find(|record| record.key == probe.instance_key())
-                .and_then(|record| instance_state(&record.data))
                 .ok_or(ObserverError::UnreadableContract)?;
+            let state = instance_state(&instance.data).ok_or(ObserverError::UnreadableContract)?;
+            let wasm = instance_wasm(&instance.data);
             if state.config.usdc != probe.usdc {
                 return Err(ObserverError::UnreadableContract);
             }
@@ -422,7 +449,14 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 let balance = reserve_line.as_ref().and_then(trustline_of).map(|(b, _)| b);
                 (cold, balance)
             });
-            return Ok(Reading { ledger: read.latest_ledger, treasury, trustline, reserve, state });
+            return Ok(Reading {
+                ledger: read.latest_ledger,
+                treasury,
+                trustline,
+                reserve,
+                state,
+                wasm,
+            });
         }
         Err(ObserverError::Corrupt("the treasury changed on every read"))
     }

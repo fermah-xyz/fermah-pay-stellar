@@ -207,6 +207,8 @@ pub struct Observer<R, K> {
     /// Each treasury's cold reserve, whose USDC counts towards what the
     /// treasury owes.
     reserves: std::collections::HashMap<AccountAddress, AccountAddress>,
+    /// The Wasm hash each contract is expected to run, by contract id.
+    expected_code: std::collections::HashMap<[u8; 32], [u8; 32]>,
 }
 
 fn i64_of(value: u32) -> i64 {
@@ -405,7 +407,15 @@ fn locate(detail: &mut Value, event_id: &str, ledger: i64, transaction_hash: &[u
 
 impl<R: ChainReader, K: Clock> Observer<R, K> {
     pub fn new(pool: PgPool, chain: R, clock: K, network: Network, settings: Settings) -> Self {
-        Self { pool, chain, clock, network, settings, reserves: std::collections::HashMap::new() }
+        Self {
+            pool,
+            chain,
+            clock,
+            network,
+            settings,
+            reserves: std::collections::HashMap::new(),
+            expected_code: std::collections::HashMap::new(),
+        }
     }
 
     /// Counts the USDC of each treasury's reserve, keyed by treasury, with
@@ -416,6 +426,17 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         reserves: std::collections::HashMap<AccountAddress, AccountAddress>,
     ) -> Self {
         self.reserves = reserves;
+        self
+    }
+
+    /// Checks, at each reconciliation, that each listed contract runs the
+    /// listed Wasm hash, and records `code_changed` while it does not.
+    #[must_use]
+    pub fn with_expected_code(
+        mut self,
+        expected: std::collections::HashMap<[u8; 32], [u8; 32]>,
+    ) -> Self {
+        self.expected_code = expected;
         self
     }
 

@@ -151,6 +151,9 @@ impl<L: LatestLedger> LedgerApi<L> {
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
         let destination = parse_destination(&body.destination, &wallet)?;
+        if destination != wallet && !self.policy.withdrawals_to_other_accounts {
+            return Err(Refusal::DestinationNotAllowed.into());
+        }
         if amount < self.store.quotas.min_withdrawal {
             return Err(Refusal::WithdrawalBelowMinimum.into());
         }
@@ -204,8 +207,15 @@ impl<L: LatestLedger> LedgerApi<L> {
             .await
             .map_err(|e| internal(&e))?;
         let id = match inserted {
-            Insertion::Created(id) => id,
-            Insertion::QuotaExceeded => return Err(Refusal::WithdrawalQuotaExceeded.into()),
+            Insertion::Created(id) => {
+                let to = if destination == wallet { "own" } else { "other" };
+                metrics::counter!("pay_stellar_withdrawals_prepared_total", "destination" => to)
+                    .increment(1);
+                id
+            }
+            Insertion::QuotaExceeded | Insertion::DeploymentQuotaExceeded => {
+                return Err(Refusal::WithdrawalQuotaExceeded.into());
+            }
             // A concurrent request with the same key committed first.
             Insertion::KeyTaken => {
                 let existing = self

@@ -69,6 +69,13 @@ struct Config {
     /// checking that the treasury covers what the contract owes.
     #[arg(long, env = "PAY_STELLAR_COLD_RESERVES", value_delimiter = ',')]
     cold_reserves: Vec<String>,
+
+    /// The Wasm each contract must run, as `CONTRACT:HASH` (the contract's
+    /// `C...` address and the hex SHA-256 of its Wasm), comma-separated. A
+    /// listed contract running any other code is a critical `code_changed`
+    /// finding.
+    #[arg(long, env = "PAY_STELLAR_EXPECTED_WASM", value_delimiter = ',')]
+    expected_wasm: Vec<String>,
 }
 
 #[tokio::main]
@@ -92,6 +99,23 @@ async fn main() -> anyhow::Result<()> {
         let reserve: AccountAddress = reserve.parse().context("the reserve address")?;
         if reserves.insert(treasury, reserve).is_some() {
             bail!("a treasury is listed with two cold reserves");
+        }
+    }
+    let mut expected_code = std::collections::HashMap::new();
+    for pair in &config.expected_wasm {
+        let (contract, hash) =
+            pair.split_once(':').context("an expected Wasm is written CONTRACT:HASH")?;
+        let contract =
+            stellar_strkey::Contract::from_string(contract).context("the contract address")?.0;
+        let hash: [u8; 32] = (0..64)
+            .step_by(2)
+            .map(|i| hash.get(i..i + 2).and_then(|byte| u8::from_str_radix(byte, 16).ok()))
+            .collect::<Option<Vec<u8>>>()
+            .and_then(|bytes| bytes.try_into().ok())
+            .filter(|_| hash.len() == 64)
+            .context("the Wasm hash is 64 hex digits")?;
+        if expected_code.insert(contract, hash).is_some() {
+            bail!("a contract is listed with two expected Wasm hashes");
         }
     }
     let rpc = RpcClient::new(&config.rpc_url, Duration::from_secs(config.rpc_timeout_secs))
@@ -121,7 +145,8 @@ async fn main() -> anyhow::Result<()> {
             max_pages_per_round: 100,
         },
     )
-    .with_reserves(reserves);
+    .with_reserves(reserves)
+    .with_expected_code(expected_code);
     lease::lead(&lease, "observer", shutdown::signal(), |stop| {
         observer.run(
             Duration::from_secs(config.poll_secs),

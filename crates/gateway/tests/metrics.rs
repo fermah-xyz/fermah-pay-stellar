@@ -16,8 +16,9 @@ use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, contract_st
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
 use fermah_pay_stellar_gateway::x402::commitment_message;
-use fermah_pay_stellar_proto::v1::CreateBuyerRequest;
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
+use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
+use fermah_pay_stellar_proto::v1::{CreateBuyerRequest, PrepareWithdrawalRequest};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -68,7 +69,7 @@ async fn test_settlements_and_refusals_are_counted(opts: PgPoolOptions, connect:
     .await
     .unwrap();
     let buyer = SecretKey::generate().unwrap();
-    BuyerServiceClient::new(h.channel().await)
+    let buyer_id = BuyerServiceClient::new(h.channel().await)
         .create_buyer(authed(
             CreateBuyerRequest {
                 external_ref: "alice".to_owned(),
@@ -77,7 +78,11 @@ async fn test_settlements_and_refusals_are_counted(opts: PgPoolOptions, connect:
             &tenant.token,
         ))
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner()
+        .buyer
+        .unwrap()
+        .buyer_id;
     sqlx::query("UPDATE pay_stellar.buyers SET available = 100").execute(&h.owner).await.unwrap();
     // A refusal through the gRPC API: registering the same wallet under
     // another reference.
@@ -125,7 +130,36 @@ async fn test_settlements_and_refusals_are_counted(opts: PgPoolOptions, connect:
         assert_eq!(h.x402.clone().oneshot(request).await.unwrap().status(), 200);
     }
 
+    // A withdrawal to the buyer's own wallet.
+    LedgerServiceClient::new(h.channel().await)
+        .prepare_withdrawal(authed(
+            PrepareWithdrawalRequest {
+                buyer_id,
+                amount: 10,
+                destination: String::new(),
+                idempotency_key: "w-1".to_owned(),
+            },
+            &tenant.token,
+        ))
+        .await
+        .unwrap();
+
     let snapshot = snapshotter.snapshot().into_vec();
+    // The settled commitment admitted one charge of 30; its replay admitted
+    // nothing.
+    let deployment = tenant.deployment_id.to_string();
+    let admitted = [("kind", "charge"), ("seller_deployment_id", deployment.as_str())];
+    assert_eq!(
+        (
+            counter(&snapshot, "pay_stellar_charges_admitted_total", &admitted),
+            counter(&snapshot, "pay_stellar_charges_admitted_usdc_total", &admitted),
+        ),
+        (1, 30)
+    );
+    assert_eq!(
+        counter(&snapshot, "pay_stellar_withdrawals_prepared_total", &[("destination", "own")]),
+        1
+    );
     let x402 = |result| {
         counter(&snapshot, "pay_stellar_x402_total", &[("call", "settle"), ("result", result)])
     };

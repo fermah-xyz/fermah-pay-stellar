@@ -176,6 +176,8 @@ pub enum Insertion {
     KeyTaken,
     /// The buyer reached its quota for the day; nothing was inserted.
     QuotaExceeded,
+    /// The deployment reached its quota for the day; nothing was inserted.
+    DeploymentQuotaExceeded,
 }
 
 /// What storing a withdrawal's signed entry did.
@@ -328,6 +330,10 @@ impl Store {
         {
             return Ok(Insertion::QuotaExceeded);
         }
+        let deployment_quota = self.quotas.deposits_per_deployment;
+        if !self.within_deployment_quota(&mut tx, scope, "deposits", deployment_quota).await? {
+            return Ok(Insertion::DeploymentQuotaExceeded);
+        }
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.deposits
@@ -354,6 +360,59 @@ impl Store {
         }
         tx.commit().await.map_err(query("commit deposit"))?;
         Ok(Insertion::Created(id))
+    }
+
+    /// Tells whether the deployment created fewer than `quota` rows of
+    /// `table` in the last day. Called after the buyer's row is locked, it
+    /// takes a transaction-scoped advisory lock on the deployment, so the
+    /// count and the insert that follows are one step for the deployment;
+    /// the first key, 2, keeps it apart from the lock on new buyers. Every
+    /// caller holds at most one buyer row when it takes it, always before,
+    /// so two requests cannot wait on each other in a cycle.
+    async fn within_deployment_quota(
+        &self,
+        tx: &mut sqlx::PgConnection,
+        scope: &Scope,
+        table: &'static str,
+        quota: u32,
+    ) -> Result<bool, StoreError> {
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock(2, hashtext($1::text))",
+            scope.seller_deployment_id().to_string(),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(query("lock deployment quota"))?;
+        let recent = match table {
+            "deposits" => {
+                sqlx::query_scalar!(
+                    r#"
+                SELECT count(*) AS "recent!" FROM pay_stellar.deposits
+                WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day'
+                "#,
+                    scope.seller_deployment_id(),
+                )
+                .fetch_one(&mut *tx)
+                .await
+            }
+            "mandates" => {
+                sqlx::query_scalar!(
+                    r#"
+                SELECT (SELECT count(*) FROM pay_stellar.mandates
+                        WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day')
+                     + (SELECT count(*) FROM pay_stellar.revocations
+                        WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day')
+                       AS "recent!"
+                "#,
+                    scope.seller_deployment_id(),
+                )
+                .fetch_one(&mut *tx)
+                .await
+            }
+            _ => return Err(StoreError::Corrupt("deployment quota for an unknown table")),
+        }
+        .map_err(query("count recent requests of the deployment"))?;
+        Ok(recent < i64::from(quota))
     }
 
     /// Locks the buyer row, as charge admission does, and tells whether the

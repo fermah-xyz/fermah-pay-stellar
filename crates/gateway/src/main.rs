@@ -28,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
         withdrawals_per_buyer: config.max_withdrawals_per_buyer_per_day,
         min_withdrawal: config.min_withdrawal,
         mandate_changes_per_buyer: config.max_mandate_changes_per_buyer_per_day,
+        deposits_per_deployment: config.max_deposits_per_deployment_per_day,
+        mandate_changes_per_deployment: config.max_mandate_changes_per_deployment_per_day,
     });
     let ledger = LedgerApi::new(
         store.clone(),
@@ -38,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
             charge_validity_ledgers: config.charge_validity_ledgers,
             min_mandate_period_secs: config.min_mandate_period_secs,
             max_mandate_ledgers: config.max_mandate_ledgers,
+            withdrawals_to_other_accounts: config.withdrawals_to_other_accounts,
         },
     );
     let listener = TcpListener::bind(config.listen_addr)

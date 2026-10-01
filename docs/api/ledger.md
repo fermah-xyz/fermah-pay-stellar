@@ -146,7 +146,11 @@ for, whatever the amount. So the gateway limits, per buyer and per 24 hours,
 how many deposits (`PAY_STELLAR_MAX_DEPOSITS_PER_BUYER_PER_DAY`, 10 by
 default) and withdrawals (`PAY_STELLAR_MAX_WITHDRAWALS_PER_BUYER_PER_DAY`, 5
 by default) may be prepared. It also refuses withdrawals below
-`PAY_STELLAR_MIN_WITHDRAWAL` (0.01 USDC by default). The contract itself
+`PAY_STELLAR_MIN_WITHDRAWAL` (0.01 USDC by default). Across all buyers of a
+deployment it limits deposits too
+(`PAY_STELLAR_MAX_DEPOSITS_PER_DEPLOYMENT_PER_DAY`, 2000 by default), so a
+flood of new buyers cannot multiply the per-buyer quota; see
+[limits](../self-hosting/limits.md). The contract itself
 refuses deposits below its `min_deposit`.
 
 Each count is taken in the same transaction as the insert, with the buyer's
@@ -191,5 +195,7 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `FAILED_PRECONDITION` | `withdrawal_expired` | the withdrawal's authorization expiration ledger has passed | prepare a new withdrawal |
 | `FAILED_PRECONDITION` | `withdrawal_already_signed` | the withdrawal holds a different signed entry | nothing to do; poll `GetWithdrawal` |
 | `RESOURCE_EXHAUSTED` | `deposit_quota_exceeded`, `withdrawal_quota_exceeded` | the buyer prepared its quota of deposits or withdrawals in the last 24 hours | retry later |
+| `RESOURCE_EXHAUSTED` | `deployment_deposit_quota_exceeded` | the deployment's buyers prepared its quota of deposits in the last 24 hours | retry later |
+| `FAILED_PRECONDITION` | `destination_not_allowed` | the withdrawal names an account other than the buyer's wallet, which this gateway does not allow | withdraw to the buyer's wallet |
 | `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached; nothing was created | retry |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

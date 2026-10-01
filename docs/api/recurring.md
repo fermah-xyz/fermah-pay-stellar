@@ -102,7 +102,10 @@ Each mandate and revocation the worker sends costs the operator a fee and
 the approval's rent. A buyer may prepare
 `PAY_STELLAR_MAX_MANDATE_CHANGES_PER_BUYER_PER_DAY` (5 by default) mandates
 and revocations together per 24 hours; beyond that the request is refused
-with `mandate_quota_exceeded`.
+with `mandate_quota_exceeded`. All buyers of a deployment together may
+prepare `PAY_STELLAR_MAX_MANDATE_CHANGES_PER_DEPLOYMENT_PER_DAY` (2000 by
+default); beyond that the request is refused with
+`deployment_mandate_quota_exceeded`.
 
 ## Refusals
 
@@ -120,6 +123,7 @@ with `mandate_quota_exceeded`.
 | `FAILED_PRECONDITION` | `mandate_authorization_expired`, `revocation_expired` | the buyer's signature has lapsed |
 | `FAILED_PRECONDITION` | `mandate_already_signed`, `revocation_already_signed` | another signed entry is already stored |
 | `RESOURCE_EXHAUSTED` | `mandate_quota_exceeded` | the buyer prepared its quota of mandates and revocations in the last 24 hours |
+| `RESOURCE_EXHAUSTED` | `deployment_mandate_quota_exceeded` | the deployment's buyers prepared its quota of mandates and revocations in the last 24 hours |
 
 The other refusals (`invalid_amount`, `invalid_signature`,
 `authorization_mismatch`, `idempotency_conflict`, `network_unavailable`, …)

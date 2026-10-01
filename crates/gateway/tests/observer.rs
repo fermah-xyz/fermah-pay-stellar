@@ -1742,3 +1742,25 @@ async fn test_recurring_revenue_reconciles_with_the_contract_and_the_treasury(
         ]
     );
 }
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_contract_running_other_code_than_expected_is_a_critical_finding(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    agreeing(&w).await;
+    // The fake contract runs Wasm [9; 32].
+    let expecting = |hash: [u8; 32]| {
+        w.observer().with_expected_code(std::collections::HashMap::from([(CONTRACT, hash)]))
+    };
+    reconcile_times(&expecting([9; 32]), CONFIRMATIONS + 1).await;
+    assert_eq!(w.findings().await, []);
+    reconcile_times(&expecting([8; 32]), CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("code_changed", "critical")]);
+    let detail = w.finding_detail("code_changed").await;
+    assert_eq!(
+        (detail["expected_wasm"].as_str(), detail["running_wasm"].as_str()),
+        (Some(hex(&[8; 32]).as_str()), Some(hex(&[9; 32]).as_str()))
+    );
+}

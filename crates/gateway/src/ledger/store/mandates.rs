@@ -137,6 +137,10 @@ impl Store {
         if !self.within_quota(&mut tx, scope, mandate.buyer_id, "mandates", quota).await? {
             return Ok(Insertion::QuotaExceeded);
         }
+        let deployment_quota = self.quotas.mandate_changes_per_deployment;
+        if !self.within_deployment_quota(&mut tx, scope, "mandates", deployment_quota).await? {
+            return Ok(Insertion::DeploymentQuotaExceeded);
+        }
         let inserted = sqlx::query!(
             r#"
             INSERT INTO pay_stellar.mandates
@@ -259,6 +263,10 @@ impl Store {
         let quota = self.quotas.mandate_changes_per_buyer;
         if !self.within_quota(&mut tx, scope, revocation.buyer_id, "mandates", quota).await? {
             return Ok(Insertion::QuotaExceeded);
+        }
+        let deployment_quota = self.quotas.mandate_changes_per_deployment;
+        if !self.within_deployment_quota(&mut tx, scope, "mandates", deployment_quota).await? {
+            return Ok(Insertion::DeploymentQuotaExceeded);
         }
         let inserted = sqlx::query!(
             r#"
