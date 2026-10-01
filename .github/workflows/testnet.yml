@@ -127,6 +127,15 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar -c 'CREATE DATABASE pay_stellar_recurring'
           ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence recurring-end-to-end
+      # A facilitator's calls, as a black box over HTTP, with every request
+      # and response recorded.
+      - name: Run the x402 conformance harness
+        env:
+          PGPASSWORD: ci-only
+          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_x402
+        run: |
+          psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar -c 'CREATE DATABASE pay_stellar_x402'
+          ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence x402-conformance
       # The event decoders against what the deployed contract really emitted.
       - name: Read the contract's events
         env:
@@ -155,6 +164,16 @@ jobs:
               "| x402 commitment settled through /settle | \(link(.x402.transaction_hash)) |",
               "| Final balance | gateway \(.observed.gateway_available), contract \(.observed.contract_balance) |"
             ' "$record"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarise the x402 conformance run
+        if: always()
+        run: |
+          record=$(find evidence -name '*x402-conformance.json' | head -1)
+          [ -n "$record" ] || { echo "No x402 conformance record was written." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## x402 conformance on Stellar testnet"
+            echo
+            jq -r '"Passed: \(.passed). Settlement: [\(.transaction_hash[0:12])…](https://stellar.expert/explorer/testnet/tx/\(.transaction_hash))", "", "| Case | Passed |", "|---|---|", (.cases[] | "| \(.case) | \(.passed) |")' "$record"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Summarise the recurring transactions
         if: always()

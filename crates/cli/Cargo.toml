@@ -26,6 +26,10 @@ path = "src/bin/testnet.rs"
 name = "fermah-pay-stellar-contract"
 path = "src/bin/contract.rs"
 
+[[bin]]
+name = "fermah-pay-stellar-x402-conformance"
+path = "src/bin/x402_conformance.rs"
+
 [dependencies]
 fermah-pay-stellar-domain.workspace = true
 fermah-pay-stellar-chain.workspace = true

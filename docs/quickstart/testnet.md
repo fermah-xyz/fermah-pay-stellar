@@ -136,7 +136,15 @@ the API refuses a charge (`mandate_ended`) and so does the contract
 (`mandate_expired`); finally the buyer revokes and the USDC approval is
 zero. It writes a `recurring-end-to-end` evidence record.
 
-The `testnet` workflow runs both commands in CI: on changes to main, on
+The x402 interface has its own run, a [conformance harness](../api/x402.md#conformance-harness)
+that calls it over HTTP as a third-party facilitator would:
+
+```bash
+testnet x402-conformance \
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar
+```
+
+The `testnet` workflow runs these commands in CI: on changes to main, on
 demand, and on pull requests labelled `testnet`. Its job summary lists every
 transaction with an explorer link, and the evidence record is attached to the
 run.
