@@ -110,8 +110,9 @@ enum Command {
     /// Print the account a key reference signs for, after checking that it
     /// signs: for instance the `G...` address of a key held in AWS KMS.
     Address {
-        /// Key reference: a seed file path, or a key in a key management
-        /// service such as `aws-kms://alias/pay-stellar-operator`.
+        /// Key reference: a seed file path, a remote signer (`https://...`),
+        /// or `aws-kms://alias/pay-stellar-operator` (built with the
+        /// `aws-kms` feature).
         #[arg(long)]
         key: String,
     },

@@ -24,7 +24,7 @@ name = "fermah-pay-stellar-observer"
 path = "src/bin/observer.rs"
 
 [features]
-default = ["aws-kms"]
+default = []
 # Signing with keys held in AWS KMS (`aws-kms://` key references).
 aws-kms = ["dep:aws-config", "dep:aws-sdk-kms"]
 
@@ -34,6 +34,9 @@ aws-sdk-kms = { workspace = true, optional = true }
 axum.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true
 opentelemetry.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
@@ -64,5 +67,8 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+hyper-util.workspace = true
 metrics-util.workspace = true
+rcgen.workspace = true
+tokio-rustls.workspace = true
 sha2.workspace = true
