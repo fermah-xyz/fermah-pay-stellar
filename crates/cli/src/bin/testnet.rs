@@ -201,8 +201,9 @@ enum Command {
         #[arg(long, default_value = "32")]
         concurrency: usize,
     },
-    /// Send a testnet transaction signed through a key reference, such as
-    /// `aws-kms://alias/...`, from the account that key signs for; Friendbot
+    /// Send a testnet transaction signed through a key reference, such as a
+    /// remote signer (`https://...`) or `aws-kms://alias/...` (built with the
+    /// `aws-kms` feature), from the account that key signs for; Friendbot
     /// funds the account first if it does not exist.
     KeyCheck {
         #[arg(long)]

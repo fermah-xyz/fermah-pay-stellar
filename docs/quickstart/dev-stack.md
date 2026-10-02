@@ -63,4 +63,4 @@ A deposit is then prepared with `LedgerService/PrepareDeposit`, signed by the bu
 ## Notes
 
 - **Observer noise.** The testnet contract is shared with other runs. The observer starts from the latest ledger. Deposits and charges that other runs make after that are reported as `unknown_deposit` and `unknown_charge` warnings, because this database has no rows for them.
-- **Changing the source accounts.** Set `DEV_SOURCE_KEYS` to a comma-separated list of key paths inside the profile, for example `/profile/channel-4.secret`. Any [key reference](../self-hosting/keys.md) works, including `aws-kms://...` with AWS credentials passed to the worker.
+- **Changing the source accounts.** Set `DEV_SOURCE_KEYS` to a comma-separated list of key paths inside the profile, for example `/profile/channel-4.secret`. Any [key reference](../self-hosting/keys.md) works, including a remote signer (`https://...`) and, in an image built with the `aws-kms` feature, `aws-kms://...` with AWS credentials passed to the worker.

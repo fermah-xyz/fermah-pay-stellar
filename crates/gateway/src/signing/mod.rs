@@ -1,8 +1,12 @@
-//! Where the worker's keys come from. A key reference is either the path of
-//! a seed file on this host or `<service>://<key>`, naming a key in a key
-//! management service: `aws-kms://<key id, key ARN or alias>` when built
-//! with the `aws-kms` feature (the default). A reference to any other
-//! service is refused at startup rather than ignored.
+//! Where the worker's keys come from. A key reference is one of:
+//! - the path of a seed file on this host;
+//! - `https://...` (or `http://` on this host): a remote signer the operator
+//!   runs in front of any key store, see [`remote`];
+//! - `aws-kms://<key id, key ARN or alias>`, a key in AWS KMS, when built
+//!   with the `aws-kms` feature.
+//!
+//! A reference to any other service is refused at startup rather than
+//! ignored.
 //!
 //! Every signer is tested once at startup: it signs a random payload, and the
 //! signature must verify for the address it claims, before any transaction
@@ -17,6 +21,7 @@ use zeroize::Zeroizing;
 
 #[cfg(feature = "aws-kms")]
 pub mod aws_kms;
+pub mod remote;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -35,6 +40,8 @@ pub enum KeyError {
     #[cfg(feature = "aws-kms")]
     #[error(transparent)]
     AwsKms(#[from] aws_kms::KmsError),
+    #[error(transparent)]
+    Remote(#[from] remote::RemoteError),
     #[error("the signer for {reference} failed its startup test")]
     SelfTest {
         reference: String,
@@ -48,6 +55,9 @@ pub async fn open(reference: &str) -> Result<Arc<dyn Signer>, KeyError> {
     let signer: Arc<dyn Signer> = match reference.split_once("://") {
         #[cfg(feature = "aws-kms")]
         Some(("aws-kms", key)) => Arc::new(aws_kms::AwsKmsSigner::connect(key).await?),
+        Some(("https" | "http", _)) => Arc::new(
+            remote::RemoteSigner::connect(reference, remote::RemoteSettings::from_env()?).await?,
+        ),
         Some((scheme, _)) => return Err(KeyError::Unsupported(scheme.to_owned())),
         None => Arc::new(LocalSigner::new(read_seed(Path::new(reference))?)),
     };

@@ -30,6 +30,10 @@ path = "src/bin/contract.rs"
 name = "fermah-pay-stellar-x402-conformance"
 path = "src/bin/x402_conformance.rs"
 
+[features]
+# `aws-kms://` key references in the tools that sign (testnet, contract).
+aws-kms = ["fermah-pay-stellar-gateway/aws-kms"]
+
 [dependencies]
 fermah-pay-stellar-domain.workspace = true
 fermah-pay-stellar-chain.workspace = true

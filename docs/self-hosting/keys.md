@@ -33,7 +33,38 @@ The worker takes each of its keys as a key reference:
 
 A key reference is the path of a seed file on the worker's host. The file holds the account's `S...` seed and nothing else, and must be readable by its owner only (mode `0600`); the worker refuses to start otherwise.
 
-A reference of the form `<service>://<key>` names a key in a key management service. The key stays inside the service: the worker sends the 32-byte hash to sign and never holds the key. The only service served is AWS KMS (`aws-kms://`, below); a reference to any other service is refused at startup.
+A reference of the form `<service>://<key>` names a key in a key management service. The key stays inside the service: the worker sends the 32-byte hash to sign and never holds the key. Two are served:
+
+- `https://...`: a [remote signer](#a-remote-signer) the operator runs in front of any key store, such as a hardware security module, HashiCorp Vault or a cloud key management service;
+- `aws-kms://...`: a key in [AWS KMS](#aws-kms), in a build with the `aws-kms` feature.
+
+A reference to any other service is refused at startup.
+
+### A remote signer
+
+A key reference `https://<host>/<path>` names an endpoint that signs for one account. The worker never sees the key, so any key store that can produce an Ed25519 signature can hold it: the operator runs a small service between the worker and the store. The endpoint answers two requests at that URL, in JSON:
+
+| Request | Body | Answer |
+|---|---|---|
+| `GET` | none | `{"account": "G..."}`: the account the key signs for |
+| `POST` | `{"payload": "<64 hex digits>"}`: the 32-byte hash to sign | `{"signature": "<128 hex digits>"}`: its Ed25519 signature |
+
+Any status other than 2xx is a failure. The worker sends the hash of a transaction or an authorization entry, never the transaction itself.
+
+The worker trusts the endpoint for availability only. It checks every signature against the account before it records or sends anything, starting with a test signature at startup ([startup check](#startup-check)), so an endpoint holding the wrong key, or answering wrongly, signs nothing that is used.
+
+How the worker reaches it:
+
+| Setting | Effect |
+|---|---|
+| `PAY_STELLAR_REMOTE_SIGNER_TOKEN_FILE` | a file holding a token, sent as `Authorization: Bearer <token>` |
+| `PAY_STELLAR_REMOTE_SIGNER_CLIENT_CERT_FILE`, `PAY_STELLAR_REMOTE_SIGNER_CLIENT_KEY_FILE` | a PEM client certificate and its key, for mutual TLS |
+| `PAY_STELLAR_REMOTE_SIGNER_CA_FILE` | PEM certificates the endpoint's certificate must chain to, instead of the public web roots, for an endpoint under a private authority |
+
+- **Authentication.** An endpoint on another host needs a token, a client certificate or both; the worker refuses to start without one. Files holding a secret (the token, the client key) must be readable by their owner only.
+- **Transport.** It is reached over HTTPS. Plain `http://` is accepted only for an endpoint on the same host (`localhost` or a loopback address), such as a sidecar.
+- **Timeouts.** A request taking more than 10 seconds fails. A failed signature leaves nothing recorded or sent, and is counted in `pay_stellar_signing_failures_total`, which `PayStellarSigningFailing` watches.
+- **Other tools.** `fermah-pay-stellar-contract sign --key` and `address --key` accept the same references.
 
 ### AWS KMS
 
@@ -43,6 +74,8 @@ A key reference `aws-kms://<key>` names the key by key id, key ARN, alias name (
 aws kms create-key --key-spec ECC_NIST_EDWARDS25519 --key-usage SIGN_VERIFY \
   --description "pay-stellar operator"
 aws kms create-alias --alias-name alias/pay-stellar-operator --target-key-id <key id>
+# The tools, built with the aws-kms feature:
+cargo build --release -p fermah-pay-stellar-cli --features aws-kms
 # The account this key signs for, to fund or to name in the contract:
 fermah-pay-stellar-contract address --key aws-kms://alias/pay-stellar-operator
 # On testnet, a transaction signed by the key (Friendbot funds the account):
@@ -53,7 +86,7 @@ fermah-pay-stellar-testnet key-check --key aws-kms://alias/pay-stellar-operator
 - **Permissions.** The worker needs only `kms:GetPublicKey` and `kms:Sign` on its keys.
 - **Losing a key.** A KMS key cannot be exported, so its loss or deletion is the account's loss. Keep the treasury and admin behind several signers ([cold reserve](treasury.md), [admin multisig](#an-admin-that-needs-several-signatures)), and rotate a role to a new key before scheduling a key's deletion.
 - **Other tools.** `fermah-pay-stellar-contract sign --key` accepts the same references, so a signer of a multisig proposal can keep their key in KMS too.
-- **Build feature.** Support is the default `aws-kms` feature of the gateway crate. A build without it refuses `aws-kms://` references.
+- **Build feature.** Support is the `aws-kms` feature, off by default so a build that does not use it carries no AWS dependency. Build with it for `aws-kms://` references: `cargo build --release -p fermah-pay-stellar-gateway --features aws-kms` for the worker, and `-p fermah-pay-stellar-cli --features aws-kms` for the tools. A build without it refuses `aws-kms://` references at startup.
 
 ## Startup check
 
