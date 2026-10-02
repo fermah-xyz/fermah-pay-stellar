@@ -20,6 +20,31 @@ Every record is a JSON object with at least:
 | `observed` | values read back from the ledger after inclusion |
 | `public_explorer_url` | where to inspect the transaction independently |
 
+## Deployed contracts (testnet)
+
+Every contract the records below were produced on, with the code it runs
+today. Each contract's code can be read back from the network and hashed
+(`stellar contract fetch --id <contract> --network testnet`), and compared
+with the Wasm the `Contract` job of the Rust workflow builds from the same
+commit.
+
+| Contract | What it is | Running Wasm (SHA-256) | Records |
+|---|---|---|---|
+| [`CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI`](https://stellar.expert/explorer/testnet/contract/CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI) | the prepaid ledger with recurring charges; the deployment the workflows use | `38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e` (deployed as `fcdd05c4…`, then upgraded) | from `2026-10-01T022132-prepaid-deployment` on |
+| [`CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV`](https://stellar.expert/explorer/testnet/contract/CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV) | the prepaid ledger before recurring charges | `02e59475f67a8e9204c2aa6029051ff9ba70254ef69be76b97230d6cedfb3d95` (deployed as `02d80b2f…`, upgraded to `78e874a9…`, then to this with daily limits) | from `2026-09-29T044603-prepaid-deployment` to `2026-09-30T180500-daily-limits` |
+| [`CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW`](https://stellar.expert/explorer/testnet/contract/CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW) | a buyer's wallet: the example contract account (`contracts/example-account`) | `2b35859f9267d85acd0ac3c51543b5d9fda2e92b2ff9c8f5ef9993dab7111678` | `contract-account-buyer` |
+| [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) | Circle's testnet USDC (Stellar Asset Contract), not ours | | all |
+
+Both ledger contracts share their roles:
+
+| Role | Account |
+|---|---|
+| Treasury, which holds the USDC | [`GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN`](https://stellar.expert/explorer/testnet/account/GAQ7QT4OSH5I25YEJZ27LJZDTN4LWQULUOD7XQQMPXGE5DFZBGC3PWAN) |
+| Treasury's cold reserve | [`GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC`](https://stellar.expert/explorer/testnet/account/GA33ZSMJ6ASRM3PXQ63ZTYKOU7ZIE4CWHGQ77HXZJX2XLRGBZYTRDFXC) |
+| Admin (two of three keys) | [`GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3`](https://stellar.expert/explorer/testnet/account/GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3) |
+| Operator | [`GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG`](https://stellar.expert/explorer/testnet/account/GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG) |
+| Seller | [`GDLT7M7IAMPMGMDOQ2C6XOKTBLZ7Q7AXEZ6WFWRFKIMTGPOCPAN4EVYN`](https://stellar.expert/explorer/testnet/account/GDLT7M7IAMPMGMDOQ2C6XOKTBLZ7Q7AXEZ6WFWRFKIMTGPOCPAN4EVYN) |
+
 ## Records
 
 ### Buyer onboarding with sponsored reserves (testnet)
@@ -68,6 +93,14 @@ lists the outer (fee-bump) and inner transaction hashes.
 | [`charge-batch-98-second`](testnet/2026-09-29T051043-charge-batch-98-second.json) | one 98-entry transaction with mixed outcomes: 96 `Charged`, 2 `InsufficientBalance` (buyer 1, already charged twice, and buyer 2, after its withdrawal) |
 | [`treasury-solvency`](testnet/2026-09-29T051046-treasury-solvency.json) | the treasury's USDC equals buyer liabilities plus unwithdrawn revenue, read from the network: 2.985 USDC held, 0.555 owed to buyers and 2.43 earned by the seller |
 | [`charge-batch-98-first-replayed`](testnet/2026-09-29T051328-charge-batch-98-first-replayed.json) | the first batch's 98 charges sent again, included on-chain: every entry `Duplicate`, nothing debited |
+| [`api-end-to-end` (2026-09-30)](testnet/2026-09-30T053005-api-end-to-end.json) | the same API end-to-end flow, recorded again: a buyer with 0 XLM deposits with one signature, three charges settle, a retried charge returns the original, a replayed charge is refused on-chain, the buyer withdraws to the same wallet, and the gateway's balance equals the contract's |
+| [`cold-reserve`](testnet/2026-09-30T054043-cold-reserve.json) | the treasury's cold reserve: a Circle USDC trustline, two of its three keys needed to move anything, no XLM |
+| [`treasury-sweep`](testnet/2026-09-30T054057-treasury-sweep.json), [again](testnet/2026-09-30T054143-treasury-sweep.json) | the treasury's key alone moves USDC from the treasury to its cold reserve |
+| [`treasury-solvency` (2026-09-30)](testnet/2026-09-30T054144-treasury-solvency.json), [again](testnet/2026-09-30T054155-treasury-solvency.json) | the USDC of the treasury and its cold reserve together equals buyer liabilities plus unwithdrawn revenue, after the sweeps |
+| [`cold-reserve-refill`](testnet/2026-09-30T054200-cold-reserve-refill.json) | USDC moves back from the cold reserve to the treasury only with two of the reserve's three signatures; with one, nothing is sent |
+| [`load-test`](testnet/2026-09-30T055844-load-test.json) | 1,000 charges for 10 buyers admitted through the API at about 84 per second and all settled on-chain as charged, in 11 batches sent from 5 source accounts at once; settlement latency p50 24 s, p95 32 s; 8,573 stroops of fees per charge |
+| [`key-signature`](testnet/2026-09-30T164338-key-signature.json) | a transaction signed through an `aws-kms://` key reference, the key never leaving AWS KMS, is accepted by testnet for the account the key's public key encodes |
+| [`daily-limits`](testnet/2026-09-30T180500-daily-limits.json) | `CDDFMUZ7…GNPV` upgraded to Wasm `02e59475…` and given daily limits, each change signed by two of the admin's three keys; a charge that would take a buyer past its daily limit is refused as `AboveDailyLimit` without debiting it |
 | [`prepaid-deployment` (2026-10-01)](testnet/2026-10-01T022132-prepaid-deployment.json) | a fresh contract, `CD3GESMY…7PSI`, built with recurring charges; the deployment the workflows use from then on. The earlier contract stays on the network with its records |
 | [`admin-set-limits-two-signatures`](testnet/2026-10-01T0420-admin-set-limits-two-signatures.json) | the minimum deposit on `CD3GESMY…7PSI` raised from 0.01 to 0.1 USDC, proposed, signed by two of the admin's three keys on their own and submitted with `fermah-pay-stellar-contract` |
 | [`admin-upgrade-two-signatures`](testnet/2026-10-01T0905-admin-upgrade-two-signatures.json) | `CD3GESMY…7PSI` upgraded in place from Wasm `fcdd05c4…` to `38dfa7d7…` (mandates kept until their last ledger; unusable mandates refused), proposed, signed by two of the admin's three keys and submitted with `fermah-pay-stellar-contract`. One signature was refused before anything was sent. The code fetched back from the network hashes to the Wasm CI built from `main` |

@@ -43,10 +43,18 @@ It provides:
   with a Circle USDC trustline and a zero XLM balance, while a sponsor pays
   the fee and every reserve ([testnet evidence](docs/evidence/README.md)).
 
+On Stellar testnet, the prepaid ledger runs as contract
+[`CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI`](https://stellar.expert/explorer/testnet/contract/CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI)
+against Circle's testnet USDC. Every deployed contract, the code it runs and
+its role accounts are listed under
+[deployed contracts](docs/evidence/README.md#deployed-contracts-testnet).
+
 ## Layout
 
 ```text
 contracts/prepaid     Soroban prepaid ledger contract
+contracts/example-account
+                      a minimal contract account (smart wallet) for tests
 crates/domain         validated values (network, account address, external reference)
 crates/stellar-chain  keys, transaction signing, USDC identity, Stellar RPC client, onboarding
 crates/gateway        gRPC API, settlement worker and chain observer daemons, authentication,
