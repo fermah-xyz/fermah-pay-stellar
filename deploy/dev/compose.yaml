@@ -151,9 +151,11 @@ services:
     image: grafana/grafana:12.1.1
     profiles: ["monitoring"]
     environment:
-      # Local only: anonymous viewers, no login.
+      # Local only: anonymous viewers, and no admin account, so no default
+      # admin password is left to guess.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pay-stellar.json
     volumes:
       - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro

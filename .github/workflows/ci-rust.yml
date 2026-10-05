@@ -53,6 +53,14 @@ jobs:
           persist-credentials: false
       - name: Format
         run: cargo fmt --all -- --check
+      # A Stellar secret seed committed by mistake, in any tracked file. The
+      # only seed allowed is the published SEP-53 test vector.
+      - name: No secret seeds
+        run: |
+          if git grep -nE '\bS[A-Z2-7]{55}\b' -- ':!crates/stellar-chain/src/sep53.rs'; then
+            echo "a Stellar secret seed is committed; remove it and rotate the key" >&2
+            exit 1
+          fi
       # Explicit tripwire before any build could rewrite the lockfile.
       - name: Lockfile is up to date
         run: cargo metadata --locked --format-version 1 > /dev/null
@@ -269,8 +277,10 @@ jobs:
       - name: Node logs on failure
         if: failure()
         run: docker logs --tail 200 stellar
+      # Not for a pull request from a fork, whose run could upload a record
+      # under this project's name.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         with:
           name: local-end-to-end
           path: ${{ runner.temp }}/local-evidence/
