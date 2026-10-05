@@ -2,7 +2,9 @@
 
 What each party, key or piece of infrastructure could do if it turned
 hostile or leaked, what stops it, how it is seen, and what is left. Buyers
-and sellers are untrusted; so is any single key. The [monitoring
+and sellers are untrusted; so is any single key. The operator is trusted for
+one thing: paying buyers' withdrawals out of the treasury
+([below](#an-operator-that-does-not-pay-withdrawals)). The [monitoring
 plan](../self-hosting/monitoring-plan.md) lists the signals below with their
 alerts and dashboard panels, and [drills](../self-hosting/monitoring-drills.md)
 raise them on testnet.
@@ -11,6 +13,33 @@ The assets are the buyers' USDC: in their wallets, deposited as prepaid
 credit (held by the treasury account, owed by the contract as liabilities),
 and approved to the contract under recurring mandates; the seller's earned
 revenue; and the operator's XLM, which pays every fee.
+
+## An operator that does not pay withdrawals
+
+**Can.** Prepaid credit is custodial. The USDC sits in the treasury, and a
+withdrawal needs the treasury's authorization as well as the buyer's, so an
+operator that stops running its worker, loses the treasury's key, or refuses
+can leave buyers unable to withdraw. No contract call lets a buyer withdraw
+alone.
+
+**Stopped by.** Nothing on-chain. What the design bounds and makes visible:
+- The worker adds the treasury's authorization to every withdrawal a buyer signs through the API, with no person in the loop.
+- The contract's liabilities and revenue are on-chain, and anyone can compare them with the USDC the treasury and its cold reserve hold.
+- Withdrawals pay the buyer's own wallet by default, and each pays out at most once.
+
+**Seen.**
+- `PayStellarWithdrawalsWaiting` when a signed withdrawal has not gone out for ten minutes.
+- `treasury_deficit` and `PayStellarTreasuryShort` when the treasury holds less than it owes.
+- The buyer's own view: a withdrawal left in `SIGNED` that ends `EXPIRED`, with its amount back in the available balance.
+
+**Response.** Run a worker with the treasury's key, top the treasury up from
+the cold reserve, or rotate the treasury role to a key the operator holds.
+
+**Left.** Buyers rely on the operator to pay withdrawals, as with any
+prepaid balance held by an issuer. A way out that needs no operator would
+have the treasury grant the contract an allowance the contract spends only
+for a withdrawal left unpaid past a delay. That changes the contract and
+its custody, and is not built.
 
 ## Compromised operator key
 

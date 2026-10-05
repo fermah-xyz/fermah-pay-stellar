@@ -18,6 +18,18 @@ Either the transfer and the ledger change both happen or neither does: a
 deposit the buyer cannot fund, or a withdrawal the treasury cannot fund,
 leaves the ledger unchanged.
 
+A withdrawal therefore needs two authorizations: the buyer's, for the amount
+and destination, and the treasury's, for the transfer out of the treasury.
+A buyer cannot withdraw alone. Prepaid credit is custodial, as on a prepaid
+card: the buyer relies on the operator, who holds the treasury's key, to
+pay withdrawals out. The [threat model](../security/threat-model.md#an-operator-that-does-not-pay-withdrawals)
+lists what bounds and shows that reliance.
+
+Keeping the USDC out of the contract is deliberate. A defect in the
+contract's logic cannot move USDC it does not hold, and the treasury can keep
+only what operations need while the rest sits in a
+[cold reserve](../self-hosting/treasury.md) that needs several signatures.
+
 The treasury key can move USDC without calling the contract. The contract
 cannot prevent that, so it cannot guarantee that the treasury holds at least
 what it owes. It records `liabilities` (all buyer balances) and `revenue`

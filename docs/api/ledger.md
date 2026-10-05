@@ -156,7 +156,8 @@ needs a USDC trustline. It follows the same two steps as a deposit:
    since the prepare step left too little.
 
 The settlement worker adds the treasury's authorization and sends the
-withdrawal. The contract records every withdrawal identifier it processes
+withdrawal; a buyer cannot withdraw without it, since the USDC is held by the
+operator's treasury ([custody](../architecture/prepaid-contract.md#custody)). The contract records every withdrawal identifier it processes
 and refuses it again, so a withdrawal pays out at most once. If the treasury
 cannot pay yet (for example, it is short of USDC until it is topped up),
 the withdrawal waits in `SIGNED` and is retried until the buyer's
