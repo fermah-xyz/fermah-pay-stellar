@@ -179,6 +179,9 @@ struct Net {
     entries_behind: u32,
     /// The resource fee a successful simulation reports.
     resource_fee: i64,
+    /// Accounts archived again as soon as a restore brings them back, as
+    /// a wallet contract whose own state keeps needing restores would be.
+    rearchived: HashSet<AccountAddress>,
     /// The treasury's USDC as a trailing read reports it, when it differs
     /// from what it holds now.
     stale_treasury: Option<i128>,
@@ -831,6 +834,8 @@ impl Chain for Stellar {
                 let TransactionExt::V1(data) = &tx.ext else { panic!("restore without resources") };
                 let restored: Vec<LedgerKey> = data.resources.footprint.read_write.to_vec();
                 n.archived.retain(|owner| !restored.contains(&deployment.account_key(owner)));
+                let again: Vec<AccountAddress> = n.rearchived.iter().cloned().collect();
+                n.archived.extend(again);
                 TransactionStatus::Success(included(envelope, n.latest, true, None))
             } else {
                 let (call, auth, _) = invocation(envelope);
@@ -1212,6 +1217,7 @@ async fn world_with(
             archived: HashSet::new(),
             entries_behind: 0,
             resource_fee: 1_000,
+            rearchived: HashSet::new(),
             stale_treasury: None,
             over_daily: HashSet::new(),
             clock: clock.clone(),
@@ -1943,6 +1949,34 @@ async fn test_a_buyer_transaction_above_the_resource_fee_cap_is_not_sent(
     w.clock.advance(Duration::from_secs(3_600));
     w.settle(&w.worker()).await;
     assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_buyer_request_causes_at_most_two_restores(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let buyer = w.funded("alice", 100).await;
+    // Every restore of the buyer's state is undone at once: each new
+    // simulation of the deposit asks for another.
+    w.stellar.with(|n| {
+        n.archived.insert(buyer.key.address());
+        n.rearchived.insert(buyer.key.address());
+    });
+    let deposit = w.deposit(&buyer, 10, "d-again").await;
+    let worker = w.worker();
+    for _ in 0..6 {
+        w.settle(&worker).await;
+        w.clock.advance(RETRY_AFTER + Duration::from_secs(1));
+    }
+    let restores: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pay_stellar.submissions WHERE kind = 'restore'")
+            .fetch_one(&w.h.owner)
+            .await
+            .unwrap();
+    assert_eq!(restores, 2);
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Signed);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

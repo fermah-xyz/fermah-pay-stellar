@@ -105,6 +105,10 @@ pub enum Step {
     Idle,
 }
 
+/// Restores a buyer's request may cause: one is what an account idle long
+/// enough to be archived needs, a second covers one that did not land.
+const MAX_BUYER_RESTORES: u32 = 2;
+
 pub struct Worker<C, K> {
     engine: Engine<C, K>,
     pool: PgPool,
@@ -122,6 +126,8 @@ pub struct Worker<C, K> {
     /// simulation, and when they may be tried again. In memory: after a
     /// restart they are simply tried once more.
     set_aside: Mutex<HashMap<Uuid, OffsetDateTime>>,
+    /// Restores sent for each buyer request, and when the first was.
+    buyer_restores: Mutex<HashMap<Uuid, (u32, OffsetDateTime)>>,
     /// When the contracts' remaining life was last read.
     ttl_checked_at: Mutex<Option<OffsetDateTime>>,
     /// The network's base reserve and when it was read. It changes only by
@@ -239,6 +245,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             reserve_checked_at: Mutex::new(None),
             settings,
             set_aside: Mutex::new(HashMap::new()),
+            buyer_restores: Mutex::new(HashMap::new()),
             ttl_checked_at: Mutex::new(None),
             base_reserve: Mutex::new(None),
         }
@@ -557,6 +564,31 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         metrics::gauge!("pay_stellar_withdrawals_waiting").set(withdrawals.waiting as f64);
         metrics::gauge!("pay_stellar_oldest_waiting_withdrawal_seconds").set(withdrawals.oldest);
         Ok(())
+    }
+
+    /// Why a buyer's request may not have `restore` sent for it, if it may
+    /// not. A contract-account wallet's own state can be what is archived,
+    /// and the operator pays for each restore: each is bounded like the
+    /// request's transaction, and a request gets at most
+    /// `MAX_BUYER_RESTORES`. Past that the request is not sent, and ends
+    /// when its authorization lapses. The count lives in this process, so
+    /// a restart allows as many again.
+    pub(crate) fn buyer_restore_refusal(&self, request: Uuid, restore: &Restore) -> Option<String> {
+        if let Err(error) = self.engine.check_buyer_resource_fee(restore.min_resource_fee) {
+            return Some(error.to_string());
+        }
+        let now = self.engine.clock().now();
+        let mut restores = self.buyer_restores.lock().ok()?;
+        // A request lives about an hour; a day bounds the map.
+        restores.retain(|_, (_, first)| now - *first < time::Duration::days(1));
+        let (count, _) = restores.entry(request).or_insert((0, now));
+        if *count >= MAX_BUYER_RESTORES {
+            return Some(format!(
+                "its archived state was restored {MAX_BUYER_RESTORES} times and is needed again"
+            ));
+        }
+        *count += 1;
+        None
     }
 
     fn set_aside_ids(&self) -> Vec<Uuid> {
@@ -1206,20 +1238,16 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             // The restore a buyer's transaction needs is bounded like the
             // transaction itself: a contract-account wallet's own state can
             // be what is archived.
-            Err(EngineError::RestoreRequired(restore))
-                if self.engine.check_buyer_resource_fee(restore.min_resource_fee).is_ok() =>
-            {
-                return self.restore(&restore, row.id).await;
-            }
             Err(EngineError::RestoreRequired(restore)) => {
-                let error = EngineError::ResourceFeeAboveCap {
-                    fee: restore.min_resource_fee,
-                    cap: self.engine.max_buyer_resource_fee(),
-                };
-                tracing::warn!(deposit_id = %row.id, error = %error, "the deposit's restore costs too much");
-                self.note_deposit(row.id, &error.to_string()).await?;
-                self.set_aside(row.id);
-                return Ok(None);
+                match self.buyer_restore_refusal(row.id, &restore) {
+                    None => return self.restore(&restore, row.id).await,
+                    Some(reason) => {
+                        tracing::warn!(deposit_id = %row.id, reason, "its restore is not sent");
+                        self.note_deposit(row.id, &reason).await?;
+                        self.set_aside(row.id);
+                        return Ok(None);
+                    }
+                }
             }
             Err(
                 error

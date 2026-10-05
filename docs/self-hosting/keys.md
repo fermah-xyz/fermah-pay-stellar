@@ -62,7 +62,9 @@ How the worker reaches it:
 | `PAY_STELLAR_REMOTE_SIGNER_CA_FILE` | PEM certificates the endpoint's certificate must chain to, instead of the public web roots, for an endpoint under a private authority |
 
 - **Authentication.** An endpoint on another host needs a token, a client certificate or both; the worker refuses to start without one. Files holding a secret (the token, the client key) must be readable by their owner only.
-- **Transport.** It is reached over HTTPS. Plain `http://` is accepted only for an endpoint on the same host (`localhost` or a loopback address), such as a sidecar.
+- **Transport.** It is reached over HTTPS. Plain `http://` is accepted only for an endpoint on the same host (`localhost` or a loopback address), such as a sidecar. Redirects are not followed: an answer redirecting elsewhere is a failure, so the request and the client certificate only ever go to the configured URL.
+- **No credentials in the URL.** A reference such as `https://user:pass@...` is refused at startup; use the token file or a client certificate, which never appear in logs or errors.
+- **Answers.** An answer larger than 4 KiB is a failure; the endpoint's two answers are a few dozen bytes.
 - **Timeouts.** A request taking more than 10 seconds fails. A failed signature leaves nothing recorded or sent, and is counted in `pay_stellar_signing_failures_total`, which `PayStellarSigningFailing` watches.
 - **Other tools.** `fermah-pay-stellar-contract sign --key` and `address --key` accept the same references.
 
