@@ -29,7 +29,6 @@ raised. Each drill waits at most `--timeout-secs` (default 600) and writes a
 
 The drill settings make a condition visible in minutes, not hours. None of
 them belongs in a real deployment.
-- The observer judges an unmatched charge after one minute instead of two hours.
 - Withdrawals to other accounts are allowed.
 - The deployment's daily deposit quota is 4.
 - The observer is told to expect code the contract does not run.
@@ -44,7 +43,7 @@ The dust drill uses up the deposit quota for the day; run it last, as
 | `operator-key` | A new buyer deposits straight to the contract, and the operator's key charges that buyer outside the gateway, as someone holding the key could | `PayStellarCriticalFinding{kind="unknown_charge"}` |
 | `buyer-key` | A new buyer deposits through the API. A withdrawal of the buyer's credit to another account is then prepared, as someone holding the buyer's key could ask for; it is never signed, so nothing is held or moved | `PayStellarWithdrawalsToOtherAccounts` |
 | `allowance` | A new buyer authorizes a mandate through the API, then sets the contract's USDC approval to zero in the USDC contract directly. The seller charges the period, and the contract refuses it | `PayStellarMandateChangedOutsideGateway{result="allowance_short"}` |
-| `admin-code` | The observer, told to expect other code, compares it with the code the contract runs, as after an upgrade nobody planned | `PayStellarCriticalFinding{kind="code_changed"}` |
+| `admin-code` | The observer, told to expect other code, compares it with the code the contract runs, as after an upgrade nobody planned. The condition stands from the stack's start, so this drill checks the alert that lasts while it does, not the moment it began | `PayStellarContractCodeUnexpected` |
 | `dust` | Deposits are prepared for one buyer until the deployment's daily quota refuses one; none is signed or sent | `PayStellarDeploymentQuotaReached{reason="deployment_deposit_quota_exceeded"}` |
 
 ## Covered by tests instead

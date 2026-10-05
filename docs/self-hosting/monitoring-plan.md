@@ -17,7 +17,8 @@ reserve's) USDC in one read, from one ledger.
 | The contract's totals equal the sums of its events since the last baseline | `event_totals_mismatch` |
 | The contract's totals lie within what the gateway's database allows, counting work in flight | `ledger_totals_mismatch` |
 | Every settled charge, deposit, withdrawal and recurring charge matches a gateway record | the per-event findings in [the observer guide](observer.md#findings) |
-| The contract runs the code the operator expects | `code_changed` (critical) |
+| The contract runs the code the operator expects | `code_changed` (critical) and `PayStellarContractCodeUnexpected` for as long as it does; `PayStellarContractCodeChanged` for any change, expected code or not |
+| The observer itself is reading the chain | `PayStellarObserverStalled`, `PayStellarNodeStalled`, `PayStellarObserverFailing` |
 
 A reconciliation finding is recorded only after it persists through
 consecutive checks, so a settlement landing between the two reads is not

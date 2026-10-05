@@ -492,7 +492,9 @@ const fn expected(vector: Vector) -> (&'static str, &'static [(&'static str, &'s
         Vector::Allowance => {
             ("PayStellarMandateChangedOutsideGateway", &[("result", "allowance_short")])
         }
-        Vector::AdminCode => ("PayStellarCriticalFinding", &[("kind", "code_changed")]),
+        // A standing condition, alerted on for as long as it lasts: the
+        // drill finds it active whenever it runs.
+        Vector::AdminCode => ("PayStellarContractCodeUnexpected", &[]),
         Vector::Dust => {
             ("PayStellarDeploymentQuotaReached", &[("reason", "deployment_deposit_quota_exceeded")])
         }

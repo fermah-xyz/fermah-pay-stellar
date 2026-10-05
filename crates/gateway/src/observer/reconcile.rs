@@ -215,8 +215,28 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 .then(|| Finding::new(FindingKind::TreasurySurplus, Severity::Info, solvency)),
         ));
         // The admin can replace the contract's code, and with it what every
-        // balance means. An operator who names the code they audited is told
-        // as soon as the contract runs any other.
+        // balance means, and an upgrade emits no event. The code each
+        // contract runs is exported, so a change shows whether or not any
+        // code is expected; an operator who names the code they audited is
+        // also told, as a finding, as soon as the contract runs any other.
+        if let Some(running) = reading.wasm {
+            let mut seen = self.seen_code.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let deployment_label = deployment.id.to_string();
+            if let Some(previous) = seen.insert(deployment.id, running).filter(|p| *p != running) {
+                metrics::gauge!(
+                    "pay_stellar_contract_wasm",
+                    "deployment" => deployment_label.clone(),
+                    "wasm" => fermah_pay_stellar_chain::rpc::hex_lower(&previous)
+                )
+                .set(0.0);
+            }
+            metrics::gauge!(
+                "pay_stellar_contract_wasm",
+                "deployment" => deployment_label,
+                "wasm" => fermah_pay_stellar_chain::rpc::hex_lower(&running)
+            )
+            .set(1.0);
+        }
         if let Some(expected) = self.expected_code.get(&deployment.contract) {
             let matches = reading.wasm.as_ref() == Some(expected);
             metrics::gauge!("pay_stellar_contract_code_expected", "deployment" => deployment.id.to_string())
@@ -243,6 +263,10 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let authorized = reading
             .trustline
             .is_some_and(|(_, flags)| flags & TrustLineFlags::AuthorizedFlag as u32 != 0);
+        // A standing condition: alerted on while it lasts, not only when its
+        // finding is recorded.
+        metrics::gauge!("pay_stellar_treasury_authorized", "deployment" => deployment.id.to_string())
+            .set(if authorized { 1.0 } else { 0.0 });
         checks.push((
             FindingKind::TreasuryDeauthorized,
             (!authorized).then(|| {
