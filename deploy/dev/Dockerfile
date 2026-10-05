@@ -30,3 +30,6 @@ COPY deploy/dev/provision.sh /usr/local/bin/provision.sh
 # A new named volume mounted here takes this mode, so the services, which run
 # as the invoking user rather than root, can write the provisioning result.
 RUN mkdir -p /state && chmod 1777 /state
+# Compose runs the services as the invoking user; anything else gets an
+# unprivileged one rather than root.
+USER 65534:65534
