@@ -25,6 +25,10 @@ use zeroize::Zeroizing;
 /// How long one request to the signer may take.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest answer read from the signer: its two answers are a few
+/// dozen bytes of JSON.
+const MAX_ANSWER_BYTES: usize = 4096;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     #[error("{0}: a remote signer is reached over https, or over plain http on this host only")]
@@ -35,6 +39,11 @@ pub enum RemoteError {
          (PAY_STELLAR_REMOTE_SIGNER_CLIENT_CERT_FILE and _KEY_FILE)"
     )]
     Unauthenticated(String),
+    #[error(
+        "a remote signer's URL carries credentials; give a token \
+         (PAY_STELLAR_REMOTE_SIGNER_TOKEN_FILE) or a client certificate instead"
+    )]
+    CredentialsInUrl,
     #[error(
         "a client certificate needs both PAY_STELLAR_REMOTE_SIGNER_CLIENT_CERT_FILE and _KEY_FILE"
     )]
@@ -152,7 +161,15 @@ struct SignatureAnswer {
 impl RemoteSigner {
     /// Reaches the signer at `url` and asks which account it signs for.
     pub async fn connect(url: &str, settings: RemoteSettings) -> Result<Self, RemoteError> {
-        let parsed = reqwest::Url::parse(url).map_err(|_| RemoteError::Insecure(url.to_owned()))?;
+        let parsed =
+            reqwest::Url::parse(url).map_err(|_| RemoteError::Insecure(super::redact(url)))?;
+        // Credentials in the URL would be sent as Basic authentication and
+        // shown wherever the URL is: in errors, logs and the signing-failure
+        // metric's events. A token file or a client certificate keeps them
+        // out of all three.
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(RemoteError::CredentialsInUrl);
+        }
         let local = parsed.host_str().is_some_and(|host| {
             host == "localhost"
                 || host
@@ -164,10 +181,10 @@ impl RemoteSigner {
         match parsed.scheme() {
             "https" => {}
             "http" if local => {}
-            _ => return Err(RemoteError::Insecure(url.to_owned())),
+            _ => return Err(RemoteError::Insecure(super::redact(url))),
         }
         if !local && settings.token.is_none() && settings.identity.is_none() {
-            return Err(RemoteError::Unauthenticated(url.to_owned()));
+            return Err(RemoteError::Unauthenticated(super::redact(url)));
         }
         let client = client(settings.ca, settings.identity)?;
         let mut signer = Self {
@@ -198,7 +215,19 @@ impl RemoteSigner {
         if !status.is_success() {
             return Err(answer(format!("answered HTTP {status}")));
         }
-        response.json().await.map_err(|e| answer(format!("answered unreadably: {e}")))
+        // Read up to the bound, so an endpoint cannot fill memory: it is
+        // trusted for availability, not for what it sends.
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) =
+            response.chunk().await.map_err(|e| answer(format!("answered unreadably: {e}")))?
+        {
+            if body.len() + chunk.len() > MAX_ANSWER_BYTES {
+                return Err(answer(format!("answered more than {MAX_ANSWER_BYTES} bytes")));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|e| answer(format!("answered unreadably: {e}")))
     }
 }
 
@@ -232,6 +261,10 @@ fn client(
     reqwest::Client::builder()
         .tls_backend_preconfigured(tls)
         .timeout(TIMEOUT)
+        // The endpoint's own URL is what the transport and credential checks
+        // in `connect` were applied to; a redirect would take the request,
+        // and the client certificate, elsewhere.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| RemoteError::Client(e.to_string()))
 }
@@ -368,6 +401,75 @@ mod tests {
         let url = serve_http(endpoint).await;
         let opened = super::super::open(&url).await.unwrap();
         assert_eq!(opened.address(), key.address());
+    }
+
+    #[tokio::test]
+    async fn test_a_remote_signer_does_not_follow_redirects() {
+        // The configured endpoint redirects to another one that would answer:
+        // the worker stops at the redirect, whatever its target.
+        let (endpoint, _) = endpoint(None);
+        let target = serve_http(endpoint).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let redirect =
+            Router::new().route(
+                "/sign",
+                get(move || {
+                    let target = target.clone();
+                    async move {
+                        (StatusCode::TEMPORARY_REDIRECT, [(axum::http::header::LOCATION, target)])
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, redirect).await });
+        let refused =
+            RemoteSigner::connect(&format!("http://{addr}/sign"), RemoteSettings::default())
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&refused, RemoteError::Answer { detail, .. } if detail.contains("307")),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_credentials_in_a_signer_url_are_refused_and_never_shown() {
+        let refused = RemoteSigner::connect(
+            "http://svc:hunter2-secret@127.0.0.1:9/sign",
+            RemoteSettings::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(refused, RemoteError::CredentialsInUrl), "{refused}");
+        assert!(!format!("{refused} {refused:?}").contains("hunter2-secret"));
+    }
+
+    #[tokio::test]
+    async fn test_an_oversized_answer_is_refused() {
+        let (endpoint, _) = endpoint(None);
+        let account = endpoint.account.to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let padded = Router::new().route(
+            "/sign",
+            get(move || {
+                let account = account.clone();
+                async move {
+                    axum::Json(
+                        serde_json::json!({ "account": account, "pad": "x".repeat(1 << 20) }),
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, padded).await });
+        let refused =
+            RemoteSigner::connect(&format!("http://{addr}/sign"), RemoteSettings::default())
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&refused, RemoteError::Answer { detail, .. } if detail.contains("bytes")),
+            "{refused}"
+        );
     }
 
     #[tokio::test]

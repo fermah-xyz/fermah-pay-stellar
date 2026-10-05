@@ -59,6 +59,7 @@ then refuse it once the transaction is sent.
 
 **Stopped by.**
 - A bound on the resource fee of a buyer's transaction and of a restore it needs (1 XLM by default). The gateway refuses an entry whose simulation costs more, and the worker does not send one that does.
+- At most two restores per buyer request: a wallet whose own state keeps needing restores gets two, and its request then lapses unsent.
 - An entry is accepted only after the network runs it in simulation, and the worker simulates again before sending.
 - Deposits and withdrawals count against the same per-buyer and per-deployment quotas and fee-account floor as any other.
 - Mandates and x402 do not accept contract accounts.
