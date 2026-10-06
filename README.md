@@ -90,15 +90,20 @@ just gate      # fmt, clippy, unused deps, cargo-deny, full test suite
 just testnet   # optional: live checks against Stellar testnet
 ```
 
-Continue with the [quickstart](docs/quickstart/local.md).
+To see deposits, charges and withdrawals settle on a Stellar network running
+on this machine, follow [on a local network](docs/quickstart/testnet.md#on-a-local-network);
+to call the gateway API step by step, the [API quickstart](docs/quickstart/local.md).
+If `55433` is taken, set `PAY_STELLAR_LOCAL_PG_PORT`.
 
 ## Documentation
 
 - [Architecture](docs/architecture/overview.md)
 - [Buyer API](docs/api/buyer.md)
 - [Ledger API](docs/api/ledger.md)
+- [Recurring charges API](docs/api/recurring.md)
 - [x402 facilitator interface](docs/api/x402.md)
-- [Local quickstart](docs/quickstart/local.md)
+- [Quickstart: the gateway API](docs/quickstart/local.md)
+- [Quickstart: testnet and a local network](docs/quickstart/testnet.md)
 - [Self-hosting: database](docs/self-hosting/database.md)
 - [Self-hosting: chain observer](docs/self-hosting/observer.md)
 - [Quickstart: the whole system on one machine](docs/quickstart/dev-stack.md)

@@ -11,9 +11,12 @@ RUN apt-get update \
 COPY . .
 # Queries are checked against the committed .sqlx cache, not a live database.
 ENV SQLX_OFFLINE=true
+# Cargo features to build with, e.g. `aws-kms` for `aws-kms://` key
+# references (compose passes DEV_CARGO_FEATURES).
+ARG CARGO_FEATURES=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo build --release --locked ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} \
         -p fermah-pay-stellar-gateway -p fermah-pay-stellar-cli \
         --bin fermah-pay-stellar-gateway --bin fermah-pay-stellar-worker \
         --bin fermah-pay-stellar-observer --bin fermah-pay-stellar-admin \

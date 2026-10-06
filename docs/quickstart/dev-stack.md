@@ -12,7 +12,7 @@ It is for development, not a production deployment.
 
 ## Before
 
-The stack settles against the ledger contract recorded in a testnet profile, with that profile's keys. Create the profile first with [the testnet quickstart](testnet.md) steps 1 to 3, then create two extra channel accounts for the stack's worker (step 8, `load-test --channels 3`, creates them). The stack's worker sends from `channel-2` and `channel-3`; the testnet CI run sends from `channel-1` and the submitter, so the two never race for a sequence number. Point the stack at the profile:
+The stack settles against the ledger contract recorded in a testnet profile, with that profile's keys. Create the profile first with [the testnet quickstart](testnet.md) steps 1 to 3, then create two extra channel accounts for the stack's worker: a minimal [load test](testnet.md#8-load), `--buyers 1 --charges-per-buyer 1 --channels 3`, creates them. The stack's worker sends from `channel-2` and `channel-3`; the testnet CI run sends from `channel-1` and the submitter, so the two never race for a sequence number. Point the stack at the profile:
 
 ```bash
 export PAY_STELLAR_TESTNET_PROFILE=~/.config/fermah-pay-stellar/testnet
@@ -33,7 +33,7 @@ The first start runs three one-off jobs:
 2. creates one login role per process;
 3. provisions a product and a testnet deployment bound to the profile's contract, and issues an API key.
 
-Later starts reuse them. The database lives in a Docker volume, so `just dev-down` keeps it; `docker compose -f deploy/dev/compose.yaml down -v` starts from scratch.
+Later starts reuse them. The database lives in a Docker volume, so `just dev-down` keeps it; `PAY_STELLAR_TESTNET_PROFILE=unused docker compose -f deploy/dev/compose.yaml down -v` starts from scratch. Commands that start services need `PAY_STELLAR_TESTNET_PROFILE` set; `just dev-down` and `just dev-logs` do not.
 
 | Service | Address |
 |---|---|
@@ -63,4 +63,4 @@ A deposit is then prepared with `LedgerService/PrepareDeposit`, signed by the bu
 ## Notes
 
 - **Observer noise.** The testnet contract is shared with other runs. The observer starts from the latest ledger. Deposits and charges that other runs make after that are reported as `unknown_deposit` and `unknown_charge` warnings, because this database has no rows for them.
-- **Changing the source accounts.** Set `DEV_SOURCE_KEYS` to a comma-separated list of key paths inside the profile, for example `/profile/channel-4.secret`. Any [key reference](../self-hosting/keys.md) works, including a remote signer (`https://...`) and, in an image built with the `aws-kms` feature, `aws-kms://...` with AWS credentials passed to the worker.
+- **Changing the source accounts.** Set `DEV_SOURCE_KEYS` to a comma-separated list of key paths inside the profile, for example `/profile/channel-4.secret`. Any [key reference](../self-hosting/keys.md) works, including a remote signer (`https://...`) and `aws-kms://...` with AWS credentials passed to the worker, in an image built with that feature: `DEV_CARGO_FEATURES=aws-kms just dev-up`.

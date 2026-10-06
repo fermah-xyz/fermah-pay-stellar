@@ -1,9 +1,15 @@
-# Local quickstart
+# Quickstart: the gateway API, step by step
 
-Runs the gateway against a local database, provisions a seller, onboards a
-real buyer account on Stellar testnet, and registers it through the API, one
-step at a time. To run every process at once (gateway, worker and observer)
-in containers, see [the whole system on one machine](dev-stack.md).
+Runs the gateway on this machine against a local database, provisions a
+seller, onboards a real buyer account on Stellar testnet, and registers it
+through the API, one step at a time. It stops before deposits and charges,
+which need a ledger contract and the settlement worker:
+
+- to see a deposit, charges, a withdrawal and the balances on a Stellar
+  network running on this machine, with no testnet account, follow
+  [on a local network](testnet.md#on-a-local-network);
+- to run every process at once (gateway, worker and observer) in containers
+  against testnet, see [the whole system on one machine](dev-stack.md).
 
 Requirements: Rust via rustup, Docker, `just`, and
 [`grpcurl`](https://github.com/fullstorydev/grpcurl) for the API calls.
@@ -15,7 +21,9 @@ just migrate
 ```
 
 This starts PostgreSQL on `127.0.0.1:55433` and applies the migrations as the
-database owner. Create the login roles the processes use (local passwords;
+database owner. If that port is taken, set `PAY_STELLAR_LOCAL_PG_PORT` to
+another and use it in the URLs below; `COMPOSE_PROJECT_NAME` runs a second,
+separate instance. Create the login roles the processes use (local passwords;
 choose real secrets anywhere else):
 
 ```bash
@@ -69,6 +77,9 @@ reserves. It prints an evidence record read back from the ledger and exits
 non-zero unless the buyer holds 0 XLM and both reserves are paid by the
 sponsor. Keys are written with mode `0600`; `*.secret` is git-ignored. Never
 commit them.
+
+`grpcurl` prints responses with the JSON names of the fields, in camelCase
+(`buyerId`), while these pages use the proto names (`buyer_id`).
 
 ## 5. Register the buyer
 

@@ -288,7 +288,11 @@ impl Context {
             "prepaid-deployment",
             json!({
                 "criterion": "prepaid-ledger-deployment",
-                "expected": "contract created from the recorded Wasm with its constructor pinning the roles, Circle testnet USDC and limits",
+                "expected": if self.network == Network::Local {
+                    "contract created from the recorded Wasm with its constructor pinning the roles, the local stand-in USDC and limits"
+                } else {
+                    "contract created from the recorded Wasm with its constructor pinning the roles, Circle testnet USDC and limits"
+                },
                 "deployment": serde_json::to_value(&deployment)?,
                 "upload": receipt_json(&uploaded),
                 "create": receipt_json(&created),

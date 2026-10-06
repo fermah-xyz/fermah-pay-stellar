@@ -17,7 +17,11 @@ use fermah_pay_stellar_cli::x402_conformance::{Target, run};
 use fermah_pay_stellar_domain::Network;
 
 #[derive(Debug, Parser)]
-#[command(name = "fermah-pay-stellar-x402-conformance", version, about)]
+#[command(
+    name = "fermah-pay-stellar-x402-conformance",
+    version,
+    about = "Calls a gateway's x402 facilitator interface over HTTP, as a third-party facilitator would, and checks every answer"
+)]
 struct Cli {
     /// Base URL of the facilitator interface, e.g. `http://127.0.0.1:8402`.
     #[arg(long)]

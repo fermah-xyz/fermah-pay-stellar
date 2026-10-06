@@ -37,7 +37,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[derive(Parser)]
-#[command(name = "fermah-pay-stellar-contract", version, about)]
+#[command(
+    name = "fermah-pay-stellar-contract",
+    version,
+    about = "Admin changes to the ledger contract, proposed, signed by each signer separately and submitted"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

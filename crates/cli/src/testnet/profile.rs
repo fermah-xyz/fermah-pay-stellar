@@ -26,8 +26,15 @@ pub struct Deployment {
 }
 
 impl Profile {
+    /// Opens the profile in `dir`, creating it readable by its owner only:
+    /// it holds keys.
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(dir.join("buyers"))
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+            .create(dir.join("buyers"))
             .with_context(|| format!("creating {}", dir.display()))?;
         Ok(Self { dir: dir.to_owned() })
     }
