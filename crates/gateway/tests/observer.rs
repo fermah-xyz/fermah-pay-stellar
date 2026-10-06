@@ -163,6 +163,10 @@ struct Net {
     /// A cold reserve and its USDC balance.
     reserve: Option<(AccountAddress, i64)>,
     base_time: OffsetDateTime,
+    /// The Wasm the contract runs.
+    wasm: [u8; 32],
+    /// Whether the node answers health checks.
+    unreachable: bool,
 }
 
 #[derive(Clone)]
@@ -204,7 +208,7 @@ impl Chain {
             key: ScVal::LedgerKeyContractInstance,
             durability: ContractDataDurability::Persistent,
             val: ScVal::ContractInstance(ScContractInstance {
-                executable: ContractExecutable::Wasm(Hash([9; 32])),
+                executable: ContractExecutable::Wasm(Hash(net.wasm)),
                 storage: Some(ScMap(
                     vec![
                         ScMapEntry { key: vector(vec![symbol("Config")]), val: config },
@@ -229,6 +233,13 @@ fn instance_key() -> LedgerKey {
 
 impl EventLog for Chain {
     async fn health(&self) -> Result<Health, RpcError> {
+        if self.with(|n| n.unreachable) {
+            return Err(RpcError::Server {
+                method: "getHealth",
+                code: -1,
+                message: "unreachable".to_owned(),
+            });
+        }
         Ok(self.with(|n| Health { latest_ledger: n.latest, oldest_ledger: n.oldest }))
     }
 
@@ -359,6 +370,8 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         trustline: Some((0, 1)),
         reserve: None,
         base_time,
+        wasm: [9; 32],
+        unreachable: false,
     })));
     let submission = Uuid::now_v7();
     sqlx::query(
@@ -1853,4 +1866,115 @@ async fn test_a_contract_running_other_code_than_expected_is_a_critical_finding(
         (detail["expected_wasm"].as_str(), detail["running_wasm"].as_str()),
         (Some(hex(&[8; 32]).as_str()), Some(hex(&[9; 32]).as_str()))
     );
+}
+
+// ---- the observer's own health, as metrics --------------------------------
+
+/// A recorded metric: its name, its labels, and its value as f64.
+type Series = (String, Vec<(String, String)>, f64);
+
+/// Every metric `observer` records while it runs for `millis`, as (name,
+/// labels, value) with counters and gauges as f64.
+async fn run_recording(observer: &Observer<Chain, ManualClock>, millis: u64) -> Vec<Series> {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    observer
+        .run(
+            Duration::from_millis(5),
+            Duration::from_secs(3600),
+            Duration::from_millis(10),
+            tokio::time::sleep(Duration::from_millis(millis)),
+        )
+        .await;
+    snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .map(|(key, _, _, value)| {
+            let labels =
+                key.key().labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect();
+            let value = match value {
+                DebugValue::Counter(n) => n as f64,
+                DebugValue::Gauge(g) => g.into_inner(),
+                DebugValue::Histogram(_) => f64::NAN,
+            };
+            (key.key().name().to_owned(), labels, value)
+        })
+        .collect()
+}
+
+fn metric(series: &[Series], name: &str) -> Option<f64> {
+    series.iter().find(|(n, ..)| n == name).map(|(.., v)| *v)
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_observer_that_cannot_reach_its_node_shows_it(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    // Reachable: rounds complete, and the node's latest ledger is exported.
+    let healthy = run_recording(&w.observer(), 60).await;
+    assert!(metric(&healthy, "pay_stellar_observer_last_round_unixtime").is_some_and(|t| t > 0.0));
+    let latest = w.chain.with(|n| n.latest);
+    assert_eq!(
+        metric(&healthy, "pay_stellar_observer_node_latest_ledger"),
+        Some(f64::from(latest))
+    );
+    assert_eq!(metric(&healthy, "pay_stellar_observer_round_failures_total").unwrap_or(0.0), 0.0);
+
+    // Unreachable: every round fails and is counted; no round completes.
+    w.chain.with(|n| n.unreachable = true);
+    let blind = run_recording(&w.observer(), 60).await;
+    assert!(metric(&blind, "pay_stellar_observer_round_failures_total").is_some_and(|n| n >= 1.0));
+    assert_eq!(metric(&blind, "pay_stellar_observer_last_round_unixtime"), None);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_code_a_contract_runs_and_its_treasurys_authorization_are_exported(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    let w = world(opts, connect).await;
+    agreeing(&w).await;
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+    let observer = w.observer();
+    observer.reconcile().await.unwrap();
+    // Upgraded, and the treasury's trustline deauthorized.
+    w.chain.with(|n| {
+        n.wasm = [7; 32];
+        n.trustline = Some((0, 0));
+    });
+    observer.reconcile().await.unwrap();
+    let gauges: Vec<Series> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter_map(|(key, _, _, value)| match value {
+            DebugValue::Gauge(g) => Some((
+                key.key().name().to_owned(),
+                key.key().labels().map(|l| (l.key().to_owned(), l.value().to_owned())).collect(),
+                g.into_inner(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let wasm = |hash: [u8; 32]| {
+        gauges
+            .iter()
+            .find(|(n, labels, _)| {
+                n == "pay_stellar_contract_wasm"
+                    && labels.iter().any(|(k, v)| k == "wasm" && *v == hex(&hash))
+            })
+            .map(|(.., v)| *v)
+    };
+    // The old code's series drops to 0 and the new one reads 1: the
+    // `PayStellarContractCodeChanged` rule sees two series within the hour.
+    assert_eq!((wasm([9; 32]), wasm([7; 32])), (Some(0.0), Some(1.0)));
+    assert_eq!(metric(&gauges, "pay_stellar_treasury_authorized"), Some(0.0));
 }

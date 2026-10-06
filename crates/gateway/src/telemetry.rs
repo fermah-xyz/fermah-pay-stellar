@@ -98,6 +98,22 @@ pub fn register_gateway_counters() {
     }
 }
 
+/// [`register_gateway_counters`] for the admitted charges of each deployment
+/// bound when the gateway starts; one bound later is counted from its first
+/// charge, or from the next start.
+pub fn register_deployment_counters(deployments: &[uuid::Uuid]) {
+    for deployment in deployments {
+        for kind in crate::ledger::ADMISSION_KINDS {
+            for name in
+                ["pay_stellar_charges_admitted_total", "pay_stellar_charges_admitted_usdc_total"]
+            {
+                metrics::counter!(name, "kind" => kind, "seller_deployment_id" => deployment.to_string())
+                    .increment(0);
+            }
+        }
+    }
+}
+
 /// [`register_gateway_counters`] for the settlement worker, which sends from
 /// `sources`.
 pub fn register_worker_counters(sources: &[AccountAddress]) {
@@ -134,6 +150,7 @@ pub fn register_worker_counters(sources: &[AccountAddress]) {
 
 /// [`register_gateway_counters`] for the chain observer.
 pub fn register_observer_counters() {
+    metrics::counter!("pay_stellar_observer_round_failures_total").increment(0);
     for kind in FindingKind::ALL {
         for severity in Severity::ALL {
             metrics::counter!(

@@ -53,9 +53,16 @@ receivers:
 | `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
 | `pay_stellar_signing_failures_total{role}` | worker | signatures that failed or did not verify, by key: `operator`, `source`, `fee_source` |
 | `pay_stellar_worker_step_failures_total` | worker | settlement rounds that failed |
-| `pay_stellar_lease_held{role}` | worker, observer | 1 while this process holds its lease and acts, 0 while it stands by |
+| `pay_stellar_lease_held{role,lease}` | worker, observer | 1 while this process holds its lease and acts, 0 while it stands by; each operator's workers have their own lease |
 | `pay_stellar_findings_total{kind,severity}` | observer | findings recorded, as listed in [the observer guide](observer.md) |
 | `pay_stellar_observer_lag_ledgers{deployment}` | observer | ledgers between the observer's position and the node's latest |
+| `pay_stellar_observer_round_failures_total` | observer | observer rounds that failed, for instance because its RPC node did not answer |
+| `pay_stellar_observer_last_round_unixtime` | observer | when the observer last completed a round, Unix seconds |
+| `pay_stellar_observer_node_latest_ledger` | observer | the latest ledger the observer's RPC node reports; it stops changing when the node stops following the network |
+| `pay_stellar_observer_unobserved_bindings` | observer | ledger bindings naming another USDC contract than this network's, which no observer follows |
+| `pay_stellar_contract_wasm{deployment,wasm}` | observer | 1 for the code each contract runs, 0 for code it ran before during this process's life |
+| `pay_stellar_contract_code_expected{deployment}` | observer | 1 while the contract runs the code `PAY_STELLAR_EXPECTED_WASM` names, 0 otherwise; absent without it |
+| `pay_stellar_treasury_authorized{deployment}` | observer | 1 while USDC's issuer authorizes the treasury's trustline, 0 once revoked |
 | `pay_stellar_treasury_usdc{deployment}` | observer | the treasury's USDC, in base units |
 | `pay_stellar_cold_reserve_usdc{deployment}` | observer | the USDC of the treasury's cold reserve, 0 without one |
 | `pay_stellar_contract_liabilities{deployment}`, `pay_stellar_contract_revenue{deployment}` | observer | what the contract owes buyers and the seller |
@@ -74,6 +81,10 @@ Counters count each event once: a transition is counted only by the call that ma
 | Alert | Severity | What to do |
 |---|---|---|
 | `PayStellarCriticalFinding` | critical | Read the finding in `pay_stellar.reconciliation_findings` and act as [the observer guide](observer.md) says for its kind |
+| `PayStellarWarningFinding` | warning | The observer recorded a warning finding, such as `admin_change`, `role_changed`, `event_gap` or `unknown_withdrawal`. Read it and act as [the observer guide](observer.md) says for its kind; an admin change nobody planned means the admin keys are exposed |
+| `PayStellarContractCodeUnexpected` | critical | The contract runs other code than `PAY_STELLAR_EXPECTED_WASM` names, for as long as it does. If nobody planned the upgrade, pause the contract and treat the admin keys as exposed |
+| `PayStellarContractCodeChanged` | warning | The contract started running other code in the last hour, whether or not any code is expected. Confirm the upgrade was planned |
+| `PayStellarTreasuryDeauthorized` | critical | USDC's issuer revoked the treasury's trustline authorization: no deposit or withdrawal can move USDC until it is restored or the treasury is rotated |
 | `PayStellarTreasuryShort` | critical | The treasury and its cold reserve hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
 | `PayStellarChargeQuarantined` | critical | A charge's amount is held from its buyer until resolved; see [quarantine](quarantine.md) |
 | `PayStellarRecurringChargeQuarantined` | critical | A recurring charge's period stays taken until resolved; see [quarantine](quarantine.md#recurring-charges) |
@@ -92,6 +103,10 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarHotTreasuryLow` | warning | The treasury has been below its floor for ten minutes. Top it up from the [cold reserve](treasury.md#topping-the-treasury-up) before withdrawals wait |
 | `PayStellarWithdrawalsWaiting` | warning | A signed withdrawal has not gone out for ten minutes while its amount is held. Check that a worker holds the treasury key, that the treasury holds enough USDC, and the withdrawal's `last_error` |
 | `PayStellarWorkerFailing` | warning | Settlement rounds keep failing; read the worker's error logs |
+| `PayStellarObserverFailing` | warning | The observer's rounds keep failing. Read its error logs: the RPC node or the database is failing it |
+| `PayStellarObserverStalled` | critical | No observer has completed a round for 15 minutes, so nothing on-chain is being watched and every finding-based alert is silent. Check the observer, its RPC node and the database |
+| `PayStellarNodeStalled` | critical | The observer's RPC node has not advanced in 10 minutes: it stopped following the network, and the observer sees nothing new. Point the observer at a healthy node |
+| `PayStellarUnobservedBinding` | warning | A ledger binding names another USDC contract than this network's, so its deployment is not reconciled. Correct the binding |
 | `PayStellarObserverLagging` | warning | The observer is more than an hour behind. Fix it before the events it has not read leave the RPC node's retention |
 | `PayStellarNoLeader` | critical | Worker or observer processes are running but none holds the lease, so nothing is settled or observed. Check their logs for database errors |
 | `PayStellarProcessDown` | critical | Restart the process; the worker and the observer resume from the database |

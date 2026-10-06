@@ -118,7 +118,7 @@ checks.
 
 **Seen.**
 - A mandate authorized or revoked outside the gateway is a `mandate_changed_elsewhere` finding as soon as the observer reads its event. A buyer lowering the approval in the USDC contract emits no event of this contract; the next charge is then refused as `allowance_short`. Both raise `PayStellarMandateChangedOutsideGateway`.
-- A change of the contract's code is a critical `code_changed` finding when the observer is told the expected Wasm.
+- A change of the contract's code raises `PayStellarContractCodeChanged` within a reconciliation, since an upgrade emits no event. When the observer is told the expected Wasm, it is also a critical `code_changed` finding and `PayStellarContractCodeUnexpected` for as long as it lasts.
 
 **Response.** For a code change nobody planned, pause and treat the admin keys as exposed.
 
@@ -180,8 +180,8 @@ costs a fee whatever its amount.
 | Party | Can | Stopped by | Seen |
 |---|---|---|---|
 | Treasury key | move everything the treasury holds | a [cold reserve](../self-hosting/treasury.md) that needs several signatures bounds it to the hot ceiling | `treasury_deficit`, `PayStellarTreasuryShort`, `unknown_withdrawal` |
-| Admin keys | pause, change limits, rotate roles, replace the code | two of three keys for any change ([keys](../self-hosting/keys.md)) | `admin_change`, `role_changed`, `code_changed` |
+| Admin keys | pause, change limits, rotate roles, replace the code | two of three keys for any change ([keys](../self-hosting/keys.md)) | `admin_change`, `role_changed` (`PayStellarWarningFinding`), `PayStellarContractCodeChanged`, `code_changed` |
 | Seller API key | admit charges against the deployment's buyers' credit | the buyers' balances, the contract's daily limits, scope to one deployment | `PayStellarChargeVolumeUnusual` |
 | Fee account key | spend its XLM | holds only XLM for fees; signs only fee bumps | `PayStellarFeeAccountLow` |
-| RPC node | answer stale or wrong data | decisions only from ledgers the node reports, absence only after authorizations lapse, independent reads by the observer | `event_gap`, `PayStellarObserverLagging` |
+| RPC node | answer stale or wrong data, or stop answering | decisions only from ledgers the node reports, absence only after authorizations lapse, independent reads by the observer | `event_gap`, `PayStellarObserverLagging`, `PayStellarNodeStalled`, `PayStellarObserverStalled` |
 | Database role | change rows its grants allow | the narrowest grants per process, final states that cannot be left, append-only audit tables ([database](../self-hosting/database.md)) | reconciliation findings against the contract |

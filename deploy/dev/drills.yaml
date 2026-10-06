@@ -12,9 +12,6 @@ services:
       PAY_STELLAR_MAX_DEPOSITS_PER_DEPLOYMENT_PER_DAY: "4"
   observer:
     environment:
-      # Judge a charge the gateway never admitted one minute after its
-      # ledger, rather than two hours.
-      PAY_STELLAR_OBSERVER_SETTLE_WITHIN_SECS: "60"
       PAY_STELLAR_OBSERVER_RECONCILE_SECS: "20"
       # The admin-code drill: code the contract does not run, as the
       # observer would see after an upgrade nobody planned.

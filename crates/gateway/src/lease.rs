@@ -101,7 +101,9 @@ pub async fn lead<F, Fut>(
     Fut: Future<Output = ()>,
 {
     let every = lease.ttl / 3;
-    let held = metrics::gauge!("pay_stellar_lease_held", "role" => role);
+    // By lease as well as role: workers of different operators each hold
+    // their own, and one lost must not hide behind another held.
+    let held = metrics::gauge!("pay_stellar_lease_held", "role" => role, "lease" => lease.name().to_owned());
     tokio::pin!(shutdown);
     loop {
         held.set(0.0);

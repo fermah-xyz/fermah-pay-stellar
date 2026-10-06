@@ -433,6 +433,9 @@ fn charge_to_wire(record: ChargeRecord) -> Result<Charge, Status> {
     })
 }
 
+/// The kinds of admitted charge counted by [`record_admission`].
+pub const ADMISSION_KINDS: [&str; 2] = ["charge", "recurring"];
+
 /// Counts an admitted charge of `kind` and its amount by deployment, the
 /// series against which an unusual charge pattern shows.
 fn record_admission(kind: &'static str, scope: &Scope, amount: i64) {

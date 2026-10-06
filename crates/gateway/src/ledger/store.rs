@@ -4,7 +4,7 @@
 //! deployment is indistinguishable from a missing one.
 
 use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
-use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey};
+use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey, Network};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -238,6 +238,17 @@ fn contract_id(raw: &str) -> Result<[u8; 32], StoreError> {
 }
 
 impl Store {
+    /// The deployments of `network` bound to a ledger contract.
+    pub async fn bound_deployments(&self, network: Network) -> Result<Vec<Uuid>, StoreError> {
+        sqlx::query_scalar!(
+            "SELECT seller_deployment_id FROM pay_stellar.ledger_contracts WHERE network = $1",
+            network.caip2(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(query("read bound deployments"))
+    }
+
     /// The ledger contract the caller's deployment settles against.
     pub async fn ledger_binding(
         &self,

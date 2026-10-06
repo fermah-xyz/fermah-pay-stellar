@@ -209,6 +209,9 @@ pub struct Observer<R, K> {
     reserves: std::collections::HashMap<AccountAddress, AccountAddress>,
     /// The Wasm hash each contract is expected to run, by contract id.
     expected_code: std::collections::HashMap<[u8; 32], [u8; 32]>,
+    /// The Wasm hash each deployment's contract was last read running, so a
+    /// change is noticed even where no code is expected.
+    seen_code: std::sync::Mutex<std::collections::HashMap<Uuid, [u8; 32]>>,
 }
 
 fn i64_of(value: u32) -> i64 {
@@ -415,6 +418,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             settings,
             reserves: std::collections::HashMap::new(),
             expected_code: std::collections::HashMap::new(),
+            seen_code: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -459,6 +463,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         .map_err(store("read ledger bindings"))?;
         let usdc = asset_contract_id(&circle_usdc(self.network), self.network);
         let mut deployments = Vec::with_capacity(rows.len());
+        let mut unobserved = 0_u32;
         for row in rows {
             let contract = stellar_strkey::Contract::from_string(&row.contract_address)
                 .map_err(|_| ObserverError::Corrupt("contract address outside the CHECK"))?;
@@ -466,6 +471,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 .map_err(|_| ObserverError::Corrupt("USDC address outside the CHECK"))?;
             if bound_usdc.0 != usdc {
                 tracing::error!(seller_deployment_id = %row.seller_deployment_id, "binding names another USDC contract; not observed");
+                unobserved += 1;
                 continue;
             }
             let account = |raw: &str| {
@@ -478,6 +484,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 operator: account(&row.operator_address)?,
             });
         }
+        // A binding this observer cannot follow is a deployment nobody watches.
+        metrics::gauge!("pay_stellar_observer_unobserved_bindings").set(f64::from(unobserved));
         Ok(deployments)
     }
 
@@ -590,6 +598,10 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
     /// Reads and stores one page of the deployment's events.
     pub async fn ingest(&self, deployment: &Deployment) -> Result<Ingested, ObserverError> {
         let health = self.chain.health().await.map_err(ObserverError::Chain)?;
+        // Ledgers close every few seconds: a value that stops changing is a
+        // node that stopped following the network.
+        metrics::gauge!("pay_stellar_observer_node_latest_ledger")
+            .set(f64::from(health.latest_ledger));
         let position = self.position(deployment, &health).await?;
         if position.request_ledger() < health.oldest_ledger {
             return self.skip_gap(deployment, &position, health.oldest_ledger).await;
@@ -1075,10 +1087,15 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             }
             let wait = match result {
                 Ok(()) => {
+                    // When the observer last read everything it watches;
+                    // a value that stops moving means it sees nothing new.
+                    metrics::gauge!("pay_stellar_observer_last_round_unixtime")
+                        .set(self.clock.now().unix_timestamp() as f64);
                     backoff = poll;
                     poll
                 }
                 Err(error) => {
+                    metrics::counter!("pay_stellar_observer_round_failures_total").increment(1);
                     tracing::error!(error = %error, source = ?std::error::Error::source(&error), "observer round failed");
                     backoff = (backoff * 2).min(max_backoff);
                     backoff

@@ -10,6 +10,32 @@ groups:
         annotations:
           summary: "The observer recorded a critical {{ $labels.kind }} finding"
           action: "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md"
+      - alert: PayStellarWarningFinding
+        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="warning", kind!="mandate_changed_elsewhere"}[1h])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "The observer recorded a {{ $labels.kind }} finding"
+          action: "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md; an admin_change or role_changed nobody planned means the admin keys are exposed"
+      - alert: PayStellarContractCodeUnexpected
+        expr: pay_stellar_contract_code_expected == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Deployment {{ $labels.deployment }}'s contract runs other code than PAY_STELLAR_EXPECTED_WASM names"
+          action: "If the upgrade was not planned, pause the contract and treat the admin keys as exposed; if it was, review the new code and update the expected hash"
+      - alert: PayStellarContractCodeChanged
+        expr: count by (deployment) (max_over_time(pay_stellar_contract_wasm[1h]) == 1) > 1
+        labels: { severity: warning }
+        annotations:
+          summary: "Deployment {{ $labels.deployment }}'s contract started running other code in the last hour"
+          action: "Confirm the upgrade was planned; one nobody made means the admin keys are exposed"
+      - alert: PayStellarTreasuryDeauthorized
+        expr: pay_stellar_treasury_authorized == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "USDC's issuer revoked the treasury's trustline authorization for deployment {{ $labels.deployment }}"
+          action: "No deposit or withdrawal can move USDC; see the treasury_deauthorized finding in docs/self-hosting/observer.md"
       - alert: PayStellarTreasuryShort
         expr: pay_stellar_treasury_usdc + pay_stellar_cold_reserve_usdc < pay_stellar_contract_liabilities + pay_stellar_contract_revenue
         for: 10m
@@ -34,6 +60,8 @@ groups:
           sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[1h]))
             > 3 * sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[7d])) / 168
           and sum by (seller_deployment_id) (increase(pay_stellar_charges_admitted_usdc_total[1h])) > 10000000
+          and on (seller_deployment_id)
+            count by (seller_deployment_id) (pay_stellar_charges_admitted_usdc_total offset 7d)
         for: 15m
         labels: { severity: warning }
         annotations:
@@ -139,12 +167,36 @@ groups:
         annotations:
           summary: "The observer is over an hour of ledgers behind for deployment {{ $labels.deployment }}"
           action: "Check the observer and its RPC node before events leave the node's retention"
+      - alert: PayStellarObserverFailing
+        expr: increase(pay_stellar_observer_round_failures_total[15m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "The observer's rounds keep failing"
+          action: "Read the observer's error logs: the RPC node or the database is failing it"
+      - alert: PayStellarObserverStalled
+        expr: time() - max(pay_stellar_observer_last_round_unixtime) > 900
+        labels: { severity: critical }
+        annotations:
+          summary: "No observer has completed a round for 15 minutes: nothing on-chain is being watched"
+          action: "Check the observer's logs, its RPC node and the database; findings resume from where it stopped"
+      - alert: PayStellarNodeStalled
+        expr: sum(changes(pay_stellar_observer_node_latest_ledger[10m])) == 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The observer's RPC node has not advanced in 10 minutes"
+          action: "The node stopped following the network, so the observer sees nothing new; point the observer at a healthy node"
+      - alert: PayStellarUnobservedBinding
+        expr: pay_stellar_observer_unobserved_bindings > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A ledger binding names another USDC contract than this network's, so no observer follows it"
+          action: "Correct the binding's USDC address; until then its deployment is not reconciled"
       - alert: PayStellarNoLeader
-        expr: max by (role) (pay_stellar_lease_held) < 1
+        expr: max by (role, lease) (pay_stellar_lease_held) < 1
         for: 2m
         labels: { severity: critical }
         annotations:
-          summary: "No {{ $labels.role }} process holds its lease; none is acting"
+          summary: "No {{ $labels.role }} process holds lease {{ $labels.lease }}; none is acting"
           action: "Check the processes' logs for database errors"
       - alert: PayStellarProcessDown
         expr: up{job=~"pay-stellar-.*"} == 0

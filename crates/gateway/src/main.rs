@@ -32,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
         deposits_per_deployment: config.max_deposits_per_deployment_per_day,
         mandate_changes_per_deployment: config.max_mandate_changes_per_deployment_per_day,
     });
+    telemetry::register_deployment_counters(
+        &store.bound_deployments(config.network).await.context("reading bound deployments")?,
+    );
     let ledger = LedgerApi::new(
         store.clone(),
         rpc,
