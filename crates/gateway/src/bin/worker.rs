@@ -17,13 +17,20 @@ use fermah_pay_stellar_gateway::{shutdown, signing, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
 
 #[derive(Debug, Parser)]
-#[command(name = "fermah-pay-stellar-worker", version, about)]
+#[command(
+    name = "fermah-pay-stellar-worker",
+    version,
+    about = "Settlement worker: sends deposits, charge batches, withdrawals, mandates and recurring charges to Stellar, and decides their outcomes"
+)]
 struct Config {
     /// PostgreSQL URL of a login role that is a member of `pay_stellar_worker`.
     #[arg(long, env = "PAY_STELLAR_WORKER_DATABASE_URL", hide_env_values = true)]
     database_url: String,
+    /// The Stellar network the worker settles on: `stellar:testnet`,
+    /// `stellar:pubnet`, or `stellar:local`.
     #[arg(long, env = "PAY_STELLAR_NETWORK")]
     network: Network,
+    /// Stellar RPC endpoint of that network; checked against it at startup.
     #[arg(long, env = "PAY_STELLAR_RPC_URL")]
     rpc_url: String,
     /// Address to serve Prometheus metrics on (`/metrics`); not served when
@@ -79,6 +86,8 @@ struct Config {
     /// steps of 10, 95, 99 or max.
     #[arg(long, env = "PAY_STELLAR_INCLUSION_FEE_PERCENTILE", default_value = "90")]
     inclusion_fee_percentile: FeePercentile,
+    /// Headroom over the simulated resource fee, in percent; the unused part
+    /// is refunded.
     #[arg(long, env = "PAY_STELLAR_RESOURCE_FEE_MARGIN_PERCENT", default_value = "20")]
     resource_fee_margin_percent: u8,
     /// Largest resource fee, in stroops, of a deposit, withdrawal, mandate or
@@ -118,10 +127,14 @@ struct Config {
     /// Seconds between reads of the contracts' remaining life.
     #[arg(long, env = "PAY_STELLAR_TTL_CHECK_SECS", default_value = "600")]
     ttl_check_secs: u64,
+    /// Seconds a request the network refused in simulation, or that needed a
+    /// restore, waits before it is tried again.
     #[arg(long, env = "PAY_STELLAR_RETRY_AFTER_SECS", default_value = "30")]
     retry_after_secs: u64,
+    /// Milliseconds between rounds while there is work.
     #[arg(long, env = "PAY_STELLAR_BUSY_POLL_MILLIS", default_value = "1000")]
     busy_poll_millis: u64,
+    /// Milliseconds between rounds while there is none.
     #[arg(long, env = "PAY_STELLAR_IDLE_POLL_MILLIS", default_value = "2000")]
     idle_poll_millis: u64,
     /// Seconds a worker's lease lasts without renewal: how long a standby

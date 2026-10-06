@@ -18,7 +18,11 @@ use fermah_pay_stellar_gateway::{shutdown, telemetry};
 use sqlx::postgres::PgPoolOptions;
 
 #[derive(Debug, Parser)]
-#[command(name = "fermah-pay-stellar-observer", version, about)]
+#[command(
+    name = "fermah-pay-stellar-observer",
+    version,
+    about = "Chain observer: reads the ledger contract's events, matches them against the gateway's records and reconciles the treasury"
+)]
 struct Config {
     /// PostgreSQL URL of a login role that is a member of
     /// `pay_stellar_observer`.

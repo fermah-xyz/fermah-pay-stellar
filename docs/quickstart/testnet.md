@@ -60,8 +60,10 @@ testnet upgrade-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.w
 
 The command checks on the ledger that the instance runs the new Wasm and
 that the contract's totals are unchanged. The upgrade pays rent to keep the
-new code alive for about 30 days: about 19 XLM on testnet for a 15 KB
-contract, upload included.
+new code alive for about 30 days: for the current 29 KB contract, the
+upgrade transaction cost 28.2 XLM on testnet
+([`admin-upgrade-two-signatures`](../evidence/README.md#deployed-contracts-testnet)),
+plus the upload.
 
 ## 4. Buyers
 
@@ -115,17 +117,22 @@ acts as a seller would, only through the gRPC API:
    refuses it as a duplicate before anything is submitted;
 5. withdraws 0.01 USDC back to the buyer's wallet: the buyer signs the
    prepared entry, and the worker adds the treasury's signature;
-6. checks that the gateway's balance equals the contract's and that the buyer
+6. calls the x402 interface's `/verify` and `/settle` with a commitment the
+   buyer signs, and checks the charge settles;
+7. checks that the gateway's balance equals the contract's and that the buyer
    still holds 0 XLM.
 
 The command exits non-zero if any step does not hold, and writes an
 `api-end-to-end` evidence record with every transaction hash.
 
-Recurring charges have their own run:
+Recurring charges have their own run, on a database of its own: each run
+provisions a seller deployment bound to the contract, and a contract is bound
+to one deployment per database.
 
 ```bash
+just db-create pay_stellar_recurring
 testnet recurring-end-to-end \
-  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_recurring
 ```
 
 With periods of two minutes, so it takes about five: a new buyer with 0 XLM
@@ -137,12 +144,18 @@ the API refuses a charge (`mandate_ended`) and so does the contract
 zero. It writes a `recurring-end-to-end` evidence record.
 
 The x402 interface has its own run, a [conformance harness](../api/x402.md#conformance-harness)
-that calls it over HTTP as a third-party facilitator would:
+that calls it over HTTP as a third-party facilitator would, also on its own
+database:
 
 ```bash
+just db-create pay_stellar_x402
 testnet x402-conformance \
-  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_x402
 ```
+
+Each of these commands also reads its database URL from
+`PAY_STELLAR_E2E_DATABASE_URL`, and every `testnet` command its RPC endpoint
+from `STELLAR_TESTNET_RPC_URL`.
 
 The `testnet` workflow runs these commands in CI: on changes to main, on
 demand, and on pull requests labelled `testnet`. Its job summary lists every
@@ -168,6 +181,7 @@ two `sign` calls and `submit`, as in
 ## 8. Load
 
 ```bash
+just db-create pay_stellar_load
 testnet load-test \
   --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_load \
   --buyers 10 --charges-per-buyer 100 --channels 4 --concurrency 32
@@ -194,7 +208,10 @@ The `load-test` evidence record reports:
 - the fee per charge;
 - every batch transaction.
 
-Use a fresh database for each run.
+Use a fresh database for each run. A minimal run, `--buyers 1
+--charges-per-buyer 1 --channels 3`, is also the way to create the channel
+accounts `channel-2` and `channel-3` that [the dev stack](dev-stack.md) sends
+from.
 
 ## On a local network
 
@@ -202,14 +219,29 @@ Every command above also runs against a standalone network on this machine,
 with `--network stellar:local` (or `PAY_STELLAR_TESTNET_NETWORK=stellar:local`):
 
 ```bash
-docker run -d --name stellar -p 8000:8000 stellar/quickstart:testing --local --enable core,rpc --limits testnet
-local() { testnet --network stellar:local --rpc-url http://localhost:8000/rpc "$@"; }
-local init-roles                    # Friendbot funds the roles and the stand-in USDC issuer
-local mint-local-usdc --amount 1000000000
-local deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
+docker run -d --name stellar -p 8000:8000 \
+  stellar/quickstart@sha256:1d57fcdc3bc3775f841c4eed877cfc10e406ab7b879c0531844549aeff52ff0a \
+  --local --enable core,rpc --limits testnet
+# The network takes a minute or two to come up: wait for its RPC and Friendbot.
+until curl -sf -X POST -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://localhost:8000/rpc | grep -q '"healthy"' \
+   && curl -sf -o /dev/null 'http://localhost:8000/friendbot?addr=GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7'; do
+  sleep 5
+done
+localnet() { testnet --network stellar:local --rpc-url http://localhost:8000/rpc "$@"; }
+localnet init-roles                    # Friendbot funds the roles and the stand-in USDC issuer
+localnet mint-local-usdc --amount 1000000000
+just contract-build
+localnet deploy-prepaid --wasm target/contract-wasm/fermah_pay_stellar_prepaid.wasm \
   --min-deposit 100000 --max-charge 10000000
-local end-to-end --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_local
+just db-create pay_stellar_local
+localnet end-to-end --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_local
 ```
+
+The image is pinned to the digest the CI job uses. `recurring-end-to-end`
+and `x402-conformance` run the same way, each on a database of its own, as in
+step 6. For a disposable run, `--profile-dir` keeps the profile somewhere
+else.
 
 A local network has no Circle issuer. Its USDC is a stand-in issued by a key
 derived from a public string, so anyone can issue it; `mint-local-usdc`
@@ -218,6 +250,6 @@ to `~/.config/fermah-pay-stellar/local` and evidence to
 `target/local-evidence`. Each record is marked as a local test run: it is not
 evidence of anything on a public network.
 
-The `Local end-to-end` CI job runs exactly this on every change to the code,
-the contract or the schema. The `testnet` workflow remains the check against
+The `Local end-to-end` CI job runs these steps, with the recurring and x402
+runs, on every change to the code, the contract or the schema. The `testnet` workflow remains the check against
 Circle USDC on a public network.

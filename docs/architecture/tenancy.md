@@ -31,6 +31,7 @@ the operating system CSPRNG:
 |---|---|
 | `stellar:testnet` | `fps_test_` |
 | `stellar:pubnet` | `fps_live_` |
+| `stellar:local`, a standalone network for development | `fps_local_` |
 
 The prefix is derived from the deployment at issuance, never from the
 operator's input. Clients send the key as `authorization: Bearer <key>`.

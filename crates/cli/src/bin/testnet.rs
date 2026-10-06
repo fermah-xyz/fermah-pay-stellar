@@ -19,7 +19,11 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 #[derive(Parser)]
-#[command(name = "fermah-pay-stellar-testnet", version, about)]
+#[command(
+    name = "fermah-pay-stellar-testnet",
+    version,
+    about = "Testnet and local-network tooling: roles, contract deployment, onboarding, end-to-end runs, load tests and monitoring drills"
+)]
 struct Cli {
     /// `stellar:testnet`, or `stellar:local` for a standalone network on this
     /// machine such as `stellar/quickstart --local`.

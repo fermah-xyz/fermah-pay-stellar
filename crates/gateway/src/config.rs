@@ -7,7 +7,11 @@ use fermah_pay_stellar_domain::Network;
 
 /// Gateway runtime configuration, read from flags or environment.
 #[derive(Debug, Parser)]
-#[command(name = "fermah-pay-stellar-gateway", version, about)]
+#[command(
+    name = "fermah-pay-stellar-gateway",
+    version,
+    about = "Gateway: the authenticated seller API (gRPC) and the x402 facilitator interface, over PostgreSQL"
+)]
 pub struct Config {
     /// PostgreSQL URL of a login role that is a member of `pay_stellar_api`.
     #[arg(long, env = "PAY_STELLAR_DATABASE_URL", hide_env_values = true)]
@@ -27,8 +31,9 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_X402_LISTEN_ADDR")]
     pub x402_listen_addr: Option<SocketAddr>,
 
-    /// The one Stellar network this process serves (`stellar:testnet` or
-    /// `stellar:pubnet`). Keys and deployments of the other network are
+    /// The one Stellar network this process serves (`stellar:testnet`,
+    /// `stellar:pubnet`, or `stellar:local` for a standalone development
+    /// network). Keys and deployments of the other network are
     /// rejected.
     #[arg(long, env = "PAY_STELLAR_NETWORK")]
     pub network: Network,

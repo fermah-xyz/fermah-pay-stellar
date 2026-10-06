@@ -71,7 +71,7 @@ must not be able to issue keys.
 | Process | Variable | Value |
 |---|---|---|
 | Gateway | `PAY_STELLAR_DATABASE_URL` | URL of the gateway login role |
-| Gateway | `PAY_STELLAR_NETWORK` | `stellar:testnet` or `stellar:pubnet` |
+| Gateway | `PAY_STELLAR_NETWORK` | `stellar:testnet`, `stellar:pubnet`, or `stellar:local` for a standalone development network |
 | Gateway | `PAY_STELLAR_LISTEN_ADDR` | listen address, default `127.0.0.1:50051` |
 | Gateway | `PAY_STELLAR_X402_LISTEN_ADDR` | listen address of the [x402 facilitator interface](../api/x402.md) (HTTP); not served when unset |
 | Gateway | `PAY_STELLAR_DATABASE_MAX_CONNECTIONS` | pool size, default 16, must be at least 1 |

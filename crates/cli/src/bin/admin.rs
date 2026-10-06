@@ -21,7 +21,11 @@ use uuid::Uuid;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../db/migrations");
 
 #[derive(Parser)]
-#[command(name = "fermah-pay-stellar-admin", version, about)]
+#[command(
+    name = "fermah-pay-stellar-admin",
+    version,
+    about = "Operator administration: migrations, products, seller deployments, ledger bindings, API keys and quarantine resolution"
+)]
 struct Cli {
     /// PostgreSQL URL for the role the command needs.
     #[arg(long, env = "PAY_STELLAR_ADMIN_DATABASE_URL", hide_env_values = true)]

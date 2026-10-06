@@ -1,6 +1,6 @@
 //! API-key authentication.
 //!
-//! A key is `fps_test_` or `fps_live_` followed by 43 base64url characters
+//! A key is `fps_test_`, `fps_live_` or `fps_local_` followed by 43 base64url characters
 //! (256 random bits). The prefix names the network the key's deployment is
 //! pinned to, so a leaked key's blast radius is obvious from the text, and a
 //! key for the other network is refused before any database work.

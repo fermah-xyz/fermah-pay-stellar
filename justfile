@@ -1,6 +1,9 @@
 # Developer entry points. `just --list` shows them all.
 
-database_url := "postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar"
+# The local PostgreSQL's host port: set PAY_STELLAR_LOCAL_PG_PORT when 55433
+# is taken. COMPOSE_PROJECT_NAME gives a second, separate instance.
+pg_port := env_var_or_default("PAY_STELLAR_LOCAL_PG_PORT", "55433")
+database_url := "postgres://pay_stellar_owner:local-development-only@127.0.0.1:" + pg_port + "/pay_stellar"
 
 # Start the local PostgreSQL used by tests and the quickstart.
 db-up:
@@ -8,6 +11,11 @@ db-up:
 
 db-down:
     docker compose -f deploy/local/compose.yaml down
+
+# Create another database on the local PostgreSQL, for a run that needs its
+# own (each end-to-end run binds the contract to a new deployment).
+db-create name: db-up
+    docker compose -f deploy/local/compose.yaml exec -T postgres createdb -U pay_stellar_owner {{name}}
 
 # Apply migrations to the local database.
 migrate: db-up
@@ -57,11 +65,12 @@ dev-drills-up:
     DEV_UID=$(id -u) DRILL_CONTRACT=$(jq -r .contract "$PAY_STELLAR_TESTNET_PROFILE/deployment.json") \
         docker compose -f deploy/dev/compose.yaml -f deploy/dev/drills.yaml --profile monitoring up -d --build
 
+# Stopping and reading logs mount nothing, so they need no testnet profile.
 dev-down:
-    docker compose -f deploy/dev/compose.yaml down
+    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-unused}" docker compose -f deploy/dev/compose.yaml down
 
 dev-logs *args:
-    docker compose -f deploy/dev/compose.yaml logs -f {{args}}
+    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-unused}" docker compose -f deploy/dev/compose.yaml logs -f {{args}}
 
 # The development API key the stack provisioned.
 dev-api-key:
