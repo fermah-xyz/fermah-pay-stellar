@@ -33,7 +33,7 @@ The first start runs three one-off jobs:
 2. creates one login role per process;
 3. provisions a product and a testnet deployment bound to the profile's contract, and issues an API key.
 
-Later starts reuse them. The database lives in a Docker volume, so `just dev-down` keeps it; `PAY_STELLAR_TESTNET_PROFILE=unused docker compose -f deploy/dev/compose.yaml down -v` starts from scratch. Commands that start services need `PAY_STELLAR_TESTNET_PROFILE` set; `just dev-down` and `just dev-logs` do not.
+Later starts reuse them. The database lives in a Docker volume, so `just dev-down` keeps it; `PAY_STELLAR_TESTNET_PROFILE=/unused docker compose -f deploy/dev/compose.yaml down -v` starts from scratch. Commands that start services need `PAY_STELLAR_TESTNET_PROFILE` set; `just dev-down` and `just dev-logs` do not.
 
 | Service | Address |
 |---|---|

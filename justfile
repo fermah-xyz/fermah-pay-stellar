@@ -67,10 +67,10 @@ dev-drills-up:
 
 # Stopping and reading logs mount nothing, so they need no testnet profile.
 dev-down:
-    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-unused}" docker compose -f deploy/dev/compose.yaml down
+    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-/unused}" docker compose -f deploy/dev/compose.yaml --profile monitoring down
 
 dev-logs *args:
-    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-unused}" docker compose -f deploy/dev/compose.yaml logs -f {{args}}
+    PAY_STELLAR_TESTNET_PROFILE="${PAY_STELLAR_TESTNET_PROFILE:-/unused}" docker compose -f deploy/dev/compose.yaml logs -f {{args}}
 
 # The development API key the stack provisioned.
 dev-api-key:
