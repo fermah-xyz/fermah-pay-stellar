@@ -222,10 +222,14 @@ with `--network stellar:local` (or `PAY_STELLAR_TESTNET_NETWORK=stellar:local`):
 docker run -d --name stellar -p 8000:8000 \
   stellar/quickstart@sha256:1d57fcdc3bc3775f841c4eed877cfc10e406ab7b879c0531844549aeff52ff0a \
   --local --enable core,rpc --limits testnet
-# The network takes a minute or two to come up: wait for its RPC and Friendbot.
+# Wait for the RPC, Friendbot, and Soroban's settings, which exist only once
+# the network has upgraded to its protocol a few ledgers after starting.
 until curl -sf -X POST -H 'content-type: application/json' \
         -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://localhost:8000/rpc | grep -q '"healthy"' \
-   && curl -sf -o /dev/null 'http://localhost:8000/friendbot?addr=GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7'; do
+   && curl -sf -o /dev/null 'http://localhost:8000/friendbot?addr=GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7' \
+   && curl -sf -X POST -H 'content-type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"getLedgerEntries","params":{"keys":["AAAACAAAAAA="]}}' \
+        http://localhost:8000/rpc | grep -q '"xdr"'; do
   sleep 5
 done
 localnet() { testnet --network stellar:local --rpc-url http://localhost:8000/rpc "$@"; }
