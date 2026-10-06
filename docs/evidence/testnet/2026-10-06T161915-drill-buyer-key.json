@@ -1,10 +1,10 @@
 {
   "action": {
-    "deposit_explorer_url": "https://stellar.expert/explorer/testnet/tx/b57ec791b6cd484e3ebd00d05d6a4434bd93ae184e8f63b6abe48b84e8f091f7",
-    "deposit_transaction": "b57ec791b6cd484e3ebd00d05d6a4434bd93ae184e8f63b6abe48b84e8f091f7",
+    "deposit_explorer_url": "https://stellar.expert/explorer/testnet/tx/c212a6fa4e2dac1268a4339904db4e0d92721a74f3895ea9c6c4af4077481ef4",
+    "deposit_transaction": "c212a6fa4e2dac1268a4339904db4e0d92721a74f3895ea9c6c4af4077481ef4",
     "description": "a withdrawal of the buyer's credit to an account other than the buyer's wallet was prepared (never signed, so nothing was held or moved)",
-    "destination": "GAWVQ7IHMJG4T5HK4AKYMXKLXOHEBRRWF75B7TLAOLUHGP3FUFWKEZ3O",
-    "withdrawal_id": "01a0f634-ba78-77b1-a806-cd810c42ab40"
+    "destination": "GBRZDFGIK35KD6HF7A3ERKD3AC2BTJBO2MDU3PZ57KS4JEABQN5IGFZX",
+    "withdrawal_id": "01a11202-c989-704a-8af5-35d1df7f1517"
   },
   "alert": {
     "annotations": {
@@ -19,14 +19,14 @@
       "severity": "warning"
     },
     "name": "PayStellarWithdrawalsToOtherAccounts",
-    "starts_at": "2026-10-01T06:44:22.720Z",
+    "starts_at": "2026-10-06T16:19:07.720Z",
     "state": "active"
   },
   "criterion": "monitoring-drill",
   "expected": "the alert PayStellarWithdrawalsToOtherAccounts becomes active in Alertmanager",
   "network": "stellar:testnet",
-  "observed_after_secs": 42,
-  "recorded_at": "2026-10-01T06:44:25.93454872Z",
+  "observed_after_secs": 43,
+  "recorded_at": "2026-10-06T16:19:15.041806028Z",
   "threat": "compromised buyer key",
   "vector": "buyer-key"
 }

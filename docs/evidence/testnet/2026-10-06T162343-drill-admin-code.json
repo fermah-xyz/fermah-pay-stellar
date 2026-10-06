@@ -1,0 +1,31 @@
+{
+  "action": {
+    "contract": "CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI",
+    "description": "the observer is told to expect other code than the contract runs, as after an upgrade nobody planned (deploy/dev/drills.yaml); the contract itself is not changed",
+    "expected_wasm": "0000000000000000000000000000000000000000000000000000000000000000",
+    "running_wasm": "38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e"
+  },
+  "alert": {
+    "annotations": {
+      "action": "If the upgrade was not planned, pause the contract and treat the admin keys as exposed; if it was, review the new code and update the expected hash",
+      "summary": "Deployment 01a0f634-3496-76b8-9858-5ab303c07234's contract runs other code than PAY_STELLAR_EXPECTED_WASM names"
+    },
+    "labels": {
+      "alertname": "PayStellarContractCodeUnexpected",
+      "deployment": "01a0f634-3496-76b8-9858-5ab303c07234",
+      "instance": "observer:9103",
+      "job": "pay-stellar-observer",
+      "severity": "critical"
+    },
+    "name": "PayStellarContractCodeUnexpected",
+    "starts_at": "2026-10-06T16:23:37.720Z",
+    "state": "active"
+  },
+  "criterion": "monitoring-drill",
+  "expected": "the alert PayStellarContractCodeUnexpected becomes active in Alertmanager",
+  "network": "stellar:testnet",
+  "observed_after_secs": 180,
+  "recorded_at": "2026-10-06T16:23:43.390090403Z",
+  "threat": "compromised admin keys replacing the contract's code",
+  "vector": "admin-code"
+}

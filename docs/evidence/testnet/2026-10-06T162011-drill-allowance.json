@@ -1,12 +1,12 @@
 {
   "action": {
     "approval_lowered": {
-      "fee_charged_stroops": 17763,
+      "fee_charged_stroops": 17767,
       "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
       "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
-      "inner_transaction_hash": "b0e5e82e70da0645f12e298c11941001700adf4b16b3a83aa48939f5de5d6fb4",
-      "ledger": 4962701,
-      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/23905bcf6010da4f595d4303c4e5be3514b6a40c52db788f54088a5ddeb1be43",
+      "inner_transaction_hash": "6bc09ebe42a1782a75b2388c34130d7a4f2688530d42c1df68fce9a2ede0e0ac",
+      "ledger": 5055998,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/24397c99138e99bb8a4fabf96c6fb32e525346e6cb3a5473ef937674d74d4092",
       "resources": {
         "disk_read_bytes": 188,
         "footprint_read_only": 2,
@@ -14,20 +14,20 @@
         "instructions": 782765,
         "write_bytes": 372
       },
-      "transaction_hash": "23905bcf6010da4f595d4303c4e5be3514b6a40c52db788f54088a5ddeb1be43"
+      "transaction_hash": "24397c99138e99bb8a4fabf96c6fb32e525346e6cb3a5473ef937674d74d4092"
     },
     "charge": {
       "outcome": "allowance_short",
-      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/8769663fa33695facbc6f52bc53fbbf827e289b9945902912567cab8d7714d94",
-      "transaction_hash": "8769663fa33695facbc6f52bc53fbbf827e289b9945902912567cab8d7714d94"
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/86e0d941c9f89f2e8f3ed557d0d1196318408e694e97f27f5aaa0556a77deda5",
+      "transaction_hash": "86e0d941c9f89f2e8f3ed557d0d1196318408e694e97f27f5aaa0556a77deda5"
     },
     "description": "after the buyer's mandate became active, the buyer set the ledger contract's USDC approval to zero outside the gateway; the next period's charge was refused on-chain",
-    "mandate_transaction": "fb0d5e74fb2a72c0ff2c87436a3656d3e2a9e49c857589652dadbc7416cd90c0"
+    "mandate_transaction": "0d2138e2451ad64315fce43ef2ab5ce3b96089f55591181d9e9972fa40242342"
   },
   "alert": {
     "annotations": {
       "action": "The buyer's wallet changed the approval in the USDC contract directly. Confirm with the buyer; a change nobody made means the buyer's key is exposed",
-      "summary": "A recurring charge found the buyer's USDC approval lowered or revoked outside this gateway"
+      "summary": "A buyer's mandate or USDC approval changed outside this gateway"
     },
     "labels": {
       "alertname": "PayStellarMandateChangedOutsideGateway",
@@ -35,14 +35,14 @@
       "severity": "warning"
     },
     "name": "PayStellarMandateChangedOutsideGateway",
-    "starts_at": "2026-10-01T06:45:22.720Z",
+    "starts_at": "2026-10-06T16:20:07.720Z",
     "state": "active"
   },
   "criterion": "monitoring-drill",
   "expected": "the alert PayStellarMandateChangedOutsideGateway becomes active in Alertmanager",
   "network": "stellar:testnet",
   "observed_after_secs": 56,
-  "recorded_at": "2026-10-01T06:45:22.817136386Z",
+  "recorded_at": "2026-10-06T16:20:11.651648509Z",
   "threat": "SAC allowance manipulation",
   "vector": "allowance"
 }

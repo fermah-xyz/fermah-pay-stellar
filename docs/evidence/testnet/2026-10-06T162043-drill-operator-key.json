@@ -1,36 +1,36 @@
 {
   "action": {
     "charge": {
-      "fee_charged_stroops": 27682,
+      "fee_charged_stroops": 27707,
       "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
       "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
-      "inner_transaction_hash": "26c86a12ec240622409249ec06f656e62c2a42e358b3510ad48c2d703b77d7ac",
-      "ledger": 4962711,
-      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/1e33ebba8b2dad2eaa2fdee58b974b3d85e102bd4cbe7486da2b0e4f2bd66f74",
+      "inner_transaction_hash": "4eca5279c11b765915f48d82cd99578a691be9b047018e592fa31ce4044ead84",
+      "ledger": 5056009,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/28bd19b5e3ed55eba0b42cec917a98ad736507baf8a8599bddd61b5afcfd3ee9",
       "resources": {
         "disk_read_bytes": 188,
         "footprint_read_only": 2,
         "footprint_read_write": 4,
-        "instructions": 1638786,
+        "instructions": 1638829,
         "write_bytes": 1280
       },
-      "transaction_hash": "1e33ebba8b2dad2eaa2fdee58b974b3d85e102bd4cbe7486da2b0e4f2bd66f74"
+      "transaction_hash": "28bd19b5e3ed55eba0b42cec917a98ad736507baf8a8599bddd61b5afcfd3ee9"
     },
     "deposit": {
-      "fee_charged_stroops": 877460,
+      "fee_charged_stroops": 913504,
       "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
       "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
-      "inner_transaction_hash": "cabbbdcb472d73921ab9ef6784ca314d1be330912c6bc76d6f82c39040e67efb",
-      "ledger": 4962710,
-      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/29cb0d65f61b5fc0ec4d14b7d6f59360d6d7b3d04a9e03b5c2e0c2fee6e97d2a",
+      "inner_transaction_hash": "6ddd07432c232f8d534d184c4f67a13c44bf787c10f9aaf2f28537a251291591",
+      "ledger": 5056008,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/961313ac41d1eba374e32040a942ed38362eaa88d70d92e937759965ee3496d1",
       "resources": {
         "disk_read_bytes": 508,
         "footprint_read_only": 3,
         "footprint_read_write": 6,
-        "instructions": 1732495,
+        "instructions": 1732547,
         "write_bytes": 1596
       },
-      "transaction_hash": "29cb0d65f61b5fc0ec4d14b7d6f59360d6d7b3d04a9e03b5c2e0c2fee6e97d2a"
+      "transaction_hash": "961313ac41d1eba374e32040a942ed38362eaa88d70d92e937759965ee3496d1"
     },
     "description": "a buyer deposited straight to the contract, and the operator key charged it outside the gateway"
   },
@@ -45,14 +45,14 @@
       "severity": "critical"
     },
     "name": "PayStellarCriticalFinding",
-    "starts_at": "2026-10-01T06:46:22.720Z",
+    "starts_at": "2026-10-06T16:20:37.720Z",
     "state": "active"
   },
   "criterion": "monitoring-drill",
   "expected": "the alert PayStellarCriticalFinding becomes active in Alertmanager",
   "network": "stellar:testnet",
-  "observed_after_secs": 61,
-  "recorded_at": "2026-10-01T06:46:24.231573208Z",
+  "observed_after_secs": 31,
+  "recorded_at": "2026-10-06T16:20:43.169049365Z",
   "threat": "compromised operator key",
   "vector": "operator-key"
 }
