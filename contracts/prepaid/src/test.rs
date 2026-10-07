@@ -22,6 +22,7 @@ use fermah_pay_stellar_chain::prepaid::{
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::Deployer as _;
+use soroban_sdk::testutils::storage::{Persistent as _, Temporary as _};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{self, ScErrorCode, ScErrorType};
 use soroban_sdk::{Event as _, IntoVal, Symbol, TryIntoVal, Val, symbol_short};
@@ -1442,6 +1443,86 @@ fn test_admin_calls_keep_the_instance_alive() {
     assert!(before < TTL_THRESHOLD, "{before}");
     admin_call(&w, &w.admin, "pause", no_args(&w)).unwrap();
     assert_eq!(w.env.deployer().get_contract_instance_ttl(&w.contract), TTL_EXTEND_TO);
+}
+
+/// A deployment left idle until every entry it relies on has expired: the
+/// ledger contract's instance and code, the buyer's account and deposit
+/// marker, the charge's record and the USDC contract's instance. The host
+/// restores archived persistent entries inside the call that reads them, as
+/// the network does since protocol 23; what was temporary is gone.
+#[test]
+fn test_buyer_withdraws_after_every_entry_has_expired() {
+    let w = world();
+    let buyer = funded(&w, 1, 10 * USDC);
+    let charge = w.charge(1, 1, USDC);
+    w.charge_batch(core::slice::from_ref(&charge)).unwrap();
+
+    let now = w.env.ledger().sequence();
+    let account = Key::Account(buyer.address.clone());
+    let marker = Key::Deposit(buyer.address.clone(), BytesN::from_array(&w.env, &id32(1)));
+    let record = Key::Charge(buyer.address.clone(), BytesN::from_array(&w.env, &charge.charge_id));
+    let (account_ttl, marker_ttl, record_ttl) = w.env.as_contract(&w.contract, || {
+        (
+            w.env.storage().persistent().get_ttl(&account),
+            // Read whichever durability the marker has, so a marker kept in
+            // temporary storage fails the replay check below, not this read.
+            if w.env.storage().persistent().has(&marker) {
+                w.env.storage().persistent().get_ttl(&marker)
+            } else {
+                w.env.storage().temporary().get_ttl(&marker)
+            },
+            w.env.storage().temporary().get_ttl(&record),
+        )
+    });
+    let live_until = [
+        w.env.deployer().get_contract_instance_ttl(&w.contract),
+        w.env.deployer().get_contract_code_ttl(&w.contract),
+        w.env.deployer().get_contract_instance_ttl(&w.usdc),
+        account_ttl,
+        marker_ttl,
+        record_ttl,
+    ]
+    .map(|ttl| now + ttl);
+    let idle_until = live_until.iter().max().unwrap() + 1;
+    w.env.ledger().set_sequence_number(idle_until);
+    assert!(live_until.iter().all(|&ledger| ledger < idle_until), "{live_until:?}");
+    let has_record = w.env.as_contract(&w.contract, || w.env.storage().temporary().has(&record));
+    assert!(!has_record, "the charge record outlived its TTL");
+
+    let intent = w.withdraw_intent(&buyer, 4 * USDC, &buyer, 1);
+    let auths = [
+        w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+    ];
+    withdraw_with(&w, &intent, &buyer, &buyer, &auths).unwrap();
+    assert_eq!(
+        (w.usdc_balance(&buyer), w.usdc_balance(&w.treasury), w.balance(1)),
+        (4 * USDC, 6 * USDC, 5 * USDC)
+    );
+    assert_eq!(w.client().get_totals(), Totals { liabilities: 5 * USDC, revenue: USDC });
+
+    // What was persistent still refuses a replay; the charge, past its last
+    // ledger, is refused as expired rather than debited again.
+    assert_eq!(w.deposit(&buyer, 1, USDC, 1), Err(contract_error(Error::DepositAlreadyProcessed)));
+    assert_eq!(
+        withdraw_with(
+            &w,
+            &intent,
+            &buyer,
+            &buyer,
+            &[
+                w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
+                w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+            ]
+        ),
+        Err(contract_error(Error::WithdrawalAlreadyProcessed))
+    );
+    assert_eq!(w.charge_batch(&[charge]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Expired]);
+    assert_eq!(
+        w.charge_batch(&[w.charge(1, 2, USDC)]).unwrap(),
+        soroban_sdk::vec![&w.env, Outcome::Charged]
+    );
+    assert_eq!(w.balance(1), 4 * USDC);
 }
 
 #[test]
