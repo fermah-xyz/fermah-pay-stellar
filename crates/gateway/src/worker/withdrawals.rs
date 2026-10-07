@@ -317,7 +317,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     .saturating_add(self.settings.operator_authorization_ledgers),
                 signature: ScVal::Void,
             }),
-            root_invocation: deployment.treasury_withdraw_authorization(&intent),
+            root_invocation: deployment.cosigner_withdraw_authorization(&intent),
         };
         let treasury_entry =
             sign_entry_with(&unsigned, network_id(self.network()), treasury.as_ref())

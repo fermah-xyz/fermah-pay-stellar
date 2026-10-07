@@ -1,7 +1,11 @@
-//! Calls and authorization trees for the prepaid ledger contract.
+//! Calls and authorization trees for the ledger contracts: the prepaid
+//! ledger, whose USDC a separate treasury account holds, and the prepaid
+//! vault, which holds the USDC itself. Both keep the same accounts, charge
+//! records, mandates and events; a deployment's [`Custody`] says which one
+//! it runs.
 //!
 //! Everything a signer is asked to authorize is rebuilt here from the pinned
-//! deployment (contract, USDC contract, treasury) and the intent, never taken
+//! deployment (contract, USDC contract, custody) and the intent, never taken
 //! from a caller: a signer then authorizes exactly this contract, function,
 //! amount and counterparty, and a changed field invalidates the signature.
 
@@ -27,12 +31,21 @@ pub const MAX_CHARGE_WINDOW: u32 = 17_280;
 /// Ledgers a charge record outlives the charge's last ledger.
 pub const CHARGE_RECORD_GRACE: u32 = 720;
 
-/// A deployed prepaid ledger and the counterparties it is pinned to.
+/// Who holds a deployment's USDC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Custody {
+    /// The prepaid ledger: a separate treasury account holds it.
+    Treasury(AccountAddress),
+    /// The prepaid vault: the contract holds it.
+    Vault,
+}
+
+/// A deployed ledger contract and the counterparties it is pinned to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrepaidDeployment {
     pub contract: [u8; 32],
     pub usdc: [u8; 32],
-    pub treasury: AccountAddress,
+    pub custody: Custody,
 }
 
 /// The accounts a ledger instance is pinned to at construction.
@@ -69,6 +82,19 @@ pub enum AdminAction {
     Upgrade {
         wasm_hash: [u8; 32],
     },
+    /// Vault: proposes new code, installable after the contract's delay.
+    ProposeUpgrade {
+        wasm_hash: [u8; 32],
+    },
+    /// Vault: drops the proposed code.
+    CancelUpgrade,
+    /// Vault: installs the proposed code once its delay has passed.
+    InstallUpgrade,
+    /// Vault: bounds each buyer's balance and the total, or with `None`
+    /// removes the bounds.
+    SetLaunchLimits {
+        limits: Option<(i128, i128)>,
+    },
     /// Moves a role to `holder`, who must authorize it as well.
     SetRole {
         role: Role,
@@ -92,6 +118,28 @@ impl AdminAction {
                 call(contract, "set_limits", vec![limits_val(*min_deposit, *max_charge)])
             }
             Self::Upgrade { wasm_hash } => call(contract, "upgrade", vec![bytes_val(wasm_hash)]),
+            Self::ProposeUpgrade { wasm_hash } => {
+                call(contract, "propose_upgrade", vec![bytes_val(wasm_hash)])
+            }
+            Self::CancelUpgrade => call(contract, "cancel_upgrade", vec![]),
+            Self::InstallUpgrade => call(contract, "upgrade", vec![]),
+            Self::SetLaunchLimits { limits } => call(
+                contract,
+                "set_launch_limits",
+                vec![match limits {
+                    None => ScVal::Void,
+                    Some((max_balance, max_total)) => ScVal::Map(Some(ScMap(
+                        VecM::try_from(vec![
+                            ScMapEntry {
+                                key: symbol_val("max_balance"),
+                                val: i128_val(*max_balance),
+                            },
+                            ScMapEntry { key: symbol_val("max_total"), val: i128_val(*max_total) },
+                        ])
+                        .expect("invariant: two entries fit a map"),
+                    ))),
+                }],
+            ),
             Self::SetRole { role, holder } => {
                 call(contract, &format!("set_{}", role.token()), vec![account_val(holder)])
             }
@@ -126,6 +174,26 @@ impl AdminAction {
     }
 }
 
+/// The vault's constructor arguments, in its order: admin, operator, seller,
+/// USDC contract and limits. The vault has no treasury.
+#[must_use]
+pub fn vault_constructor_args(
+    admin: &AccountAddress,
+    operator: &AccountAddress,
+    seller: &AccountAddress,
+    usdc: [u8; 32],
+    min_deposit: i128,
+    max_charge: i128,
+) -> Vec<ScVal> {
+    vec![
+        account_val(admin),
+        account_val(operator),
+        account_val(seller),
+        ScVal::Address(ScAddress::Contract(ContractId(Hash(usdc)))),
+        limits_val(min_deposit, max_charge),
+    ]
+}
+
 /// Constructor arguments, in the contract's order: roles, USDC contract and
 /// limits.
 #[must_use]
@@ -148,13 +216,17 @@ fn symbol_val(name: &str) -> ScVal {
 }
 
 /// One charge: the buyer (account owner), the seller's identifier for the
-/// charge, the amount, and the last ledger in which it may be settled.
+/// charge, the amount, the last ledger in which it may be settled, and the
+/// UTC day of ledger time it was admitted in. The vault counts the amount
+/// against that day's share of the buyer's limit; the prepaid ledger does
+/// not take it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChargeRequest {
     pub owner: ChainAddress,
     pub charge_id: [u8; 32],
     pub amount: i128,
     pub last_ledger: u32,
+    pub day: u64,
 }
 
 /// A buyer's mandate: up to `amount` per `period_secs` for `cycles` periods,
@@ -193,6 +265,8 @@ pub struct DepositIntent {
     pub owner: ChainAddress,
     pub amount: i128,
     pub deposit_id: [u8; 32],
+    /// Vault only: the daily spending limit signed with the deposit.
+    pub cap: Option<i128>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,27 +285,103 @@ pub struct WithdrawIntent {
 }
 
 impl PrepaidDeployment {
+    /// The treasury account, for a deployment whose USDC one holds.
+    #[must_use]
+    pub const fn treasury(&self) -> Option<&AccountAddress> {
+        match &self.custody {
+            Custody::Treasury(treasury) => Some(treasury),
+            Custody::Vault => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_vault(&self) -> bool {
+        matches!(self.custody, Custody::Vault)
+    }
+
+    /// Where deposits go and payouts come from.
+    fn custodian(&self) -> ScAddress {
+        match &self.custody {
+            Custody::Treasury(treasury) => treasury.sc_address(),
+            Custody::Vault => ScAddress::Contract(ContractId(Hash(self.contract))),
+        }
+    }
+
     #[must_use]
     pub fn deposit_call(&self, intent: &DepositIntent) -> InvokeContractArgs {
-        call(
-            self.contract,
-            "deposit",
-            vec![
-                account_val(&intent.owner),
-                i128_val(intent.amount),
-                bytes_val(&intent.deposit_id),
-            ],
-        )
+        let mut args = vec![
+            account_val(&intent.owner),
+            i128_val(intent.amount),
+            bytes_val(&intent.deposit_id),
+        ];
+        if self.is_vault() {
+            args.push(intent.cap.map_or(ScVal::Void, i128_val));
+        }
+        call(self.contract, "deposit", args)
     }
 
     /// What the buyer signs for a deposit: the deposit itself and, beneath
-    /// it, the USDC transfer from the buyer to the pinned treasury.
+    /// it, the USDC transfer from the buyer to the pinned treasury, or to
+    /// the vault.
     #[must_use]
     pub fn deposit_authorization(&self, intent: &DepositIntent) -> SorobanAuthorizedInvocation {
         invocation(
             self.deposit_call(intent),
-            vec![invocation(self.transfer(&intent.owner, &self.treasury, intent.amount), vec![])],
+            vec![invocation(
+                usdc_transfer_call(self.usdc, &intent.owner, &self.custodian(), intent.amount),
+                vec![],
+            )],
         )
+    }
+
+    /// Vault: sets the buyer's daily spending limit.
+    #[must_use]
+    pub fn set_cap_call(&self, owner: &impl ScAddressOf, cap: i128) -> InvokeContractArgs {
+        call(self.contract, "set_cap", vec![account_val(owner), i128_val(cap)])
+    }
+
+    /// What the buyer signs to set its limit: the call alone.
+    #[must_use]
+    pub fn set_cap_authorization(
+        &self,
+        owner: &impl ScAddressOf,
+        cap: i128,
+    ) -> SorobanAuthorizedInvocation {
+        invocation(self.set_cap_call(owner, cap), vec![])
+    }
+
+    /// Vault: the buyer's request to take `amount` to `destination` without
+    /// the operator, after the contract's notice.
+    #[must_use]
+    pub fn request_exit_call(
+        &self,
+        owner: &impl ScAddressOf,
+        amount: i128,
+        destination: &impl ScAddressOf,
+    ) -> InvokeContractArgs {
+        call(
+            self.contract,
+            "request_exit",
+            vec![account_val(owner), i128_val(amount), account_val(destination)],
+        )
+    }
+
+    /// What the buyer signs to request an exit: the call alone.
+    #[must_use]
+    pub fn request_exit_authorization(
+        &self,
+        owner: &impl ScAddressOf,
+        amount: i128,
+        destination: &impl ScAddressOf,
+    ) -> SorobanAuthorizedInvocation {
+        invocation(self.request_exit_call(owner, amount, destination), vec![])
+    }
+
+    /// Vault: pays a buyer's unlocked exit request; anyone may send it, and
+    /// nobody authorizes it.
+    #[must_use]
+    pub fn exit_call(&self, owner: &impl ScAddressOf) -> InvokeContractArgs {
+        call(self.contract, "exit", vec![account_val(owner)])
     }
 
     #[must_use]
@@ -258,20 +408,25 @@ impl PrepaidDeployment {
         invocation(self.withdraw_call(intent), vec![])
     }
 
-    /// What the treasury signs for a withdrawal: the call and the USDC
-    /// transfer out of the treasury to the same destination and amount.
+    /// What the withdrawal's co-signer signs. With a treasury, the treasury
+    /// signs the call and the USDC transfer out of it to the same
+    /// destination and amount; with a vault, the operator signs the call
+    /// alone, the vault's own transfer needing no signature.
     #[must_use]
-    pub fn treasury_withdraw_authorization(
+    pub fn cosigner_withdraw_authorization(
         &self,
         intent: &WithdrawIntent,
     ) -> SorobanAuthorizedInvocation {
-        invocation(
-            self.withdraw_call(intent),
-            vec![invocation(
-                self.transfer(&self.treasury, &intent.destination, intent.amount),
-                vec![],
-            )],
-        )
+        match &self.custody {
+            Custody::Treasury(treasury) => invocation(
+                self.withdraw_call(intent),
+                vec![invocation(
+                    self.transfer(treasury, &intent.destination, intent.amount),
+                    vec![],
+                )],
+            ),
+            Custody::Vault => invocation(self.withdraw_call(intent), vec![]),
+        }
     }
 
     #[must_use]
@@ -297,19 +452,18 @@ impl PrepaidDeployment {
     }
 
     /// What the treasury signs to pay revenue out: the call and the USDC
-    /// transfer to the same destination and amount.
+    /// transfer to the same destination and amount. `None` for a vault,
+    /// whose seller pays revenue out alone.
     #[must_use]
     pub fn treasury_revenue_authorization(
         &self,
         intent: &RevenueWithdrawIntent,
-    ) -> SorobanAuthorizedInvocation {
-        invocation(
+    ) -> Option<SorobanAuthorizedInvocation> {
+        let treasury = self.treasury()?;
+        Some(invocation(
             self.withdraw_revenue_call(intent),
-            vec![invocation(
-                self.transfer(&self.treasury, &intent.destination, intent.amount),
-                vec![],
-            )],
-        )
+            vec![invocation(self.transfer(treasury, &intent.destination, intent.amount), vec![])],
+        ))
     }
 
     #[must_use]
@@ -341,7 +495,22 @@ impl PrepaidDeployment {
 
     #[must_use]
     pub fn charge_call(&self, charge: &ChargeRequest) -> InvokeContractArgs {
-        call(self.contract, "charge", vec![charge_val(charge)])
+        call(self.contract, "charge", vec![self.charge_val(charge)])
+    }
+
+    /// The contract's `Charge` tuple struct, which encodes as a vector of
+    /// fields; the vault's carries the admission day.
+    fn charge_val(&self, charge: &ChargeRequest) -> ScVal {
+        let mut fields = vec![
+            account_val(&charge.owner),
+            bytes_val(&charge.charge_id),
+            i128_val(charge.amount),
+            ScVal::U32(charge.last_ledger),
+        ];
+        if self.is_vault() {
+            fields.push(ScVal::U64(charge.day));
+        }
+        vec_val(fields)
     }
 
     /// What the operator signs for a single charge.
@@ -352,7 +521,7 @@ impl PrepaidDeployment {
 
     #[must_use]
     pub fn charge_batch_call(&self, charges: &[ChargeRequest]) -> InvokeContractArgs {
-        let entries: Vec<ScVal> = charges.iter().map(charge_val).collect();
+        let entries: Vec<ScVal> = charges.iter().map(|charge| self.charge_val(charge)).collect();
         call(self.contract, "charge_batch", vec![vec_val(entries)])
     }
 
@@ -568,10 +737,15 @@ impl PrepaidDeployment {
     }
 
     /// A USDC transfer of `amount` out of the treasury to `to`, outside the
-    /// ledger contract: what moves a surplus to a reserve.
+    /// ledger contract: what moves a surplus to a reserve. `None` for a
+    /// vault, whose USDC only its own code moves.
     #[must_use]
-    pub fn treasury_transfer_call(&self, to: &AccountAddress, amount: i128) -> InvokeContractArgs {
-        self.transfer(&self.treasury, to, amount)
+    pub fn treasury_transfer_call(
+        &self,
+        to: &AccountAddress,
+        amount: i128,
+    ) -> Option<InvokeContractArgs> {
+        Some(self.transfer(self.treasury()?, to, amount))
     }
 
     /// What the treasury signs for [`Self::treasury_transfer_call`]: that
@@ -581,8 +755,8 @@ impl PrepaidDeployment {
         &self,
         to: &AccountAddress,
         amount: i128,
-    ) -> SorobanAuthorizedInvocation {
-        invocation(self.treasury_transfer_call(to, amount), vec![])
+    ) -> Option<SorobanAuthorizedInvocation> {
+        Some(invocation(self.treasury_transfer_call(to, amount)?, vec![]))
     }
 }
 
@@ -626,6 +800,8 @@ pub enum Outcome {
     Expired,
     UnknownAccount,
     AboveDailyLimit,
+    /// Vault: above what the buyer's signed limit leaves for the charge's day.
+    AboveCap,
 }
 
 impl Outcome {
@@ -640,6 +816,7 @@ impl Outcome {
             4 => Self::Expired,
             5 => Self::UnknownAccount,
             6 => Self::AboveDailyLimit,
+            7 => Self::AboveCap,
             _ => return None,
         })
     }
@@ -654,6 +831,7 @@ impl Outcome {
             Self::Expired => "expired",
             Self::UnknownAccount => "unknown_account",
             Self::AboveDailyLimit => "above_daily_limit",
+            Self::AboveCap => "above_cap",
         }
     }
 }
@@ -965,6 +1143,45 @@ pub enum LedgerEvent {
     },
     /// Every entry one `charge_recurring_batch` call settled or refused.
     Recurring(Vec<RecurringEntry>),
+    /// Vault: the buyer's limit rose, in force at once.
+    CapRaised {
+        owner: ChainAddress,
+        cap: i128,
+    },
+    /// Vault: the buyer asked for a lower limit, in force from `effective_at`.
+    CapLowered {
+        owner: ChainAddress,
+        cap: i128,
+        effective_at: u32,
+    },
+    /// Vault: the buyer asked to take `amount` out without the operator,
+    /// payable from `unlock_at`.
+    ExitRequested {
+        owner: ChainAddress,
+        amount: i128,
+        destination: ChainAddress,
+        unlock_at: u32,
+    },
+    /// Vault: an exit was paid.
+    Exited {
+        owner: ChainAddress,
+        destination: ChainAddress,
+        amount: i128,
+    },
+    /// Vault: the admin set or removed the launch limits.
+    LaunchLimitsChanged {
+        previous: Option<(i128, i128)>,
+        current: Option<(i128, i128)>,
+    },
+    /// Vault: new code proposed, installable from `effective_at`.
+    UpgradeProposed {
+        wasm_hash: [u8; 32],
+        effective_at: u32,
+    },
+    /// Vault: the proposed code was dropped.
+    UpgradeCancelled {
+        wasm_hash: [u8; 32],
+    },
 }
 
 /// What one account, and all the seller's accounts together, may be charged
@@ -1029,6 +1246,15 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                     other => Some(bytes32_of(other)?),
                 },
             });
+        }
+        (b"cap_raised", [owner]) => {
+            return Some(LedgerEvent::CapRaised {
+                owner: chain_address_val(owner)?,
+                cap: i128_of(data)?,
+            });
+        }
+        (b"upgrade_cancelled", []) => {
+            return Some(LedgerEvent::UpgradeCancelled { wasm_hash: bytes32_of(data)? });
         }
         _ => {}
     }
@@ -1130,6 +1356,59 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
                 current: limits_of(current)?,
             }
         }
+        (b"cap_lowered", [owner]) => {
+            let [cap, ScVal::U32(effective_at)] = fields else { return None };
+            LedgerEvent::CapLowered {
+                owner: chain_address_val(owner)?,
+                cap: i128_of(cap)?,
+                effective_at: *effective_at,
+            }
+        }
+        (b"exit_requested", [owner]) => {
+            let [amount, destination, ScVal::U32(unlock_at)] = fields else { return None };
+            LedgerEvent::ExitRequested {
+                owner: chain_address_val(owner)?,
+                amount: i128_of(amount)?,
+                destination: chain_address_val(destination)?,
+                unlock_at: *unlock_at,
+            }
+        }
+        (b"exit", [owner]) => {
+            let [destination, amount] = fields else { return None };
+            LedgerEvent::Exited {
+                owner: chain_address_val(owner)?,
+                destination: chain_address_val(destination)?,
+                amount: i128_of(amount)?,
+            }
+        }
+        (b"launch", []) => {
+            let [previous, current] = fields else { return None };
+            let limits = |value: &ScVal| -> Option<Option<(i128, i128)>> {
+                match value {
+                    ScVal::Void => Some(None),
+                    ScVal::Map(Some(map)) => {
+                        let field = |name: &[u8]| {
+                            map.iter()
+                                .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+                                .and_then(|f| i128_of(&f.val))
+                        };
+                        Some(Some((field(b"max_balance")?, field(b"max_total")?)))
+                    }
+                    _ => None,
+                }
+            };
+            LedgerEvent::LaunchLimitsChanged {
+                previous: limits(previous)?,
+                current: limits(current)?,
+            }
+        }
+        (b"upgrade_proposed", []) => {
+            let [wasm_hash, ScVal::U32(effective_at)] = fields else { return None };
+            LedgerEvent::UpgradeProposed {
+                wasm_hash: bytes32_of(wasm_hash)?,
+                effective_at: *effective_at,
+            }
+        }
         (b"daily", []) => {
             let [previous, current] = fields else { return None };
             LedgerEvent::DailyLimitsChanged {
@@ -1174,12 +1453,13 @@ pub fn settled_in(meta: &TransactionMeta, contract: &[u8; 32]) -> Vec<SettledEnt
 }
 
 /// The contract's current roles and asset, as `get_config` returns them.
+/// `treasury` is `None` for a vault, which has none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContractConfig {
     pub admin: AccountAddress,
     pub operator: AccountAddress,
     pub seller: AccountAddress,
-    pub treasury: AccountAddress,
+    pub treasury: Option<AccountAddress>,
     pub usdc: [u8; 32],
     pub paused: bool,
 }
@@ -1209,7 +1489,10 @@ pub fn contract_config(value: &ScVal) -> Option<ContractConfig> {
         admin: account(b"admin")?,
         operator: account(b"operator")?,
         seller: account(b"seller")?,
-        treasury: account(b"treasury")?,
+        treasury: match field(b"treasury") {
+            None => None,
+            Some(_) => Some(account(b"treasury")?),
+        },
         usdc,
         paused: *paused,
     })
@@ -1320,6 +1603,86 @@ pub fn account_balance(entry: &LedgerEntryData) -> Option<i128> {
     }
 }
 
+/// A vault account as the contract stores it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultAccount {
+    pub balance: i128,
+    /// The limit last stored; a pending lower limit may already be in force.
+    pub cap: i128,
+    /// A lower limit and the ledger it applies from.
+    pub pending_cap: Option<(i128, u32)>,
+    /// A requested exit: amount, destination and the ledger it unlocks at.
+    pub exit: Option<(i128, ChainAddress, u32)>,
+}
+
+impl VaultAccount {
+    /// The limit in force at ledger `now`.
+    #[must_use]
+    pub fn cap_at(&self, now: u32) -> i128 {
+        match self.pending_cap {
+            Some((cap, effective_at)) if now >= effective_at => cap,
+            _ => self.cap,
+        }
+    }
+}
+
+/// Decodes a vault account entry; `None` if the entry is not one. The layout
+/// is internal to the contract and pinned by the vault's tests.
+#[must_use]
+pub fn vault_account(entry: &LedgerEntryData) -> Option<VaultAccount> {
+    let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
+        entry
+    else {
+        return None;
+    };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    // A `#[contracttype]` enum: a vector holding the variant's name and, for
+    // a tuple variant, its value.
+    let variant = |value: &ScVal| -> Option<Option<ScVal>> {
+        let ScVal::Vec(Some(ScVec(items))) = value else { return None };
+        match items.as_slice() {
+            [ScVal::Symbol(name)] if name.0.as_slice() == b"None" => Some(None),
+            [ScVal::Symbol(_), inner] => Some(Some(inner.clone())),
+            _ => None,
+        }
+    };
+    let map_field = |value: &ScVal, name: &[u8]| -> Option<ScVal> {
+        let ScVal::Map(Some(map)) = value else { return None };
+        map.iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| f.val.clone())
+    };
+    let pending_cap = match variant(field(b"pending_cap")?)? {
+        None => None,
+        Some(inner) => {
+            let ScVal::U32(effective_at) = map_field(&inner, b"effective_at")? else { return None };
+            Some((i128_of(&map_field(&inner, b"cap")?)?, effective_at))
+        }
+    };
+    let exit = match variant(field(b"exit")?)? {
+        None => None,
+        Some(inner) => {
+            let ScVal::U32(unlock_at) = map_field(&inner, b"unlock_at")? else { return None };
+            Some((
+                i128_of(&map_field(&inner, b"amount")?)?,
+                chain_address_val(&map_field(&inner, b"destination")?)?,
+                unlock_at,
+            ))
+        }
+    };
+    Some(VaultAccount {
+        balance: i128_of(field(b"balance")?)?,
+        cap: i128_of(field(b"cap")?)?,
+        pending_cap,
+        exit,
+    })
+}
+
 fn call(contract: [u8; 32], function: &str, args: Vec<ScVal>) -> InvokeContractArgs {
     InvokeContractArgs {
         contract_address: ScAddress::Contract(ContractId(Hash(contract))),
@@ -1362,16 +1725,6 @@ fn vec_val(items: Vec<ScVal>) -> ScVal {
     ScVal::Vec(Some(ScVec(
         VecM::try_from(items).expect("invariant: batches are bounded far below the vector limit"),
     )))
-}
-
-/// The contract's `Charge` tuple struct, which encodes as a vector of fields.
-fn charge_val(charge: &ChargeRequest) -> ScVal {
-    vec_val(vec![
-        account_val(&charge.owner),
-        bytes_val(&charge.charge_id),
-        i128_val(charge.amount),
-        ScVal::U32(charge.last_ledger),
-    ])
 }
 
 /// The contract's `RecurringCharge`, a struct with named fields, which
@@ -1468,6 +1821,44 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// The vault's co-signer authorizes the withdrawal alone, and a vault
+    /// deposit's transfer goes to the vault itself: the trees are exactly
+    /// these, as the gateway compares what it prepared byte for byte.
+    #[test]
+    fn test_vault_trees_are_exactly_the_calls_needed() {
+        let buyer: AccountAddress =
+            "GCSDBXUWF7E5KE3Q3WVXKWP3C5P76VUALA3CWFHPMDFDFMSFPFSJPW4H".parse().unwrap();
+        let vault = PrepaidDeployment { contract: [1; 32], usdc: [2; 32], custody: Custody::Vault };
+        let withdraw = WithdrawIntent {
+            owner: ChainAddress::Account(buyer.clone()),
+            amount: 5,
+            destination: ChainAddress::Account(buyer.clone()),
+            withdrawal_id: [3; 32],
+        };
+        assert_eq!(
+            vault.cosigner_withdraw_authorization(&withdraw),
+            invocation(vault.withdraw_call(&withdraw), vec![])
+        );
+        let deposit = DepositIntent {
+            owner: ChainAddress::Account(buyer.clone()),
+            amount: 5,
+            deposit_id: [4; 32],
+            cap: Some(7),
+        };
+        let vault_address = ScAddress::Contract(ContractId(Hash([1; 32])));
+        assert_eq!(
+            vault.deposit_authorization(&deposit),
+            invocation(
+                vault.deposit_call(&deposit),
+                vec![invocation(usdc_transfer_call([2; 32], &buyer, &vault_address, 5), vec![])],
+            )
+        );
+        assert_eq!(vault.deposit_call(&deposit).args.len(), 4);
+        // A treasury deployment takes no limit and transfers to the treasury.
+        let treasury = PrepaidDeployment { custody: Custody::Treasury(buyer.clone()), ..vault };
+        assert_eq!(treasury.deposit_call(&deposit).args.len(), 3);
     }
 
     #[test]

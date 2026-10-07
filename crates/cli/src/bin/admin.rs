@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use fermah_pay_stellar_chain::prepaid::{PrepaidDeployment, contract_config};
+use fermah_pay_stellar_chain::prepaid::{Custody, PrepaidDeployment, contract_config};
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_domain::{AccountAddress, Network};
 use fermah_pay_stellar_gateway::issuance::{self, LedgerBinding};
@@ -211,7 +211,11 @@ async fn main() -> anyhow::Result<()> {
             rpc.verify_network(bound.network).await.context("checking the RPC network")?;
             let contract = contract_id(&bound.contract)?;
             let usdc = contract_id(&bound.usdc)?;
-            let deployment = PrepaidDeployment { contract, usdc, treasury: bound.treasury.clone() };
+            let deployment = PrepaidDeployment {
+                contract,
+                usdc,
+                custody: Custody::Treasury(bound.treasury.clone()),
+            };
             let value = rpc
                 .read_contract(&bound.treasury, deployment.get_config_call())
                 .await
@@ -221,15 +225,18 @@ async fn main() -> anyhow::Result<()> {
             if config.usdc != usdc {
                 bail!("the contract's USDC is not the bound one");
             }
+            let treasury = config
+                .treasury
+                .context("the contract has no treasury: it is not a prepaid ledger")?;
             let evidence = format!(
                 "get_config of {}: operator {}, treasury {}",
-                bound.contract, config.operator, config.treasury
+                bound.contract, config.operator, treasury
             );
             let changed = issuance::sync_ledger_binding(
                 &pool,
                 deployment_id,
                 &config.operator,
-                &config.treasury,
+                &treasury,
                 &evidence,
             )
             .await?;
@@ -237,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                 "deployment_id": deployment_id.to_string(),
                 "changed": changed,
                 "operator": config.operator.to_string(),
-                "treasury": config.treasury.to_string(),
+                "treasury": treasury.to_string(),
             })
         }
         Command::QuarantinedCharges => {

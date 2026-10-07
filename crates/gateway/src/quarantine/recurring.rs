@@ -4,7 +4,7 @@
 //! it lives, then the contract's `recurring` events.
 
 use fermah_pay_stellar_chain::prepaid::{
-    CHARGE_RECORD_GRACE, PrepaidDeployment, RecurringOutcome, recurring_record,
+    CHARGE_RECORD_GRACE, Custody, PrepaidDeployment, RecurringOutcome, recurring_record,
 };
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_domain::AccountAddress;
@@ -86,7 +86,7 @@ pub async fn quarantined_recurring(
                 deployment: PrepaidDeployment {
                     contract: contract_id(&row.contract_address)?,
                     usdc: contract_id(&row.usdc_address)?,
-                    treasury: address(&row.treasury_address)?,
+                    custody: Custody::Treasury(address(&row.treasury_address)?),
                 },
             })
         })

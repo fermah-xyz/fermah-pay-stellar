@@ -397,6 +397,68 @@ fn describe(record: &ContractEventRecord) -> Described {
                 "outcome": entry.outcome.token(),
             })).collect::<Vec<_>>() }),
         ),
+        LedgerEvent::CapRaised { owner, cap } => (
+            "cap_raised",
+            Some(owner.to_string()),
+            Some(*cap),
+            None,
+            json!({ "owner": owner.to_string(), "cap": cap.to_string() }),
+        ),
+        LedgerEvent::CapLowered { owner, cap, effective_at } => (
+            "cap_lowered",
+            Some(owner.to_string()),
+            Some(*cap),
+            None,
+            json!({ "owner": owner.to_string(), "cap": cap.to_string(),
+                    "effective_at": effective_at }),
+        ),
+        LedgerEvent::ExitRequested { owner, amount, destination, unlock_at } => (
+            "exit_requested",
+            Some(owner.to_string()),
+            Some(*amount),
+            None,
+            json!({ "owner": owner.to_string(), "amount": amount.to_string(),
+                    "destination": destination.to_string(), "unlock_at": unlock_at }),
+        ),
+        LedgerEvent::Exited { owner, destination, amount } => (
+            "exit",
+            Some(owner.to_string()),
+            Some(*amount),
+            None,
+            json!({ "owner": owner.to_string(), "amount": amount.to_string(),
+                    "destination": destination.to_string() }),
+        ),
+        LedgerEvent::LaunchLimitsChanged { previous, current } => {
+            let limits = |l: &Option<(i128, i128)>| {
+                l.map(|(max_balance, max_total)| {
+                    json!({
+                        "max_balance": max_balance.to_string(),
+                        "max_total": max_total.to_string(),
+                    })
+                })
+            };
+            (
+                "launch",
+                None,
+                None,
+                None,
+                json!({ "previous": limits(previous), "current": limits(current) }),
+            )
+        }
+        LedgerEvent::UpgradeProposed { wasm_hash, effective_at } => (
+            "upgrade_proposed",
+            None,
+            None,
+            Some(*wasm_hash),
+            json!({ "wasm_hash": hex_lower(wasm_hash), "effective_at": effective_at }),
+        ),
+        LedgerEvent::UpgradeCancelled { wasm_hash } => (
+            "upgrade_cancelled",
+            None,
+            None,
+            Some(*wasm_hash),
+            json!({ "wasm_hash": hex_lower(wasm_hash) }),
+        ),
     };
     Described { kind, owner, amount, reference, payload, event: Some(event) }
 }
@@ -885,6 +947,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 // Recorded for reconciliation; the gateway keeps no record of
                 // the seller's revenue withdrawals to match them against.
                 Some(LedgerEvent::RevenueWithdrawn { .. }) => {}
+                // Vault events: no prepaid ledger emits them.
+                Some(
+                    LedgerEvent::CapRaised { .. }
+                    | LedgerEvent::CapLowered { .. }
+                    | LedgerEvent::ExitRequested { .. }
+                    | LedgerEvent::Exited { .. }
+                    | LedgerEvent::LaunchLimitsChanged { .. }
+                    | LedgerEvent::UpgradeProposed { .. }
+                    | LedgerEvent::UpgradeCancelled { .. },
+                ) => {}
             }
         }
         tx.commit().await.map_err(store("commit page"))?;

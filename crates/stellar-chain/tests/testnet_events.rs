@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use fermah_pay_stellar_chain::prepaid::{PrepaidDeployment, instance_state};
+use fermah_pay_stellar_chain::prepaid::{Custody, PrepaidDeployment, instance_state};
 use fermah_pay_stellar_chain::rpc::{EventCursor, EventsFrom, RpcClient, RpcError};
 use fermah_pay_stellar_chain::stellar_xdr::LedgerEntryData;
 use fermah_pay_stellar_chain::usdc;
@@ -82,14 +82,17 @@ async fn test_instance_entry_and_treasury_trustline_are_read_at_one_ledger() {
     let probe = PrepaidDeployment {
         contract,
         usdc: usdc_contract,
-        treasury: usdc::circle_issuer(Network::Testnet),
+        custody: Custody::Treasury(usdc::circle_issuer(Network::Testnet)),
     };
     let first = rpc.get_ledger_entries_at(&[probe.instance_key()]).await.unwrap();
     let state = instance_state(&first.entries[0].data).expect("the instance entry decodes");
     assert_eq!(state.config.usdc, usdc_contract);
     assert!(state.totals.liabilities >= 0 && state.totals.revenue >= 0);
 
-    let treasury_key = usdc::trustline_key(&state.config.treasury, &usdc_asset);
+    let treasury_key = usdc::trustline_key(
+        state.config.treasury.as_ref().expect("a prepaid ledger has a treasury"),
+        &usdc_asset,
+    );
     let read = rpc.get_ledger_entries_at(&[probe.instance_key(), treasury_key]).await.unwrap();
     let held = read.entries.iter().find_map(|record| match &record.data {
         LedgerEntryData::Trustline(line) => Some(line.balance),

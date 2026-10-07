@@ -24,8 +24,8 @@ use std::time::Duration;
 use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry_with};
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
-    CHARGE_RECORD_GRACE, ChargeRequest, DepositIntent, MAX_BATCH, Outcome, PrepaidDeployment,
-    batch_outcomes, charge_record, instance_wasm,
+    CHARGE_RECORD_GRACE, ChargeRequest, Custody, DepositIntent, MAX_BATCH, Outcome,
+    PrepaidDeployment, batch_outcomes, charge_record, instance_wasm,
 };
 use fermah_pay_stellar_chain::reserve::spendable_stroops;
 use fermah_pay_stellar_chain::rpc::RpcError;
@@ -159,7 +159,7 @@ fn deployment(
     Ok(PrepaidDeployment {
         contract: contract_id(contract)?,
         usdc: contract_id(usdc)?,
-        treasury: address(treasury)?,
+        custody: Custody::Treasury(address(treasury)?),
     })
 }
 
@@ -190,6 +190,7 @@ fn settled(outcome: Outcome) -> Option<ChargeDecision> {
         Outcome::InsufficientBalance
         | Outcome::AboveLimit
         | Outcome::AboveDailyLimit
+        | Outcome::AboveCap
         | Outcome::Expired => ChargeDecision::Refused(outcome),
         // The gateway charges only buyers a confirmed deposit created.
         Outcome::UnknownAccount => ChargeDecision::Quarantine {
@@ -1219,6 +1220,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             owner: address(&row.wallet_address)?,
             amount: i128::from(row.amount),
             deposit_id: hash32(row.deposit_id)?,
+            cap: None,
         };
         let entry = SorobanAuthorizationEntry::from_xdr_base64(
             &row.signed_authorization_xdr,
@@ -1386,6 +1388,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     amount: i128::from(c.amount),
                     last_ledger: u32::try_from(c.last_ledger)
                         .map_err(|_| WorkerError::Corrupt("charge last ledger out of range"))?,
+                    day: 0,
                 })
             })
             .collect::<Result<Vec<_>, WorkerError>>()?;

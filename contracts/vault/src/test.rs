@@ -12,6 +12,7 @@ use soroban_sdk::{Address, BytesN, Env, String as SorobanString, token, vec};
 
 use super::*;
 
+mod chain;
 mod properties;
 
 const USDC: i128 = 10_000_000;

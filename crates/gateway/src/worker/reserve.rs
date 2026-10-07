@@ -191,7 +191,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 signature: ScVal::Void,
             }),
             root_invocation: deployment
-                .treasury_transfer_authorization(&reserve.cold, i128::from(amount)),
+                .treasury_transfer_authorization(&reserve.cold, i128::from(amount))
+                .ok_or(WorkerError::Corrupt("a sweep needs a treasury"))?,
         };
         let entry = sign_entry_with(&unsigned, network_id(self.network()), treasury.as_ref())
             .await
@@ -200,7 +201,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             })
             .map_err(WorkerError::Signing)?;
         let function = HostFunction::InvokeContract(
-            deployment.treasury_transfer_call(&reserve.cold, i128::from(amount)),
+            deployment
+                .treasury_transfer_call(&reserve.cold, i128::from(amount))
+                .ok_or(WorkerError::Corrupt("a sweep needs a treasury"))?,
         );
         let prepared = match self.engine.prepare(Kind::Sweep, function, vec![entry]).await {
             Ok(prepared) => prepared,

@@ -16,9 +16,9 @@ use std::string::ToString as _;
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, ContractConfig, DepositIntent, PrepaidDeployment, RevenueWithdrawIntent,
-    SettledEntry, WithdrawIntent, account_balance, batch_outcomes, charge_record, contract_config,
-    settled_entries,
+    ChargeRequest, ContractConfig, Custody, DepositIntent, PrepaidDeployment,
+    RevenueWithdrawIntent, SettledEntry, WithdrawIntent, account_balance, batch_outcomes,
+    charge_record, contract_config, settled_entries,
 };
 use fermah_pay_stellar_domain::AccountAddress;
 use soroban_sdk::testutils::Deployer as _;
@@ -230,7 +230,7 @@ impl World {
         PrepaidDeployment {
             contract: contract_bytes(&self.contract),
             usdc: contract_bytes(&self.usdc),
-            treasury: self.treasury.key.address(),
+            custody: Custody::Treasury(self.treasury.key.address()),
         }
     }
 
@@ -329,6 +329,7 @@ impl World {
             charge_id: charge_id(id),
             amount,
             last_ledger,
+            day: 0,
         }
     }
 
@@ -344,7 +345,12 @@ impl World {
     fn deposit_intent(&self, buyer: &Party, n: u8, amount: i128, deposit: u8) -> DepositIntent {
         let registered = self.owners.borrow_mut().entry(n).or_insert(buyer.address.clone()).clone();
         assert_eq!(registered, buyer.address, "test label {n} names another buyer");
-        DepositIntent { owner: buyer.key.address().into(), amount, deposit_id: id32(deposit) }
+        DepositIntent {
+            owner: buyer.key.address().into(),
+            amount,
+            deposit_id: id32(deposit),
+            cap: None,
+        }
     }
 
     fn deposit_args(&self, intent: &DepositIntent, owner: &Address) -> soroban_sdk::Vec<Val> {
@@ -447,7 +453,7 @@ fn test_deposit_signed_for_another_treasury_is_refused() {
     // contract is pinned to, e.g. a signature obtained for another deployment.
     let intent = w.deposit_intent(&buyer, 1, 3 * USDC, 1);
     let mut elsewhere = w.deployment();
-    elsewhere.treasury = attacker.key.address();
+    elsewhere.custody = Custody::Treasury(attacker.key.address());
     let auth = w.signed(&buyer, elsewhere.deposit_authorization(&intent));
     let result: Result<(), _> = w.invoke(DEPOSIT, w.deposit_args(&intent, &buyer.address), &[auth]);
     assert_eq!(result, Err(auth_failure()));
@@ -978,7 +984,7 @@ fn test_withdraw_with_owner_and_treasury_approval_returns_usdc() {
     let intent = w.withdraw_intent(&buyer, 4 * USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     withdraw_with(&w, &intent, &buyer, &buyer, &auths).unwrap();
     assert_eq!(
@@ -1002,7 +1008,7 @@ fn test_withdraw_without_owner_approval_is_refused() {
     let w = world();
     let buyer = funded(&w, 1, 10 * USDC);
     let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
-    let auths = [w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent))];
+    let auths = [w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent))];
     assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), Err(auth_failure()));
     assert_eq!(w.balance(1), 10 * USDC);
 }
@@ -1015,7 +1021,7 @@ fn test_withdraw_to_destination_other_than_signed_is_refused() {
     let signed = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&signed)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&signed)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&signed)),
     ];
     let redirected = w.withdraw_intent(&buyer, USDC, &thief, 1);
     assert_eq!(withdraw_with(&w, &redirected, &buyer, &thief, &auths), Err(auth_failure()));
@@ -1030,7 +1036,7 @@ fn test_withdraw_by_non_owner_is_refused() {
     let intent = w.withdraw_intent(&stranger, USDC, &stranger, 1);
     let auths = [
         w.signed(&stranger, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     // A withdrawal names its owner, whose own account is the only one it can
     // debit; the stranger has none, and the buyer's credit is untouched.
@@ -1047,7 +1053,7 @@ fn test_withdraw_more_than_credit_is_refused() {
     let intent = w.withdraw_intent(&buyer, 2 * USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     assert_eq!(
         withdraw_with(&w, &intent, &buyer, &buyer, &auths),
@@ -1064,7 +1070,7 @@ fn test_withdraw_from_drained_treasury_leaves_credit_intact() {
     let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     assert_eq!(
         withdraw_with(&w, &intent, &buyer, &buyer, &auths),
@@ -1081,7 +1087,7 @@ fn test_duplicate_withdrawal_id_is_refused() {
         let intent = w.withdraw_intent(&buyer, USDC, &buyer, id);
         let auths = [
             w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-            w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+            w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
         ];
         withdraw_with(&w, &intent, &buyer, &buyer, &auths)
     };
@@ -1303,7 +1309,7 @@ fn test_pause_stops_every_money_movement_until_unpaused() {
     let intent = w.withdraw_intent(&buyer, USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     assert_eq!(withdraw_with(&w, &intent, &buyer, &buyer, &auths), paused);
     assert_eq!(withdraw_revenue(&w, 1, 1), paused);
@@ -1395,7 +1401,8 @@ fn test_treasury_rotation_sends_new_deposits_to_the_new_treasury() {
     // so the buyer's authorization no longer matches and nothing moves.
     assert_eq!(w.deposit(&buyer, 1, USDC, 1), Err(auth_failure()));
 
-    let rotated = PrepaidDeployment { treasury: successor.key.address(), ..w.deployment() };
+    let rotated =
+        PrepaidDeployment { custody: Custody::Treasury(successor.key.address()), ..w.deployment() };
     let intent = w.deposit_intent(&buyer, 1, USDC, 2);
     let auth = w.signed(&buyer, rotated.deposit_authorization(&intent));
     w.invoke::<()>("deposit", w.deposit_args(&intent, &buyer.address), &[auth]).unwrap();
@@ -1424,7 +1431,7 @@ fn test_seller_rotation_moves_revenue_withdrawal() {
     };
     let auths = [
         w.signed(&successor, w.deployment().seller_revenue_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent).unwrap()),
     ];
     let args: soroban_sdk::Vec<Val> =
         (successor.address.clone(), USDC, BytesN::from_array(&w.env, &id32(2))).into_val(&w.env);
@@ -1492,7 +1499,7 @@ fn test_buyer_withdraws_after_every_entry_has_expired() {
     let intent = w.withdraw_intent(&buyer, 4 * USDC, &buyer, 1);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     withdraw_with(&w, &intent, &buyer, &buyer, &auths).unwrap();
     assert_eq!(
@@ -1512,7 +1519,7 @@ fn test_buyer_withdraws_after_every_entry_has_expired() {
             &buyer,
             &[
                 w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-                w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+                w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
             ]
         ),
         Err(contract_error(Error::WithdrawalAlreadyProcessed))
@@ -1685,7 +1692,7 @@ fn withdraw_revenue(w: &World, amount: i128, id: u8) -> Result<(), soroban_sdk::
     };
     let auths = [
         w.signed(&w.seller, w.deployment().seller_revenue_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent).unwrap()),
     ];
     let args: soroban_sdk::Vec<Val> =
         (w.seller.address.clone(), amount, BytesN::from_array(&w.env, &id32(id))).into_val(&w.env);
@@ -1836,7 +1843,8 @@ fn test_revenue_withdrawal_without_seller_approval_is_refused() {
         amount: USDC,
         withdrawal_id: id32(1),
     };
-    let auths = [w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent))];
+    let auths =
+        [w.signed(&w.treasury, w.deployment().treasury_revenue_authorization(&intent).unwrap())];
     let args: soroban_sdk::Vec<Val> =
         (w.seller.address.clone(), USDC, BytesN::from_array(&w.env, &id32(1))).into_val(&w.env);
     let result: Result<(), _> = w.invoke("withdraw_revenue", args, &auths);
@@ -1994,7 +2002,7 @@ fn test_gateway_reads_the_roles_from_get_config() {
             admin: w.admin.key.address(),
             operator: w.operator.key.address(),
             seller: w.seller.key.address(),
-            treasury: w.treasury.key.address(),
+            treasury: Some(w.treasury.key.address()),
             usdc: contract_bytes(&w.usdc),
             paused: false,
         })
@@ -2107,7 +2115,7 @@ fn test_observer_decodes_every_event_the_contract_publishes() {
     let intent = w.withdraw_intent(&buyer, USDC / 2, &destination, 8);
     let auths = [
         w.signed(&buyer, w.deployment().owner_withdraw_authorization(&intent)),
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
     ];
     withdraw_with(&w, &intent, &buyer, &destination, &auths).unwrap();
     assert_eq!(
@@ -2213,7 +2221,7 @@ fn test_observer_reads_config_and_totals_from_the_instance_entry() {
                 admin: w.admin.key.address(),
                 operator: w.operator.key.address(),
                 seller: w.seller.key.address(),
-                treasury: w.treasury.key.address(),
+                treasury: Some(w.treasury.key.address()),
                 usdc: contract_bytes(&w.usdc),
                 paused: false,
             },
@@ -2321,7 +2329,8 @@ impl World {
 fn test_a_contract_account_deposits_is_charged_and_withdraws_to_itself() {
     let w = world();
     let buyer = w.contract_buyer(3 * USDC);
-    let deposit = DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1) };
+    let deposit =
+        DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1), cap: None };
     let auth =
         w.signed_for_contract(&buyer, &buyer.key, w.deployment().deposit_authorization(&deposit));
     w.invoke::<()>(DEPOSIT, w.deposit_args(&deposit, &buyer.address), &[auth]).unwrap();
@@ -2340,6 +2349,7 @@ fn test_a_contract_account_deposits_is_charged_and_withdraws_to_itself() {
         charge_id: charge_id(1),
         amount: USDC / 2,
         last_ledger: w.env.ledger().sequence() + 1_000,
+        day: 0,
     };
     assert_eq!(w.charge_batch(&[charge]).unwrap(), soroban_sdk::vec![&w.env, Outcome::Charged]);
 
@@ -2357,7 +2367,7 @@ fn test_a_contract_account_deposits_is_charged_and_withdraws_to_itself() {
         w.deployment().owner_withdraw_authorization(&withdrawal),
     );
     let treasury_auth =
-        w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&withdrawal));
+        w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&withdrawal));
     w.invoke::<()>(
         "withdraw",
         w.withdraw_args(&withdrawal, &buyer.address, &buyer.address),
@@ -2378,7 +2388,8 @@ fn test_a_contract_account_deposits_is_charged_and_withdraws_to_itself() {
 fn test_a_contract_account_deposit_signed_by_another_key_is_refused() {
     let w = world();
     let buyer = w.contract_buyer(3 * USDC);
-    let deposit = DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1) };
+    let deposit =
+        DepositIntent { owner: buyer.owner(), amount: 2 * USDC, deposit_id: id32(1), cap: None };
     // The positive control above differs only in the key that signs.
     let stranger = SecretKey::generate().unwrap();
     let auth =
