@@ -41,9 +41,10 @@ testnet:
 stellar_cli := "stellar"
 contract_out := "target/contract-wasm"
 
-# Build the prepaid ledger Wasm with the stellar CLI (required by soroban-sdk).
+# Build the prepaid ledger and vault Wasm with the stellar CLI (required by soroban-sdk).
 contract-build:
     {{stellar_cli}} contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir {{contract_out}}
+    {{stellar_cli}} contract build --package fermah-pay-stellar-vault --profile contract --locked --out-dir {{contract_out}}
 
 # Build the example contract account's Wasm, a stand-in smart wallet.
 example-account-build:
@@ -53,6 +54,7 @@ example-account-build:
 # network's per-transaction limits, using the built Wasm.
 contract-resources: contract-build
     PREPAID_WASM={{justfile_directory()}}/{{contract_out}}/fermah_pay_stellar_prepaid.wasm cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture
+    VAULT_WASM={{justfile_directory()}}/{{contract_out}}/fermah_pay_stellar_vault.wasm cargo test -p fermah-pay-stellar-vault --locked full_ -- --ignored --nocapture
 
 # The whole system on this machine against testnet: PostgreSQL, gateway,
 # worker and observer (see docs/quickstart/dev-stack.md). Needs

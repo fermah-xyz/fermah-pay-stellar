@@ -129,10 +129,16 @@ jobs:
           set -euo pipefail
           stellar contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir target/contract-wasm
           echo "prepaid Wasm sha256: $(sha256sum target/contract-wasm/fermah_pay_stellar_prepaid.wasm | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          stellar contract build --package fermah-pay-stellar-vault --profile contract --locked --out-dir target/contract-wasm
+          echo "vault Wasm sha256: $(sha256sum target/contract-wasm/fermah_pay_stellar_vault.wasm | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Full batch fits one transaction
         env:
           PREPAID_WASM: ${{ github.workspace }}/target/contract-wasm/fermah_pay_stellar_prepaid.wasm
-        run: cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture
+          VAULT_WASM: ${{ github.workspace }}/target/contract-wasm/fermah_pay_stellar_vault.wasm
+        run: |
+          set -euo pipefail
+          cargo test -p fermah-pay-stellar-prepaid --locked full_ -- --ignored --nocapture
+          cargo test -p fermah-pay-stellar-vault --locked full_ -- --ignored --nocapture
 
   test:
     name: Test
