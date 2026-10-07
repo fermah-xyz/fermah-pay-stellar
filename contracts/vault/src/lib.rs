@@ -21,7 +21,10 @@
 //!
 //! For the seller: every prepaid charge admitted before a buyer acts alone
 //! can still settle. A charge names the last ledger in which it may settle,
-//! at most `MAX_CHARGE_WINDOW` ahead. What a buyer does alone that reduces
+//! at most `MAX_CHARGE_WINDOW` ahead, and the UTC day it was admitted in,
+//! whose share of the buyer's limit it counts against whenever it settles,
+//! so a charge admitted within the limit is not refused for settling after
+//! midnight. What a buyer does alone that reduces
 //! what can be charged, lowering the limit or exiting, takes effect only
 //! `NOTICE_LEDGERS` later, which is longer than that window: by then every
 //! charge admitted before it has settled or expired. Raising the limit and
@@ -131,6 +134,10 @@ pub enum Error {
     NoUpgrade = 127,
     /// `upgrade` before the proposal's delay has passed.
     UpgradeLocked = 128,
+    /// A charge names a day after today.
+    InvalidDay = 129,
+    /// `exit` when nothing is left to pay; the request stays.
+    NothingToExit = 130,
 }
 
 #[contracttype]
@@ -214,10 +221,14 @@ pub struct Account {
     /// The most the buyer lets the seller charge per UTC day of ledger time.
     /// Zero until the buyer signs one: such an account cannot be charged.
     pub cap: i128,
-    /// UTC day (ledger time / 86400) `charged` counts.
+    /// The latest UTC day (ledger time / 86400) charges were counted for,
+    /// and what they came to.
     pub day: u64,
-    /// Charged from this account on `day`.
     pub charged: i128,
+    /// The day before `day` that charges were counted for, if any, and what
+    /// they came to: a charge admitted late in a day may settle the next.
+    pub prev_day: u64,
+    pub prev_charged: i128,
     pub pending_cap: CapChange,
     pub exit: Exit,
 }
@@ -245,10 +256,12 @@ pub struct PendingUpgrade {
 }
 
 /// One charge: the account owner, the seller's identifier for the charge,
-/// the amount, and the last ledger in which it may be settled.
+/// the amount, the last ledger in which it may be settled, and the UTC day
+/// of ledger time it was admitted in, which its amount counts against
+/// whenever it settles. Only today or yesterday may be named.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Charge(pub Address, pub BytesN<32>, pub i128, pub u32);
+pub struct Charge(pub Address, pub BytesN<32>, pub i128, pub u32, pub u64);
 
 /// Outcome of one charge. Every outcome but `Duplicate` and `Expired`
 /// records the charge's identifier with that outcome.
@@ -544,6 +557,8 @@ impl PrepaidVault {
             cap: 0,
             day: 0,
             charged: 0,
+            prev_day: 0,
+            prev_charged: 0,
             pending_cap: CapChange::None,
             exit: Exit::None,
         });
@@ -559,7 +574,7 @@ impl PrepaidVault {
             change_cap(&env, &owner, &mut account, cap);
         }
 
-        put_persistent(&env, &account_key, &account);
+        store_account(&env, &account_key, account);
         put_persistent(&env, &deposit_key, &());
         env.storage().instance().set(&Key::Totals, &totals);
         extend_instance(&env);
@@ -582,7 +597,7 @@ impl PrepaidVault {
         let mut account = load_account(&env, &key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::UnknownAccount));
         change_cap(&env, &owner, &mut account, cap);
-        put_persistent(&env, &key, &account);
+        store_account(&env, &key, account);
         extend_instance(&env);
     }
 
@@ -648,11 +663,15 @@ impl PrepaidVault {
     ) {
         owner.require_auth();
         let config = config(&env);
-        config.operator.require_auth();
+        // One address authorizes a frame once: an owner that is also the
+        // operator has already authorized this call.
+        if owner != config.operator {
+            config.operator.require_auth();
+        }
         if amount <= 0 || amount > MAX_TRANSFER {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        require_payable(&env, &destination);
+        require_payable(&env, &config, &destination);
         let withdrawal_key = Key::Withdrawal(owner.clone(), withdrawal_id.clone());
         if env.storage().persistent().has(&withdrawal_key) {
             panic_with_error!(&env, Error::WithdrawalAlreadyProcessed);
@@ -667,7 +686,7 @@ impl PrepaidVault {
         let mut totals = totals(&env);
         totals.liabilities -= amount;
 
-        put_persistent(&env, &account_key, &account);
+        store_account(&env, &account_key, account);
         put_persistent(&env, &withdrawal_key, &());
         env.storage().instance().set(&Key::Totals, &totals);
         extend_instance(&env);
@@ -682,21 +701,27 @@ impl PrepaidVault {
 
     /// Records `owner`'s request to take `amount` to `destination` without
     /// the operator, payable `NOTICE_LEDGERS` from now. A new request
-    /// replaces the previous one and restarts the notice. Allowed while
-    /// paused. Only the owner can create or replace a request.
+    /// replaces the previous one: one for no more than the pending amount
+    /// keeps its unlock ledger, which lets a buyer change the destination,
+    /// for instance after the first one stopped accepting USDC; a larger one
+    /// restarts the notice. Allowed while paused. Only the owner can create
+    /// or replace a request.
     pub fn request_exit(env: Env, owner: Address, amount: i128, destination: Address) {
         owner.require_auth();
         if amount <= 0 || amount > MAX_TRANSFER {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        require_payable(&env, &destination);
+        require_payable(&env, &config(&env), &destination);
         let key = Key::Account(owner.clone());
         let mut account = load_account(&env, &key)
             .unwrap_or_else(|| panic_with_error!(&env, Error::UnknownAccount));
-        let unlock_at = checked_ledger(&env, NOTICE_LEDGERS);
+        let unlock_at = match &account.exit {
+            Exit::Requested(pending) if amount <= pending.amount => pending.unlock_at,
+            _ => checked_ledger(&env, NOTICE_LEDGERS),
+        };
         account.exit =
             Exit::Requested(ExitRequest { amount, destination: destination.clone(), unlock_at });
-        put_persistent(&env, &key, &account);
+        store_account(&env, &key, account);
         extend_instance(&env);
         ExitRequested { owner, amount, destination, unlock_at }.publish(&env);
     }
@@ -718,19 +743,20 @@ impl PrepaidVault {
             panic_with_error!(&env, Error::ExitLocked);
         }
         let amount = request.amount.min(account.balance);
+        if amount == 0 {
+            panic_with_error!(&env, Error::NothingToExit);
+        }
         account.balance -= amount;
         let mut totals = totals(&env);
         totals.liabilities -= amount;
-        put_persistent(&env, &key, &account);
+        store_account(&env, &key, account);
         env.storage().instance().set(&Key::Totals, &totals);
         extend_instance(&env);
-        if amount > 0 {
-            token::Client::new(&env, &config.usdc).transfer(
-                &env.current_contract_address(),
-                &request.destination,
-                &amount,
-            );
-        }
+        token::Client::new(&env, &config.usdc).transfer(
+            &env.current_contract_address(),
+            &request.destination,
+            &amount,
+        );
         Exited { owner, destination: request.destination, amount }.publish(&env);
     }
 
@@ -747,7 +773,7 @@ impl PrepaidVault {
         if amount <= 0 || amount > MAX_TRANSFER {
             panic_with_error!(&env, Error::InvalidAmount);
         }
-        require_payable(&env, &destination);
+        require_payable(&env, &config, &destination);
         let withdrawal_key = Key::RevenueWithdrawal(withdrawal_id.clone());
         if env.storage().persistent().has(&withdrawal_key) {
             panic_with_error!(&env, Error::WithdrawalAlreadyProcessed);
@@ -1034,6 +1060,33 @@ impl PrepaidVault {
     }
 }
 
+/// What the account was charged for `day`.
+fn charged_on(account: &Account, day: u64) -> i128 {
+    if account.day == day {
+        account.charged
+    } else if account.prev_day == day {
+        account.prev_charged
+    } else {
+        0
+    }
+}
+
+/// Records `charged` as the account's total for `day`, keeping the two
+/// latest days counted.
+fn count_charge(account: &mut Account, day: u64, charged: i128) {
+    if account.day == day {
+        account.charged = charged;
+    } else if day > account.day {
+        account.prev_day = account.day;
+        account.prev_charged = account.charged;
+        account.day = day;
+        account.charged = charged;
+    } else {
+        account.prev_day = day;
+        account.prev_charged = charged;
+    }
+}
+
 /// The limit in force at ledger `now`: the pending lower limit once its
 /// notice has passed, the current one before.
 fn cap_in_force(account: &Account, now: u32) -> i128 {
@@ -1050,16 +1103,29 @@ fn change_cap(env: &Env, owner: &Address, account: &mut Account, cap: i128) {
         panic_with_error!(env, Error::InvalidCap);
     }
     let now = env.ledger().sequence();
-    account.cap = cap_in_force(account, now);
-    account.pending_cap = CapChange::None;
+    let pending = match core::mem::replace(&mut account.pending_cap, CapChange::None) {
+        CapChange::Pending(pending) if now >= pending.effective_at => {
+            account.cap = pending.cap;
+            None
+        }
+        CapChange::Pending(pending) => Some(pending),
+        CapChange::None => None,
+    };
     if cap >= account.cap {
         account.cap = cap;
         CapRaised { owner: owner.clone(), cap }.publish(env);
-    } else {
-        let effective_at = checked_ledger(env, NOTICE_LEDGERS);
-        account.pending_cap = CapChange::Pending(PendingCap { cap, effective_at });
-        CapLowered { owner: owner.clone(), cap, effective_at }.publish(env);
+        return;
     }
+    // A lower limit no lower than one already pending keeps that one's
+    // effective ledger: it never takes effect sooner, so charges admitted
+    // under the limit in force still settle. Anything lower waits a full
+    // notice from now.
+    let effective_at = match pending {
+        Some(pending) if cap >= pending.cap => pending.effective_at,
+        _ => checked_ledger(env, NOTICE_LEDGERS),
+    };
+    account.pending_cap = CapChange::Pending(PendingCap { cap, effective_at });
+    CapLowered { owner: owner.clone(), cap, effective_at }.publish(env);
 }
 
 fn settle(
@@ -1069,9 +1135,12 @@ fn settle(
     day: &mut Charging,
     charge: Charge,
 ) -> Settled {
-    let Charge(owner, charge_id, amount, last_ledger) = charge;
+    let Charge(owner, charge_id, amount, last_ledger, admitted_on) = charge;
     if amount <= 0 {
         panic_with_error!(env, Error::InvalidAmount);
+    }
+    if admitted_on > day.today {
+        panic_with_error!(env, Error::InvalidDay);
     }
     let now = env.ledger().sequence();
     if last_ledger > now.saturating_add(MAX_CHARGE_WINDOW) {
@@ -1081,7 +1150,10 @@ fn settle(
     if env.storage().temporary().has(&record) {
         return Settled(owner, charge_id, amount, Outcome::Duplicate);
     }
-    if last_ledger < now {
+    // A charge counts against the day it was admitted in, so one admitted
+    // within the limit late in a day still fits when it settles the next.
+    // Older days are not kept: such a charge is refused like a late one.
+    if last_ledger < now || admitted_on + 1 < day.today {
         return Settled(owner, charge_id, amount, Outcome::Expired);
     }
     let key = Key::Account(owner.clone());
@@ -1090,20 +1162,19 @@ fn settle(
         Some(_) if amount > config.limits.max_charge => Outcome::AboveLimit,
         Some(account) if amount > account.balance => Outcome::InsufficientBalance,
         Some(mut account) => {
-            let buyer_today = if account.day == day.today { account.charged } else { 0 };
-            let charged = checked_add(env, buyer_today, amount);
+            let counted = charged_on(&account, admitted_on);
+            let charged = checked_add(env, counted, amount);
             if charged > cap_in_force(&account, now) {
                 Outcome::AboveCap
-            } else if day.exceeds(env, buyer_today, amount) {
+            } else if day.exceeds(env, counted, amount) {
                 Outcome::AboveDailyLimit
             } else {
                 account.balance -= amount;
-                account.day = day.today;
-                account.charged = charged;
+                count_charge(&mut account, admitted_on, charged);
                 day.seller.charged = checked_add(env, day.seller.charged, amount);
                 totals.liabilities -= amount;
                 totals.revenue = checked_add(env, totals.revenue, amount);
-                put_persistent(env, &key, &account);
+                store_account(env, &key, account);
                 Outcome::Charged
             }
         }
@@ -1281,11 +1352,24 @@ fn require_distinct_roles(env: &Env, config: &Config) {
 }
 
 /// A payout to this contract would leave the USDC where it is while the
-/// ledger counted it as paid.
-fn require_payable(env: &Env, destination: &Address) {
-    if *destination == env.current_contract_address() {
+/// ledger counted it as paid; one to the USDC contract would lose it.
+fn require_payable(env: &Env, config: &Config, destination: &Address) {
+    if *destination == env.current_contract_address() || *destination == config.usdc {
         panic_with_error!(env, Error::InvalidDestination);
     }
+}
+
+/// Stores an account with any pending lower limit that has taken effect
+/// folded into `cap`, so the stored `cap` is the limit in force.
+fn store_account(env: &Env, key: &Key, mut account: Account) {
+    let now = env.ledger().sequence();
+    if let CapChange::Pending(pending) = &account.pending_cap
+        && now >= pending.effective_at
+    {
+        account.cap = pending.cap;
+        account.pending_cap = CapChange::None;
+    }
+    put_persistent(env, key, &account);
 }
 
 fn checked_ledger(env: &Env, delay: u32) -> u32 {

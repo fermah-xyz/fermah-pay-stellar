@@ -8,7 +8,7 @@ use std::vec::Vec as StdVec;
 
 use soroban_sdk::testutils::storage::{Persistent as _, Temporary as _};
 use soroban_sdk::testutils::{Address as _, Deployer as _, Ledger as _};
-use soroban_sdk::{Address, BytesN, Env, token, vec};
+use soroban_sdk::{Address, BytesN, Env, String as SorobanString, token, vec};
 
 use super::*;
 
@@ -98,9 +98,13 @@ impl World {
         self.env.ledger().set_timestamp(now + 86_400);
     }
 
-    /// A charge settleable until `last_ledger`.
+    /// A charge admitted today, settleable until `last_ledger`.
     fn charge_until(&self, owner: &Address, n: u8, amount: i128, last_ledger: u32) -> Charge {
-        Charge(owner.clone(), self.id(n), amount, last_ledger)
+        Charge(owner.clone(), self.id(n), amount, last_ledger, self.today())
+    }
+
+    fn today(&self) -> u64 {
+        self.env.ledger().timestamp() / 86_400
     }
 
     /// A charge with the longest window, as if admitted now.
@@ -337,8 +341,10 @@ fn test_an_exit_waits_out_every_charge_admitted_before_it() {
     assert_eq!(refusal(w.client().try_exit(&buyer)), Error::ExitLocked);
     assert_eq!(w.settle(&[admitted]), [Outcome::Charged]);
     w.env.ledger().set_sequence_number(unlock_at);
-    w.client().exit(&buyer);
-    assert_eq!(w.token().balance(&buyer), 0);
+    // The charge took everything: nothing is left to pay, and the request
+    // stays for a later deposit.
+    assert_eq!(refusal(w.client().try_exit(&buyer)), Error::NothingToExit);
+    assert_eq!(exit_unlock(&w, &buyer), unlock_at);
     assert_eq!(w.client().get_totals(), Totals { liabilities: 0, revenue: 10 * USDC });
     w.assert_solvent();
 }
@@ -613,6 +619,7 @@ fn test_full_batch_of_distinct_buyers_fits_one_transaction() {
             BytesN::from_array(&w.env, &[(i % 256) as u8; 32]),
             USDC / 10,
             w.now() + MAX_CHARGE_WINDOW,
+            w.today(),
         ));
     }
     let outcomes = w.settle(&charges);
@@ -638,4 +645,186 @@ fn test_full_batch_of_distinct_buyers_fits_one_transaction() {
     assert!(r.disk_read_entries <= 200, "disk reads {}", r.disk_read_entries);
     assert!(r.memory_read_entries + r.disk_read_entries <= 400, "footprint");
     assert!(r.contract_events_size_bytes <= 16_384, "event bytes {}", r.contract_events_size_bytes);
+}
+
+// ---- review findings and coverage --------------------------------------------------
+
+/// A charge counts against the day it was admitted in: one admitted within
+/// the limit late in a day still settles after midnight, next to the new
+/// day's charges.
+#[test]
+fn test_a_charge_admitted_before_midnight_counts_against_its_own_day() {
+    let w = world();
+    let buyer = w.funded(30 * USDC, 10 * USDC);
+    let late = w.charge(&buyer, 1, 10 * USDC);
+    w.next_day();
+    let early = w.charge(&buyer, 2, 10 * USDC);
+    assert_eq!(w.settle(&[early, late]), [Outcome::Charged, Outcome::Charged]);
+    assert_eq!(w.settle(&[w.charge(&buyer, 3, 1)]), [Outcome::AboveCap]);
+    assert_eq!(w.client().get_balance(&buyer), 10 * USDC);
+}
+
+#[test]
+fn test_a_charge_may_name_only_today_or_yesterday() {
+    let w = world();
+    let buyer = w.funded(30 * USDC, 10 * USDC);
+    let old = w.charge(&buyer, 1, USDC);
+    w.next_day();
+    w.next_day();
+    assert_eq!(w.settle(&[old]), [Outcome::Expired]);
+    let ahead = Charge(buyer.clone(), w.id(2), USDC, w.now() + 10, w.today() + 1);
+    let batch = soroban_sdk::vec![&w.env, ahead];
+    assert_eq!(refusal(w.client().try_charge_batch(&batch)), Error::InvalidDay);
+}
+
+/// A destination that stops accepting USDC is replaced without losing the
+/// notice already served: a request for no more keeps its unlock ledger.
+#[test]
+fn test_an_exit_can_be_redirected_without_restarting_the_notice() {
+    let w = world();
+    let buyer = w.funded(10 * USDC, USDC);
+    // A classic account with no USDC trustline cannot receive.
+    let unpayable = Address::from_string(&SorobanString::from_str(
+        &w.env,
+        "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7",
+    ));
+    w.client().request_exit(&buyer, &(5 * USDC), &unpayable);
+    let unlock_at = exit_unlock(&w, &buyer);
+    w.env.ledger().set_sequence_number(unlock_at);
+    assert!(w.client().try_exit(&buyer).is_err());
+    let wallet = Address::generate(&w.env);
+    w.client().request_exit(&buyer, &(5 * USDC), &wallet);
+    assert_eq!(exit_unlock(&w, &buyer), unlock_at);
+    w.client().exit(&buyer);
+    assert_eq!(w.token().balance(&wallet), 5 * USDC);
+    // Asking for more restarts it.
+    w.client().request_exit(&buyer, &USDC, &wallet);
+    let first = exit_unlock(&w, &buyer);
+    w.advance(10);
+    w.client().request_exit(&buyer, &(2 * USDC), &wallet);
+    assert_eq!(exit_unlock(&w, &buyer), first + 10);
+}
+
+#[test]
+fn test_repeating_a_pending_lower_limit_keeps_its_effective_ledger() {
+    let w = world();
+    let buyer = w.funded(10 * USDC, 10 * USDC);
+    let lowered_at = w.now();
+    w.client().set_cap(&buyer, &0);
+    w.advance(NOTICE_LEDGERS - 10);
+    token::StellarAssetClient::new(&w.env, &w.usdc).mint(&buyer, &USDC);
+    w.client().deposit(&buyer, &USDC, &w.id(2), &Some(0));
+    w.env.ledger().set_sequence_number(lowered_at + NOTICE_LEDGERS);
+    assert_eq!(w.client().get_cap(&buyer), 0);
+    // A stored account carries the limit in force once it applies.
+    w.client().set_cap(&buyer, &0);
+    assert_eq!(w.client().get_account(&buyer).unwrap().cap, 0);
+}
+
+#[test]
+fn test_an_operator_that_is_also_a_buyer_withdraws_with_one_signature() {
+    let w = world();
+    token::StellarAssetClient::new(&w.env, &w.usdc).mint(&w.operator, &(10 * USDC));
+    w.client().deposit(&w.operator, &(10 * USDC), &w.id(1), &None);
+    w.client().withdraw(&w.operator, &(4 * USDC), &w.operator, &w.id(1));
+    assert_eq!(w.signers(), core::slice::from_ref(&w.operator));
+    assert_eq!(w.token().balance(&w.operator), 4 * USDC);
+}
+
+#[test]
+fn test_a_payout_to_the_usdc_contract_is_refused() {
+    let w = world();
+    let buyer = w.funded(10 * USDC, USDC);
+    assert_eq!(
+        refusal(w.client().try_withdraw(&buyer, &USDC, &w.usdc, &w.id(1))),
+        Error::InvalidDestination
+    );
+    assert_eq!(
+        refusal(w.client().try_request_exit(&buyer, &USDC, &w.usdc)),
+        Error::InvalidDestination
+    );
+    assert_eq!(
+        refusal(w.client().try_withdraw_revenue(&w.usdc, &USDC, &w.id(1))),
+        Error::InvalidDestination
+    );
+}
+
+#[test]
+fn test_a_mandate_is_revoked_while_paused() {
+    let w = world();
+    let buyer = w.buyer(10 * USDC);
+    let live_until = w.now() + 100_000;
+    w.client().authorize_recurring(&buyer, &w.id(1), &USDC, &86_400, &3, &live_until);
+    assert_eq!(w.token().allowance(&buyer, &w.vault), 3 * USDC);
+    w.client().pause();
+    w.client().revoke_recurring(&buyer);
+    assert_eq!(w.token().allowance(&buyer, &w.vault), 0);
+    assert_eq!(w.client().get_mandate(&buyer), None);
+}
+
+#[test]
+fn test_a_recurring_charge_before_its_period_is_not_due() {
+    let w = world();
+    let buyer = w.buyer(10 * USDC);
+    let live_until = w.now() + 100_000;
+    w.client().authorize_recurring(&buyer, &w.id(1), &USDC, &86_400, &3, &live_until);
+    let charge = |cycle: u32, n: u8| RecurringCharge {
+        owner: buyer.clone(),
+        charge_id: w.id(n),
+        mandate_id: w.id(1),
+        cycle,
+        amount: USDC,
+        last_ledger: w.now() + 100,
+    };
+    assert_eq!(
+        w.client().charge_recurring_batch(&vec![&w.env, charge(1, 1)]),
+        vec![&w.env, RecurringOutcome::NotDue]
+    );
+    assert_eq!(
+        w.client().charge_recurring_batch(&vec![&w.env, charge(0, 2)]),
+        vec![&w.env, RecurringOutcome::Charged]
+    );
+    assert_eq!(
+        w.client().charge_recurring_batch(&vec![&w.env, charge(0, 3)]),
+        vec![&w.env, RecurringOutcome::AlreadyCharged]
+    );
+}
+
+#[test]
+fn test_the_admin_role_moves_with_the_admin_and_the_new_holder() {
+    let w = world();
+    let successor = Address::generate(&w.env);
+    w.client().set_admin(&successor);
+    assert_eq!(w.signers(), [w.admin.clone(), successor.clone()]);
+    assert_eq!(w.client().get_config().admin, successor);
+}
+
+#[test]
+fn test_malformed_batches_are_refused_whole() {
+    let w = world();
+    let buyer = w.funded(10 * USDC, 10 * USDC);
+    let empty = soroban_sdk::Vec::<Charge>::new(&w.env);
+    assert_eq!(refusal(w.client().try_charge_batch(&empty)), Error::EmptyBatch);
+    let mut big = soroban_sdk::Vec::new(&w.env);
+    for i in 0..=MAX_BATCH {
+        big.push_back(w.charge(&buyer, (i % 256) as u8, 1));
+    }
+    assert_eq!(refusal(w.client().try_charge_batch(&big)), Error::BatchTooLarge);
+    let far = w.charge_until(&buyer, 1, 1, w.now() + MAX_CHARGE_WINDOW + 1);
+    assert_eq!(
+        refusal(w.client().try_charge_batch(&vec![&w.env, far])),
+        Error::ChargeWindowTooLong
+    );
+}
+
+#[test]
+fn test_admin_limits_still_bound_each_charge_and_day() {
+    let w = world();
+    let buyer = w.funded(300 * USDC, 300 * USDC);
+    assert_eq!(w.settle(&[w.charge(&buyer, 1, MAX_CHARGE + 1)]), [Outcome::AboveLimit]);
+    w.client().set_daily_limits(&DailyLimits { per_buyer: 5 * USDC, per_seller: 100 * USDC });
+    assert_eq!(
+        w.settle(&[w.charge(&buyer, 2, 5 * USDC), w.charge(&buyer, 3, 1)]),
+        [Outcome::Charged, Outcome::AboveDailyLimit]
+    );
 }

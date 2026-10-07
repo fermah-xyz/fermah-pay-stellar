@@ -70,14 +70,30 @@ buyer signs one, with `set_cap(owner, cap)` or with the first deposit
 
 - A limit at least the one in force applies at once and drops any pending
   lower limit.
-- A lower limit applies `NOTICE_LEDGERS` later; a second lower limit
-  replaces the first and restarts the notice.
-- A charge above what the limit leaves for the day is refused as
+- A lower limit applies `NOTICE_LEDGERS` later. Another lower limit replaces
+  it: one no lower than the pending one keeps its effective ledger (it can
+  only help the seller), anything lower waits a full notice from then.
+- Each charge names the UTC day it was admitted in, today or yesterday, and
+  counts against that day's share of the limit whenever it settles, so a
+  charge admitted within the limit late in a day still settles after
+  midnight. A charge naming an older day is refused as `Expired`; one naming
+  a later day reverts its batch (`InvalidDay`).
+- A charge above what the limit leaves for its day is refused as
   `AboveCap`.
 
-Because the limit is per UTC day, a compromised operator key can take up to
-the limit just before midnight and again just after: up to twice the limit
-in 24 hours, from each buyer.
+`get_cap` returns the limit in force; the stored `cap` folds in a pending
+lower limit only when the account is next written.
+
+Because each day has its own share, a compromised operator key can take up
+to the limit for yesterday and again for today: up to twice the limit in 24
+hours, from each buyer.
+
+A charge's refusals are checked in this order: a malformed batch reverts
+whole (empty, too large, a non-positive amount, a later day, a last ledger
+beyond the window); then `Duplicate` (identifier already recorded),
+`Expired` (past its last ledger, or naming a day before yesterday),
+`UnknownAccount`, `AboveLimit` (above `max_charge`), `InsufficientBalance`,
+`AboveCap`, `AboveDailyLimit`.
 
 ## Leaving
 
@@ -89,8 +105,17 @@ in 24 hours, from each buyer.
   the buyer alone requests it; from `NOTICE_LEDGERS` later anyone may send
   `exit`, which pays the requested amount, or the whole balance if less is
   left, to the destination the buyer signed. A buyer holding no XLM can have
-  any wallet or relayer send it. A new request replaces the previous one and
-  restarts the notice; nothing else can change or clear it.
+  any wallet or relayer send it. With nothing left to pay, `exit` is refused
+  (`NothingToExit`) and the request stays. A new request replaces the
+  previous one: one for no more than the pending amount keeps its unlock
+  ledger, so a buyer whose destination stopped accepting USDC can name
+  another without waiting again; a larger one restarts the notice. Nothing
+  but the buyer's own request can change or clear it.
+
+An exit request does not lower the spending limit: until the exit is paid,
+charges within the limit still settle. A wallet that means to leave entirely
+signs `set_cap(0)` with the request; both take effect after the same
+notice.
 
 Exits, withdrawals, limit changes, mandate revocations and revenue payouts
 all work while the contract is paused.
@@ -111,6 +136,12 @@ having held its in-flight charges before the operator signs.
 Recurring mandates are outside this guarantee: a buyer can revoke one at
 once, as with the prepaid ledger.
 
+The admin can still cost the seller admitted charges, though never move a
+buyer's money: a pause longer than the margin between `NOTICE_LEDGERS` and
+the charges' windows lets admitted charges expire before an exit unlocks,
+and a lower `max_charge` or daily limit refuses charges admitted under the
+higher one, with that outcome recorded.
+
 ## Upgrades
 
 `propose_upgrade(wasm_hash)` records the hash, installable
@@ -124,6 +155,11 @@ Soroban also allows a contract's code to be a reference to code another
 address manages, which that address can change with no call to the
 contract. The vault only ever installs Wasm, and monitoring should alert if
 its executable is anything else.
+
+A recurring mandate's allowance belongs to the vault's address, not to its
+code, so new code could spend what is left of it from the buyer's wallet.
+A buyer with a mandate who wants to be safe from an upgrade revokes it
+before the proposal's effective ledger, as well as exiting.
 
 ## Roles
 
@@ -155,13 +191,20 @@ into the vault as revenue.
 
 A full batch of 98 distinct buyers, each account carrying a pending lower
 limit and an exit request and each charge at the longest window, measured
-with the built Wasm (`just contract-resources`): 91.5 M instructions,
-26.5 MB of memory, 198 ledger-entry writes against the network's 200,
-72.9 KB written and 11,840 event bytes. A charge record's rent grows with
+with the built Wasm (`just contract-resources`): 92.4 M instructions,
+26.6 MB of memory, 198 ledger-entry writes against the network's 200,
+79.6 KB written and 11,840 event bytes. A charge record's rent grows with
 its window, so most of that batch's estimated fee (about 5.4 M stroops, of
 which 3.9 M is temporary rent) comes from the day-long windows; with the
 gateway's default window of about an hour it is close to the prepaid
 ledger's.
+
+## Throughput
+
+Every call writes the contract instance (its totals and the seller's daily
+count), so the network applies a deployment's transactions one after
+another. A full batch leaves one ledger-entry write of margin under the
+network's 200, counting the operator's authorization nonce.
 
 ## Events
 

@@ -1,6 +1,10 @@
-//! Random sequences of deposits, limit changes, charges, withdrawals, exits,
-//! revenue payouts and the passing of ledgers and days, each checked after
-//! every step against a model written from the documented rules.
+//! Random sequences of deposits, limit changes, charges admitted now and
+//! settled later (across ledgers and UTC days), withdrawals, exits, revenue
+//! payouts and the passing of ledgers and days, each checked after every
+//! step against a model written from the documented rules
+//! (docs/architecture/vault-contract.md), not from the contract's code.
+
+use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 
@@ -11,14 +15,43 @@ const WALLET: i128 = 50 * USDC;
 
 #[derive(Clone, Debug)]
 enum Op {
-    Deposit { buyer: usize, amount: i128, id: u8, cap: Option<i128> },
-    SetCap { buyer: usize, cap: i128 },
-    Charge { buyer: usize, amount: i128 },
-    Withdraw { buyer: usize, amount: i128, id: u8 },
-    RequestExit { buyer: usize, amount: i128 },
-    Exit { buyer: usize },
-    WithdrawRevenue { amount: i128, id: u8 },
-    Advance { ledgers: u32 },
+    Deposit {
+        buyer: usize,
+        amount: i128,
+        id: u8,
+        cap: Option<i128>,
+    },
+    SetCap {
+        buyer: usize,
+        cap: i128,
+    },
+    /// A charge admitted now with a window of `window` ledgers, settled by a
+    /// later `Settle`.
+    Admit {
+        buyer: usize,
+        amount: i128,
+        window: u32,
+    },
+    Settle,
+    Withdraw {
+        buyer: usize,
+        amount: i128,
+        id: u8,
+    },
+    RequestExit {
+        buyer: usize,
+        amount: i128,
+    },
+    Exit {
+        buyer: usize,
+    },
+    WithdrawRevenue {
+        amount: i128,
+        id: u8,
+    },
+    Advance {
+        ledgers: u32,
+    },
     NextDay,
 }
 
@@ -32,7 +65,9 @@ fn op() -> impl Strategy<Value = Op> {
         (buyer.clone(), usdc_tenths(20), 0u8..4, prop::option::of(0..=20 * USDC))
             .prop_map(|(buyer, amount, id, cap)| Op::Deposit { buyer, amount, id, cap }),
         (buyer.clone(), 0..=20 * USDC).prop_map(|(buyer, cap)| Op::SetCap { buyer, cap }),
-        (buyer.clone(), usdc_tenths(10)).prop_map(|(buyer, amount)| Op::Charge { buyer, amount }),
+        (buyer.clone(), usdc_tenths(10), prop_oneof![Just(0u32), 1..=MAX_CHARGE_WINDOW])
+            .prop_map(|(buyer, amount, window)| Op::Admit { buyer, amount, window }),
+        Just(Op::Settle),
         (buyer.clone(), usdc_tenths(10), 0u8..4).prop_map(|(buyer, amount, id)| Op::Withdraw {
             buyer,
             amount,
@@ -60,8 +95,8 @@ struct Buyer {
     cap: i128,
     pending: Option<(i128, u32)>,
     exit: Option<(i128, u32)>,
-    day: u64,
-    charged: i128,
+    /// What was charged against each admission day.
+    charged: BTreeMap<u64, i128>,
     deposits: std::collections::BTreeSet<u8>,
     withdrawals: std::collections::BTreeSet<u8>,
 }
@@ -74,15 +109,22 @@ impl Buyer {
         }
     }
 
-    /// The rules for a limit change: at once unless lower than the limit in
-    /// force, which waits the notice and replaces any pending one.
+    /// A limit at least the one in force applies at once and drops any
+    /// pending one; a lower one waits the notice, except that one no lower
+    /// than the pending lower limit keeps that one's effective ledger.
     fn change_cap(&mut self, cap: i128, now: u32) {
-        self.cap = self.cap_in_force(now);
+        let in_force = self.cap_in_force(now);
+        let pending = self.pending.filter(|(_, at)| now < *at);
+        self.cap = in_force;
         self.pending = None;
-        if cap >= self.cap {
+        if cap >= in_force {
             self.cap = cap;
         } else {
-            self.pending = Some((cap, now + NOTICE_LEDGERS));
+            let at = match pending {
+                Some((pending_cap, at)) if cap >= pending_cap => at,
+                _ => now + NOTICE_LEDGERS,
+            };
+            self.pending = Some((cap, at));
         }
     }
 }
@@ -95,6 +137,9 @@ struct Model {
     held: i128,
 }
 
+/// A charge waiting to settle: buyer, identifier, amount, last ledger, day.
+type Queued = (usize, u8, i128, u32, u64);
+
 fn run(ops: &[Op]) {
     let w = world();
     let buyers: StdVec<Address> = (0..BUYERS).map(|_| w.buyer(WALLET)).collect();
@@ -103,10 +148,11 @@ fn run(ops: &[Op]) {
         buyer.wallet = WALLET;
     }
     let mut charge_ids = 0u8;
+    let mut queue: StdVec<Queued> = StdVec::new();
 
     for (step, op) in ops.iter().enumerate() {
         let now = w.now();
-        let today = w.env.ledger().timestamp() / 86_400;
+        let today = w.today();
         match op.clone() {
             Op::Deposit { buyer, amount, id, cap } => {
                 let b = &mut model.buyers[buyer];
@@ -126,33 +172,44 @@ fn run(ops: &[Op]) {
             Op::SetCap { buyer, cap } => {
                 let b = &mut model.buyers[buyer];
                 let result = w.client().try_set_cap(&buyers[buyer], &cap);
-                assert_eq!(
-                    result.is_ok(),
-                    b.balance.is_some(),
-                    "step {step}: {op:?} -> {result:?}"
-                );
+                assert_eq!(result.is_ok(), b.balance.is_some(), "step {step}: {op:?}");
                 if b.balance.is_some() {
                     b.change_cap(cap, now);
                 }
             }
-            Op::Charge { buyer, amount } => {
+            Op::Admit { buyer, amount, window } => {
                 charge_ids = charge_ids.wrapping_add(1);
-                let b = &mut model.buyers[buyer];
-                let today_charged = if b.day == today { b.charged } else { 0 };
-                let expected = match b.balance {
-                    None => Outcome::UnknownAccount,
-                    Some(balance) if amount > balance => Outcome::InsufficientBalance,
-                    Some(_) if today_charged + amount > b.cap_in_force(now) => Outcome::AboveCap,
-                    Some(balance) => {
-                        b.balance = Some(balance - amount);
-                        b.day = today;
-                        b.charged = today_charged + amount;
-                        model.revenue += amount;
-                        Outcome::Charged
-                    }
-                };
-                let charge = Charge(buyers[buyer].clone(), w.id(charge_ids), amount, now);
-                assert_eq!(w.settle(&[charge]), [expected], "step {step}: {op:?}");
+                queue.push((buyer, charge_ids, amount, now + window, today));
+            }
+            Op::Settle => {
+                let mut charges = StdVec::new();
+                let mut expected = StdVec::new();
+                for (buyer, id, amount, last_ledger, day) in queue.drain(..) {
+                    let b = &mut model.buyers[buyer];
+                    // Refusals, in the documented order.
+                    let outcome = if last_ledger < now || day + 1 < today {
+                        Outcome::Expired
+                    } else if let Some(balance) = b.balance {
+                        let counted = b.charged.get(&day).copied().unwrap_or(0);
+                        if amount > balance {
+                            Outcome::InsufficientBalance
+                        } else if counted + amount > b.cap_in_force(now) {
+                            Outcome::AboveCap
+                        } else {
+                            b.balance = Some(balance - amount);
+                            b.charged.insert(day, counted + amount);
+                            model.revenue += amount;
+                            Outcome::Charged
+                        }
+                    } else {
+                        Outcome::UnknownAccount
+                    };
+                    charges.push(Charge(buyers[buyer].clone(), w.id(id), amount, last_ledger, day));
+                    expected.push(outcome);
+                }
+                if !charges.is_empty() {
+                    assert_eq!(w.settle(&charges), expected, "step {step}: {op:?}");
+                }
             }
             Op::Withdraw { buyer, amount, id } => {
                 let b = &mut model.buyers[buyer];
@@ -171,22 +228,26 @@ fn run(ops: &[Op]) {
             Op::RequestExit { buyer, amount } => {
                 let b = &mut model.buyers[buyer];
                 let result = w.client().try_request_exit(&buyers[buyer], &amount, &buyers[buyer]);
-                assert_eq!(
-                    result.is_ok(),
-                    b.balance.is_some(),
-                    "step {step}: {op:?} -> {result:?}"
-                );
+                assert_eq!(result.is_ok(), b.balance.is_some(), "step {step}: {op:?}");
                 if b.balance.is_some() {
-                    b.exit = Some((amount, now + NOTICE_LEDGERS));
+                    // No more than the pending amount keeps its unlock.
+                    let unlock = match b.exit {
+                        Some((pending, unlock)) if amount <= pending => unlock,
+                        _ => now + NOTICE_LEDGERS,
+                    };
+                    b.exit = Some((amount, unlock));
                 }
             }
             Op::Exit { buyer } => {
                 let b = &mut model.buyers[buyer];
-                let payable = b.exit.filter(|(_, unlock)| now >= *unlock);
+                let paid = b
+                    .exit
+                    .filter(|(_, unlock)| now >= *unlock)
+                    .map(|(amount, _)| amount.min(b.balance.unwrap_or(0)))
+                    .filter(|paid| *paid > 0);
                 let result = w.client().try_exit(&buyers[buyer]);
-                assert_eq!(result.is_ok(), payable.is_some(), "step {step}: {op:?} -> {result:?}");
-                if let Some((amount, _)) = payable {
-                    let paid = amount.min(b.balance.unwrap());
+                assert_eq!(result.is_ok(), paid.is_some(), "step {step}: {op:?} -> {result:?}");
+                if let Some(paid) = paid {
                     b.balance = b.balance.map(|x| x - paid);
                     b.wallet += paid;
                     b.exit = None;
@@ -211,11 +272,7 @@ fn run(ops: &[Op]) {
         let mut liabilities = 0;
         for (i, buyer) in buyers.iter().enumerate() {
             let b = &model.buyers[i];
-            assert_eq!(
-                w.client().get_balance(buyer),
-                b.balance.unwrap_or(0),
-                "step {step}: balance {i}"
-            );
+            assert_eq!(w.client().get_balance(buyer), b.balance.unwrap_or(0), "step {step}: {i}");
             assert_eq!(w.token().balance(buyer), b.wallet, "step {step}: wallet {i}");
             assert_eq!(w.client().get_cap(buyer), b.cap_in_force(now), "step {step}: cap {i}");
             let exit = w.client().get_account(buyer).and_then(|a| match a.exit {
