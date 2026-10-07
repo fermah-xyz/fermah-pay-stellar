@@ -92,6 +92,12 @@ pub trait ScAddressOf {
     fn sc_address(&self) -> stellar_xdr::ScAddress;
 }
 
+impl ScAddressOf for stellar_xdr::ScAddress {
+    fn sc_address(&self) -> stellar_xdr::ScAddress {
+        self.clone()
+    }
+}
+
 impl ScAddressOf for AccountAddress {
     fn sc_address(&self) -> stellar_xdr::ScAddress {
         stellar_xdr::ScAddress::Account(account_id(self))

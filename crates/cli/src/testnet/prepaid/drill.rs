@@ -178,6 +178,7 @@ impl Context {
             owner: buyer.address().into(),
             amount: i128::from(DEPOSIT),
             deposit_id,
+            cap: None,
         };
         let function = HostFunction::InvokeContract(pinned.deposit_call(&intent));
         let auth = self
@@ -193,6 +194,7 @@ impl Context {
             charge_id,
             amount: i128::from(SMALL),
             last_ledger: self.rpc.get_latest_ledger().await? + CHARGE_VALIDITY_LEDGERS,
+            day: 0,
         }];
         let function = HostFunction::InvokeContract(pinned.charge_batch_call(&charges));
         let auth = self

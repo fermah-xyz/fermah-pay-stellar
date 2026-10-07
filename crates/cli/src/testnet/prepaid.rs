@@ -18,7 +18,7 @@ use fermah_pay_stellar_chain::onboarding::{
 };
 use fermah_pay_stellar_chain::payments::payments_transaction;
 use fermah_pay_stellar_chain::prepaid::{
-    ChargeRequest, DepositIntent, PrepaidDeployment, Roles, Totals, WithdrawIntent,
+    ChargeRequest, Custody, DepositIntent, PrepaidDeployment, Roles, Totals, WithdrawIntent,
     constructor_args, contract_totals, instance_wasm,
 };
 use fermah_pay_stellar_chain::rpc::{RpcClient, hex_lower};
@@ -156,7 +156,7 @@ impl Context {
         let pinned = PrepaidDeployment {
             contract: contract_bytes(&recorded.contract)?,
             usdc: contract_bytes(&recorded.usdc)?,
-            treasury: recorded.treasury.parse()?,
+            custody: Custody::Treasury(recorded.treasury.parse()?),
         };
         Ok((recorded, pinned))
     }
@@ -442,15 +442,13 @@ impl Context {
         let asset = usdc::circle_usdc(self.network);
         let hot_before = balances(&self.rpc, &treasury.address(), &asset).await?.usdc;
         let cold_before = balances(&self.rpc, &reserve, &asset).await?.usdc;
-        let function =
-            HostFunction::InvokeContract(pinned.treasury_transfer_call(&reserve, amount));
-        let auth = self
-            .authorize(
-                &submitter,
-                &function,
-                &[(&treasury, pinned.treasury_transfer_authorization(&reserve, amount))],
-            )
-            .await?;
+        let function = HostFunction::InvokeContract(
+            pinned.treasury_transfer_call(&reserve, amount).context("a sweep needs a treasury")?,
+        );
+        let tree = pinned
+            .treasury_transfer_authorization(&reserve, amount)
+            .context("a sweep needs a treasury")?;
+        let auth = self.authorize(&submitter, &function, &[(&treasury, tree)]).await?;
         let receipt = submitter.submit(function, auth).await?;
         let hot_after = balances(&self.rpc, &treasury.address(), &asset).await?.usdc;
         let cold_after = balances(&self.rpc, &reserve, &asset).await?.usdc;
@@ -750,8 +748,12 @@ impl Context {
             let owner = buyer.address();
             let before = balances(&self.rpc, &owner, &asset).await?;
             let treasury_before = balances(&self.rpc, &treasury, &asset).await?.usdc;
-            let intent =
-                DepositIntent { owner: owner.clone().into(), amount, deposit_id: random_bytes()? };
+            let intent = DepositIntent {
+                owner: owner.clone().into(),
+                amount,
+                deposit_id: random_bytes()?,
+                cap: None,
+            };
             let function = HostFunction::InvokeContract(pinned.deposit_call(&intent));
             let auth = self
                 .authorize(
@@ -824,6 +826,7 @@ impl Context {
                     charge_id: tagged_charge_id(tag, i),
                     amount,
                     last_ledger,
+                    day: 0,
                 })
             })
             .collect::<anyhow::Result<_>>()?;
@@ -871,6 +874,7 @@ impl Context {
             charge_id: tagged_charge_id(tag, buyer),
             amount,
             last_ledger,
+            day: 0,
         };
         let function = HostFunction::InvokeContract(pinned.charge_call(&charge));
         let before = self.contract_balance(&submitter, &pinned, &charge.owner).await?;
@@ -915,7 +919,8 @@ impl Context {
             .context("get_totals returned nothing")?;
         let Totals { liabilities, revenue } =
             contract_totals(&totals).with_context(|| format!("unexpected totals {totals:?}"))?;
-        let hot = balances(&self.rpc, &pinned.treasury, &usdc::circle_usdc(self.network))
+        let treasury = pinned.treasury().context("solvency needs a treasury deployment")?;
+        let hot = balances(&self.rpc, treasury, &usdc::circle_usdc(self.network))
             .await?
             .usdc
             .context("treasury has no USDC trustline")?;
@@ -976,7 +981,7 @@ impl Context {
                 &function,
                 &[
                     (&buyer_key, pinned.owner_withdraw_authorization(&intent)),
-                    (&treasury, pinned.treasury_withdraw_authorization(&intent)),
+                    (&treasury, pinned.cosigner_withdraw_authorization(&intent)),
                 ],
             )
             .await?;
@@ -1093,8 +1098,12 @@ impl Context {
         let contract = usdc::asset_contract_id(&asset, self.network);
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let submitter = self.submitter(&source, &fee_source);
-        let instance = PrepaidDeployment { contract, usdc: contract, treasury: source.address() }
-            .instance_key();
+        let instance = PrepaidDeployment {
+            contract,
+            usdc: contract,
+            custody: Custody::Treasury(source.address()),
+        }
+        .instance_key();
         if self.rpc.get_ledger_entries(&[instance]).await?.is_empty() {
             let deploy = deploy::asset_contract(asset.clone());
             let auth = submitter.record_source_authorization(&deploy).await?;

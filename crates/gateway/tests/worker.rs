@@ -20,7 +20,7 @@ use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
-    CHARGE_RECORD_GRACE, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
+    CHARGE_RECORD_GRACE, Custody, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
 };
 use fermah_pay_stellar_chain::rpc::{
     EventPage, EventsFrom, FeeDistribution, FeePercentile, FeeStats, Health, IncludedTransaction,
@@ -1224,7 +1224,11 @@ async fn world_with(
             events: EventStream::default(),
             oldest: 1,
         })),
-        deployment: PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() },
+        deployment: PrepaidDeployment {
+            contract: CONTRACT,
+            usdc,
+            custody: Custody::Treasury(treasury()),
+        },
         operator: operator.address(),
     };
     let h = start_with_options(

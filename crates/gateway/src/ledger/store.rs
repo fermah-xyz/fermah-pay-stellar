@@ -3,7 +3,7 @@
 //! Every query binds the caller's deployment and network, so a row of another
 //! deployment is indistinguishable from a missing one.
 
-use fermah_pay_stellar_chain::prepaid::PrepaidDeployment;
+use fermah_pay_stellar_chain::prepaid::{Custody, PrepaidDeployment};
 use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey, Network};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -270,7 +270,7 @@ impl Store {
             Ok(PrepaidDeployment {
                 contract: contract_id(&row.contract_address)?,
                 usdc: contract_id(&row.usdc_address)?,
-                treasury: address(&row.treasury_address)?,
+                custody: Custody::Treasury(address(&row.treasury_address)?),
             })
         })
         .transpose()

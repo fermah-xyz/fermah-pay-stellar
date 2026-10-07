@@ -263,7 +263,7 @@ fn run(ops: &[Op]) {
                 let intent = w.withdraw_intent(owner, *amount, owner, *id);
                 let auths = [
                     w.signed(owner, w.deployment().owner_withdraw_authorization(&intent)),
-                    w.signed(&w.treasury, w.deployment().treasury_withdraw_authorization(&intent)),
+                    w.signed(&w.treasury, w.deployment().cosigner_withdraw_authorization(&intent)),
                 ];
                 let result = withdraw_with(&w, &intent, owner, owner, &auths);
                 assert_eq!(result.is_ok(), accepted, "step {step}: {op:?} -> {result:?}");

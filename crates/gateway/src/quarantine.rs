@@ -8,7 +8,7 @@
 //! settled the charge.
 
 use fermah_pay_stellar_chain::prepaid::{
-    CHARGE_RECORD_GRACE, Outcome, PrepaidDeployment, charge_record, settled_in,
+    CHARGE_RECORD_GRACE, Custody, Outcome, PrepaidDeployment, charge_record, settled_in,
 };
 use fermah_pay_stellar_chain::rpc::{RpcError, TransactionStatus, hex_lower};
 use fermah_pay_stellar_domain::ChainAddress;
@@ -170,9 +170,9 @@ pub async fn quarantined_charges(
                 deployment: PrepaidDeployment {
                     contract: contract_id(&row.contract_address)?,
                     usdc: contract_id(&row.usdc_address)?,
-                    treasury: row.treasury_address.parse().map_err(|_| {
+                    custody: Custody::Treasury(row.treasury_address.parse().map_err(|_| {
                         QuarantineError::Corrupt("address outside the CHECK constraint")
-                    })?,
+                    })?),
                 },
             })
         })

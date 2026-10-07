@@ -226,7 +226,7 @@ fn instance_key() -> LedgerKey {
     fermah_pay_stellar_chain::prepaid::PrepaidDeployment {
         contract: CONTRACT,
         usdc: usdc_id(),
-        treasury: treasury(),
+        custody: fermah_pay_stellar_chain::prepaid::Custody::Treasury(treasury()),
     }
     .instance_key()
 }

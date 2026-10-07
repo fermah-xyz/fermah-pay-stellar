@@ -313,9 +313,12 @@ impl<L: LatestLedger> LedgerApi<L> {
             .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
         let mut auth = vec![signed.clone()];
         auth.extend(treasury_entries(&deployment));
+        // The binding table admits only treasury custody so far.
+        let source =
+            deployment.treasury().ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
         let answer = self
             .ledger
-            .simulate_buyer_call(&deployment.treasury, call.clone(), auth)
+            .simulate_buyer_call(source, call.clone(), auth)
             .await
             .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
         match answer {
@@ -578,6 +581,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             owner: wallet.clone(),
             amount: i128::from(amount),
             deposit_id: random()?,
+            cap: None,
         };
         // `AddressV2` credentials commit the signature to the buyer's address
         // as well as the call, so it cannot authorize another account that

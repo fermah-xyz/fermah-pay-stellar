@@ -13,7 +13,7 @@ use common::{
 use fermah_pay_stellar_chain::authorization::{sign_entry, signature_payload};
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::{DepositIntent, MandateIntent, PrepaidDeployment};
+use fermah_pay_stellar_chain::prepaid::{Custody, DepositIntent, MandateIntent, PrepaidDeployment};
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::stellar_xdr::{
     BytesM, Limits, ReadXdr, ScBytes, ScMap, ScMapEntry, ScSymbol, ScVal, ScVec,
@@ -173,12 +173,14 @@ async fn test_prepared_entry_authorizes_exactly_the_deposit_to_the_bound_treasur
         &fermah_pay_stellar_chain::usdc::circle_usdc(Network::Testnet),
         Network::Testnet,
     );
-    let expected = PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() }
-        .deposit_authorization(&DepositIntent {
-            owner: b.key.address().into(),
-            amount: 25_000_000,
-            deposit_id: deposit_id.try_into().unwrap(),
-        });
+    let expected =
+        PrepaidDeployment { contract: CONTRACT, usdc, custody: Custody::Treasury(treasury()) }
+            .deposit_authorization(&DepositIntent {
+                owner: b.key.address().into(),
+                amount: 25_000_000,
+                deposit_id: deposit_id.try_into().unwrap(),
+                cap: None,
+            });
     assert_eq!(entry.root_invocation, expected);
     let payload =
         signature_payload(network_id(Network::Testnet), &entry.credentials, &entry.root_invocation)
@@ -1060,15 +1062,16 @@ async fn test_prepared_mandate_authorizes_exactly_the_mandate_and_its_approval(
         &fermah_pay_stellar_chain::usdc::circle_usdc(Network::Testnet),
         Network::Testnet,
     );
-    let expected = PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() }
-        .authorize_recurring_authorization(&MandateIntent {
-            owner: b.key.address(),
-            mandate_id: mandate_id.try_into().unwrap(),
-            amount: 5_000_000,
-            period_secs: 30 * DAY,
-            cycles: 2,
-            live_until: mandate.live_until_ledger,
-        });
+    let expected =
+        PrepaidDeployment { contract: CONTRACT, usdc, custody: Custody::Treasury(treasury()) }
+            .authorize_recurring_authorization(&MandateIntent {
+                owner: b.key.address(),
+                mandate_id: mandate_id.try_into().unwrap(),
+                amount: 5_000_000,
+                period_secs: 30 * DAY,
+                cycles: 2,
+                live_until: mandate.live_until_ledger,
+            });
     let entry = mandate_entry(&mandate);
     assert_eq!(entry.root_invocation, expected);
     let payload =

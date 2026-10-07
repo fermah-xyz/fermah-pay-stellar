@@ -8,7 +8,7 @@
 mod common;
 
 use common::{Harness, Tenant, assert_refused, authed, start};
-use fermah_pay_stellar_chain::prepaid::{PrepaidDeployment, WithdrawIntent};
+use fermah_pay_stellar_chain::prepaid::{Custody, PrepaidDeployment, WithdrawIntent};
 use fermah_pay_stellar_chain::stellar_xdr::{
     BytesM, Limits, ReadXdr, ScAddress, ScBytes, ScVal, SorobanAuthorizationEntry,
     SorobanAuthorizedFunction, SorobanCredentials, WriteXdr,
@@ -79,7 +79,7 @@ async fn pinned(h: &Harness, t: &Tenant) -> PrepaidDeployment {
     .await
     .unwrap();
     let usdc = stellar_strkey::Contract::from_string(&usdc).unwrap().0;
-    PrepaidDeployment { contract: CONTRACT, usdc, treasury: treasury() }
+    PrepaidDeployment { contract: CONTRACT, usdc, custody: Custody::Treasury(treasury()) }
 }
 
 fn decode(xdr: &str) -> SorobanAuthorizationEntry {
@@ -368,7 +368,7 @@ async fn test_a_contract_account_withdraws_to_itself_with_the_treasury_authorizi
             decode(&signed),
             SorobanAuthorizationEntry {
                 credentials: SorobanCredentials::SourceAccount,
-                root_invocation: deployment.treasury_withdraw_authorization(&intent),
+                root_invocation: deployment.cosigner_withdraw_authorization(&intent),
             },
         ]
     );

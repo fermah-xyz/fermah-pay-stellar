@@ -40,7 +40,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use fermah_pay_stellar_chain::prepaid::{
-    InstanceState, PrepaidDeployment, instance_state, instance_wasm,
+    Custody, InstanceState, PrepaidDeployment, instance_state, instance_wasm,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, LedgerKey, TrustLineFlags};
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_key};
@@ -436,7 +436,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         let probe = PrepaidDeployment {
             contract: deployment.contract,
             usdc: asset_contract_id(&usdc, self.network),
-            treasury: deployment.treasury.clone(),
+            custody: Custody::Treasury(deployment.treasury.clone()),
         };
         let mut treasury = deployment.treasury.clone();
         for _ in 0..3 {
@@ -456,9 +456,14 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             if state.config.usdc != probe.usdc {
                 return Err(ObserverError::UnreadableContract);
             }
-            if state.config.treasury != treasury {
-                treasury = state.config.treasury.clone();
-                continue;
+            match &state.config.treasury {
+                Some(current) if *current != treasury => {
+                    treasury = current.clone();
+                    continue;
+                }
+                Some(_) => {}
+                // A vault holds its own USDC: not a prepaid ledger's layout.
+                None => return Err(ObserverError::UnreadableContract),
             }
             let trustline_of = |key: &LedgerKey| {
                 read.entries.iter().find(|record| record.key == *key).and_then(|record| {

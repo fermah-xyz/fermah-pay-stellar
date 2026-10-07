@@ -628,6 +628,7 @@ impl Context {
             charge_id: parse_charge_id(&charges[0].contract_charge_id)?,
             amount: i128::from(CHARGES[0]),
             last_ledger: charges[0].last_ledger,
+            day: 0,
         };
         let (source, fee_source) = (self.profile.key(SUBMITTER)?, self.profile.key(FEE_SOURCE)?);
         let operator = self.profile.key("operator")?;

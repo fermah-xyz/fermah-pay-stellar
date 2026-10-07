@@ -83,7 +83,8 @@ impl Context {
         let wallet = buyer.address();
         let before = balances(&self.rpc, &wallet, &asset).await?;
         ensure!(before.xlm_stroops == Some(0), "buyer holds XLM: {:?}", before.xlm_stroops);
-        let treasury = pinned.treasury.clone();
+        let treasury =
+            pinned.treasury().context("the recurring run needs a treasury deployment")?.clone();
         let treasury_before = balances(&self.rpc, &treasury, &asset).await?.usdc.unwrap_or(0);
         let buyer_id = BuyerServiceClient::new(channel)
             .create_buyer(authed(

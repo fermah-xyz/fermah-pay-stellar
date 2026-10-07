@@ -277,7 +277,7 @@ impl<L: LatestLedger> LedgerApi<L> {
         let treasury = |deployment: &PrepaidDeployment| {
             vec![SorobanAuthorizationEntry {
                 credentials: SorobanCredentials::SourceAccount,
-                root_invocation: deployment.treasury_withdraw_authorization(&intent),
+                root_invocation: deployment.cosigner_withdraw_authorization(&intent),
             }]
         };
         self.verify_buyer_entry(&scope, &record.wallet, &signed, &prepared, treasury)
