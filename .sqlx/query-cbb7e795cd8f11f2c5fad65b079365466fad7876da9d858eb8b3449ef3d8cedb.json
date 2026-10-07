@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO pay_stellar.vault_requests\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, kind, cap, amount,\n                 destination, authorization_xdr, expiration_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cbb7e795cd8f11f2c5fad65b079365466fad7876da9d858eb8b3449ef3d8cedb"
+}

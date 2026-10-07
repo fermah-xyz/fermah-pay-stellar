@@ -67,6 +67,7 @@ impl Context {
                     buyer_id,
                     amount: DEPOSIT,
                     idempotency_key: "deposit-1".to_owned(),
+                    daily_limit: None,
                 },
                 token,
             )?)

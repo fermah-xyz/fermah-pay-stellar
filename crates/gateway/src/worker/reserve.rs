@@ -99,8 +99,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         else {
             return Ok(None);
         };
-        let deployment =
-            deployment(&bound.contract_address, &bound.usdc_address, &bound.treasury_address)?;
+        let deployment = deployment(
+            &bound.contract_address,
+            &bound.usdc_address,
+            bound.treasury_address.as_deref(),
+        )?;
 
         let line = trustline_key(&treasury_address, &circle_usdc(self.network()));
         let snapshot = self.existing(vec![line.clone()]).await?;

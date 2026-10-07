@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT contract_address, usdc_address, treasury_address\n            FROM pay_stellar.ledger_contracts\n            WHERE seller_deployment_id = $1 AND network = $2\n            ",
+  "query": "\n            SELECT contract_address, usdc_address, treasury_address, custody\n            FROM pay_stellar.ledger_contracts\n            WHERE seller_deployment_id = $1 AND network = $2\n            ",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,17 @@
             "name": "treasury_address"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "custody",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.ledger_contracts",
+            "name": "custody"
+          }
+        }
       }
     ],
     "parameters": {
@@ -46,8 +57,9 @@
     "nullable": [
       false,
       false,
+      true,
       false
     ]
   },
-  "hash": "fa116bb303bc32ebf33f33fec611fedab1e31f4a9745453a5a7f244565ba148e"
+  "hash": "16b371d031e57f3c25cdda3497972447f5ec298765a6a5a5e10baa47358163a2"
 }

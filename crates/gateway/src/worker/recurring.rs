@@ -110,7 +110,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             deployment: deployment(
                 &row.contract_address,
                 &row.usdc_address,
-                &row.treasury_address,
+                row.treasury_address.as_deref(),
             )?,
         };
         match resolution.state {
@@ -252,12 +252,21 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
     /// Puts a mandate or revocation whose transaction expired unincluded,
     /// and whose buyer signature is still good, back in line.
-    async fn resend(&self, table: &'static str, id: Uuid) -> Result<(), WorkerError> {
+    pub(super) async fn resend(&self, table: &'static str, id: Uuid) -> Result<(), WorkerError> {
         let reason = "not included before its transaction expired; sending again";
         let query = match table {
             "mandates" => sqlx::query!(
                 r#"
                 UPDATE pay_stellar.mandates SET state = 'signed', submission_id = NULL,
+                    last_error = $2
+                WHERE id = $1 AND state = 'submitted'
+                "#,
+                id,
+                reason,
+            ),
+            "vault_requests" => sqlx::query!(
+                r#"
+                UPDATE pay_stellar.vault_requests SET state = 'signed', submission_id = NULL,
                     last_error = $2
                 WHERE id = $1 AND state = 'submitted'
                 "#,
@@ -316,7 +325,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 deployment: deployment(
                     &row.contract_address,
                     &row.usdc_address,
-                    &row.treasury_address,
+                    row.treasury_address.as_deref(),
                 )?,
             });
         }
@@ -377,7 +386,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             return Ok(None);
         };
         let deployment =
-            deployment(&row.contract_address, &row.usdc_address, &row.treasury_address)?;
+            deployment(&row.contract_address, &row.usdc_address, row.treasury_address.as_deref())?;
         let corrupt = |what| WorkerError::Corrupt(what);
         let intent = MandateIntent {
             owner: address(&row.wallet_address)?,
@@ -405,7 +414,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     }
 
     /// Prepares, records and links one buyer-signed mandate or revocation.
-    async fn send_buyer_intent(
+    pub(super) async fn send_buyer_intent(
         &self,
         kind: Kind,
         table: &'static str,
@@ -456,6 +465,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 id,
                 prepared.id,
             ),
+            "vault_requests" => sqlx::query!(
+                r#"
+                UPDATE pay_stellar.vault_requests SET state = 'submitted', submission_id = $2,
+                    last_error = NULL
+                WHERE id = $1 AND state = 'signed'
+                "#,
+                id,
+                prepared.id,
+            ),
             _ => sqlx::query!(
                 r#"
                 UPDATE pay_stellar.revocations SET state = 'submitted', submission_id = $2,
@@ -480,6 +498,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         match table {
             "mandates" => sqlx::query!(
                 "UPDATE pay_stellar.mandates SET last_error = $2 WHERE id = $1 AND state = 'signed'",
+                id,
+                error,
+            ),
+            "vault_requests" => sqlx::query!(
+                "UPDATE pay_stellar.vault_requests SET last_error = $2 WHERE id = $1 AND state = 'signed'",
                 id,
                 error,
             ),
@@ -527,7 +550,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             deployment: deployment(
                 &row.contract_address,
                 &row.usdc_address,
-                &row.treasury_address,
+                row.treasury_address.as_deref(),
             )?,
         };
         match resolution.state {
@@ -695,7 +718,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 deployment: deployment(
                     &row.contract_address,
                     &row.usdc_address,
-                    &row.treasury_address,
+                    row.treasury_address.as_deref(),
                 )?,
             });
         }
@@ -728,7 +751,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             return Ok(None);
         };
         let deployment =
-            deployment(&row.contract_address, &row.usdc_address, &row.treasury_address)?;
+            deployment(&row.contract_address, &row.usdc_address, row.treasury_address.as_deref())?;
         let owner = address(&row.wallet_address)?;
         let entry = SorobanAuthorizationEntry::from_xdr_base64(
             &row.signed_authorization_xdr,
@@ -770,8 +793,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .await
         .map_err(store("read submitted recurring charges"))?;
         let Some(first) = rows.first() else { return Ok(()) };
-        let deployment =
-            deployment(&first.contract_address, &first.usdc_address, &first.treasury_address)?;
+        let deployment = deployment(
+            &first.contract_address,
+            &first.usdc_address,
+            first.treasury_address.as_deref(),
+        )?;
 
         let mut decisions: Vec<(Uuid, RecurringDecision)> = Vec::new();
         let mut from_records = Vec::new();
@@ -1089,8 +1115,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         else {
             return Ok(None);
         };
-        let deployment =
-            deployment(&target.contract_address, &target.usdc_address, &target.treasury_address)?;
+        let deployment = deployment(
+            &target.contract_address,
+            &target.usdc_address,
+            target.treasury_address.as_deref(),
+        )?;
         let limit = i64::try_from(self.settings.max_batch.min(MAX_RECURRING_BATCH)).unwrap_or(1);
         let batch = sqlx::query!(
             r#"

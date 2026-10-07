@@ -35,6 +35,16 @@ async fn main() -> anyhow::Result<()> {
     telemetry::register_deployment_counters(
         &store.bound_deployments(config.network).await.context("reading bound deployments")?,
     );
+    // A vault buyer's limit change or exit made outside the gateway must be
+    // known before any charge admitted without it could settle after the
+    // change takes effect.
+    anyhow::ensure!(
+        config.vault_events_stale_ledgers + config.charge_validity_ledgers
+            < fermah_pay_stellar_chain::prepaid::VAULT_NOTICE_LEDGERS,
+        "PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS plus PAY_STELLAR_CHARGE_VALIDITY_LEDGERS must be \
+         below the vault's notice of {} ledgers",
+        fermah_pay_stellar_chain::prepaid::VAULT_NOTICE_LEDGERS
+    );
     let ledger = LedgerApi::new(
         store.clone(),
         rpc,
@@ -46,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
             max_mandate_ledgers: config.max_mandate_ledgers,
             withdrawals_to_other_accounts: config.withdrawals_to_other_accounts,
             max_buyer_resource_fee: config.max_buyer_resource_fee_stroops,
+            vault_events_stale_ledgers: config.vault_events_stale_ledgers,
         },
     );
     let listener = TcpListener::bind(config.listen_addr)

@@ -177,6 +177,56 @@ withdrawal. Until then a copy of the signed entry could still be included.
 | `FAILED` | yes | included as failed, and the contract never processed it; the amount is back in the available balance |
 | `EXPIRED` | yes | the authorization lapsed and the contract never processed it; any held amount is back in the available balance |
 
+## Vault deployments
+
+A deployment bound to a [prepaid vault](../architecture/vault-contract.md)
+(`fermah-pay-stellar-admin bind-ledger --vault`) holds the buyers' USDC in
+the contract, and each buyer signs a daily spending limit. Everything above
+applies, and in addition:
+
+- **Deposits** may carry the limit: `PrepareDeposit` takes an optional
+  `daily_limit`, signed with the deposit in one signature. A prepaid ledger
+  refuses one with `not_a_vault`.
+- **Limit changes**: `PrepareLimitChange(buyer_id, daily_limit,
+  idempotency_key)`, then `SubmitLimitChange` with the signed entry, and
+  `GetLimitChange`. A limit at least the one in force applies once the
+  contract processes it; a lower one applies on the contract after its
+  notice (about 26 hours), but charges are admitted against it from the
+  moment the signed entry is submitted.
+- **Exits**: `PrepareExit(buyer_id, amount, destination, idempotency_key)`,
+  then `SubmitExit` and `GetExit`. The buyer's request to take `amount` to
+  `destination` (the buyer's wallet when empty, and only the wallet unless
+  the gateway allows other accounts) without the operator; the contract pays
+  it once its notice has passed, and the worker sends that payout itself.
+  From the moment the signed entry is submitted, charges and withdrawals
+  leave the amount free. A cooperative withdrawal pays at once instead.
+- **Admission** refuses a charge with `above_spending_limit` when the day's
+  charges, counted by the UTC day of ledger time each was admitted in,
+  would pass the lowest limit known: the one the contract's events last
+  showed, a lower one pending on the contract, or one the buyer signed that
+  is not resolved yet. It refuses with `exit_requested` when the charge
+  would not leave free what an exit may take. It answers
+  `network_unavailable` while the worker's reading of the contract's events
+  lags the network by more than `PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS`,
+  since a limit change or exit made outside the gateway reaches admission
+  only through them.
+- **`GetBalance`** also reports, as the events last showed them,
+  `daily_limit`, `pending_daily_limit` with the ledger it applies from, and
+  `exit_amount` with the ledger it unlocks at; and what admission applies
+  now: `admitted_daily_limit` and `reserved_for_exit`.
+
+Limit changes and exit requests count against the buyer's and the
+deployment's mandate quotas, which they share with mandates and revocations.
+
+| Limit change or exit state | Final | Meaning |
+|---|---|---|
+| `AWAITING_SIGNATURE` | no | prepared; waiting for the buyer's signed entry |
+| `SIGNED` | no | verified; waiting to be sent; already counts towards admission |
+| `SUBMITTED` | no | in a transaction sent to the network |
+| `CONFIRMED` | yes | the contract processed it, and its events have been applied |
+| `FAILED` | yes | included as failed, and the authorization lapsed |
+| `EXPIRED` | yes | the authorization lapsed without the gateway sending it |
+
 ## Quotas
 
 Each deposit or withdrawal the worker sends costs the operator a network fee,
@@ -238,5 +288,13 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `RESOURCE_EXHAUSTED` | `deposit_quota_exceeded`, `withdrawal_quota_exceeded` | the buyer prepared its quota of deposits or withdrawals in the last 24 hours | retry later |
 | `RESOURCE_EXHAUSTED` | `deployment_deposit_quota_exceeded` | the deployment's buyers prepared its quota of deposits in the last 24 hours | retry later |
 | `FAILED_PRECONDITION` | `destination_not_allowed` | the withdrawal names an account other than the buyer's wallet, which this gateway does not allow | withdraw to the buyer's wallet |
-| `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached; nothing was created | retry |
+| `INVALID_ARGUMENT` | `invalid_limit` | a daily limit below zero | correct the input |
+| `INVALID_ARGUMENT` | `invalid_limit_change_id`, `invalid_exit_id` | not a UUID | correct the input |
+| `NOT_FOUND` | `limit_change_not_found`, `exit_not_found` | no such request in the caller's deployment | check the ID |
+| `FAILED_PRECONDITION` | `not_a_vault` | a limit, limit change or exit for a deployment whose ledger is not a vault | use a vault deployment |
+| `FAILED_PRECONDITION` | `above_spending_limit` | the charge would pass the buyer's daily limit, counting a lower limit not yet in force | ask the buyer to raise it |
+| `FAILED_PRECONDITION` | `exit_requested` | the charge or withdrawal would not leave free what the buyer's exit may take | nothing to do; the buyer is leaving |
+| `FAILED_PRECONDITION` | `limit_change_expired`, `exit_expired` | the request's authorization lapsed | prepare a new one |
+| `FAILED_PRECONDITION` | `limit_change_already_signed`, `exit_already_signed` | the request holds a different signed entry | nothing to do; poll it |
+| `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached, or, for a vault, the worker's reading of its events is behind; nothing was created | retry |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

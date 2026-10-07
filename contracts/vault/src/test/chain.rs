@@ -260,6 +260,8 @@ fn test_deposit_with_a_limit_signed_as_built() {
         })
     );
     assert!(w.entry(&w.deployment().deposit_key(&buyer.account(), &[1; 32])).is_some());
+    // The USDC the vault holds, at the key the worker keeps alive.
+    assert!(w.entry(&w.deployment().vault_balance_key()).is_some());
     // A deposit signed for the transfer to another account is refused.
     let intent =
         DepositIntent { owner: buyer.chain(), amount: USDC, deposit_id: [2; 32], cap: None };
@@ -427,4 +429,13 @@ fn test_instance_decodes_without_a_treasury() {
         (w.admin.account(), w.operator.account(), w.seller.account(), None)
     );
     assert_eq!((state.totals.liabilities, state.totals.revenue), (10 * USDC, 0));
+}
+
+#[test]
+fn test_the_chain_module_mirrors_the_vault_constants() {
+    use fermah_pay_stellar_chain::prepaid as chain;
+    assert_eq!(
+        (chain::VAULT_NOTICE_LEDGERS, chain::MAX_BATCH as u32, chain::MAX_CHARGE_WINDOW),
+        (NOTICE_LEDGERS, MAX_BATCH, MAX_CHARGE_WINDOW)
+    );
 }

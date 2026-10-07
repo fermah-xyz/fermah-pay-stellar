@@ -62,7 +62,7 @@ async fn test_settlements_and_refusals_are_counted(opts: PgPoolOptions, connect:
         tenant.deployment_id,
         &LedgerBinding {
             contract: pay_to.clone(),
-            treasury: AccountAddress::from_public_key([11; 32]),
+            treasury: Some(AccountAddress::from_public_key([11; 32])),
             operator: AccountAddress::from_public_key([12; 32]),
         },
     )

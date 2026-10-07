@@ -226,6 +226,7 @@ impl Context {
                     buyer_id: buyer_id.clone(),
                     amount: DEPOSIT,
                     idempotency_key: format!("drill-deposit-{}", unix_now()),
+                    daily_limit: None,
                 },
                 token,
             )?)
@@ -453,6 +454,7 @@ impl Context {
                         buyer_id: buyer_id.clone(),
                         amount: DEPOSIT,
                         idempotency_key: format!("drill-dust-{}-{prepared}", unix_now()),
+                        daily_limit: None,
                     },
                     token,
                 )?)

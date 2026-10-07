@@ -170,9 +170,12 @@ pub async fn quarantined_charges(
                 deployment: PrepaidDeployment {
                     contract: contract_id(&row.contract_address)?,
                     usdc: contract_id(&row.usdc_address)?,
-                    custody: Custody::Treasury(row.treasury_address.parse().map_err(|_| {
-                        QuarantineError::Corrupt("address outside the CHECK constraint")
-                    })?),
+                    custody: match row.treasury_address.as_deref() {
+                        Some(treasury) => Custody::Treasury(treasury.parse().map_err(|_| {
+                            QuarantineError::Corrupt("address outside the CHECK constraint")
+                        })?),
+                        None => Custody::Vault,
+                    },
                 },
             })
         })

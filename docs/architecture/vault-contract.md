@@ -2,8 +2,9 @@
 
 Source: [`contracts/vault`](../../contracts/vault/src/lib.rs). One contract
 instance serves one seller deployment. It is the successor of the
-[prepaid ledger contract](prepaid-contract.md) for mainnet, and is not yet
-deployed: the services still use the prepaid ledger.
+[prepaid ledger contract](prepaid-contract.md) for mainnet. The gateway and
+the worker serve a deployment bound to either (see
+[the ledger API](../api/ledger.md#vault-deployments)).
 
 The prepaid ledger keeps the books while a separate treasury account holds
 the USDC, so the treasury's key can move every deposit and the operator's
@@ -128,10 +129,24 @@ lower limit or an exit takes effect `NOTICE_LEDGERS` after the buyer asks,
 which is later than any charge admitted before the request can settle.
 Every such charge has settled, or expired, by then.
 
-That covers what the contract decides. The gateway must also stop admitting
-what will not fit once it learns of a request, and hold an exit's amount
-from the available balance; a cooperative withdrawal relies on the gateway
-having held its in-flight charges before the operator signs.
+That covers what the contract decides. The services cover the rest:
+
+- The worker reads the vault's events from a position stored per
+  deployment, applying each page's limit and exit events to the buyers'
+  rows in the same database transaction that moves the position, so no
+  event applies twice.
+- Admission counts the lowest limit known, including one the buyer signed
+  through the API that is not resolved yet, and keeps an exit's amount free
+  from every charge and withdrawal, so the exit pays in full and nothing
+  admitted is left without funds. A request stays counted until the events
+  past the ledger that included it, or past its authorization's last
+  ledger, have been applied.
+- Charges are refused while the worker's reading lags the network by more
+  than a set number of ledgers, which with the charge window must stay below
+  the notice: a limit change or exit made outside the gateway is then known
+  before any charge admitted without it could still settle.
+- A cooperative withdrawal is co-signed by the operator only for amounts the
+  gateway has already held from the available balance.
 
 Recurring mandates are outside this guarantee: a buyer can revoke one at
 once, as with the prepaid ledger.

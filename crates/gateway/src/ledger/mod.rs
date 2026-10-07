@@ -7,6 +7,7 @@
 
 mod mandates;
 pub mod store;
+mod vault;
 mod withdrawals;
 
 /// How a prepared withdrawal's destination is counted: the buyer's own
@@ -50,7 +51,8 @@ use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 use self::store::{
-    Admission, ChargeRecord, ChargeState, DepositRecord, DepositState, Insertion, NewDeposit,
+    Admission, ChargeRecord, ChargeState, ChargeWindow, DepositRecord, DepositState, Insertion,
+    NewDeposit, VaultAdmission,
 };
 use crate::auth::scope_of;
 use crate::refusal::Refusal;
@@ -149,6 +151,9 @@ pub struct LedgerPolicy {
     /// Largest resource fee, in stroops, a contract-account buyer's deposit
     /// or withdrawal may simulate at; the worker refuses to send one above.
     pub max_buyer_resource_fee: i64,
+    /// Vault: ledgers the worker's reading of the contract's events may lag
+    /// the latest before charges are refused.
+    pub vault_events_stale_ledgers: u32,
 }
 
 pub struct LedgerApi<L> {
@@ -313,12 +318,20 @@ impl<L: LatestLedger> LedgerApi<L> {
             .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
         let mut auth = vec![signed.clone()];
         auth.extend(treasury_entries(&deployment));
-        // The binding table admits only treasury custody so far.
-        let source =
-            deployment.treasury().ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
+        // Sent from the co-signer, whose authorization rides on the source
+        // account: the treasury, or a vault's operator.
+        let source = match deployment.treasury() {
+            Some(treasury) => treasury.clone(),
+            None => self
+                .store
+                .ledger_operator(scope)
+                .await
+                .map_err(|e| EntryRefusal::Failed(internal(&e)))?
+                .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?,
+        };
         let answer = self
             .ledger
-            .simulate_buyer_call(source, call.clone(), auth)
+            .simulate_buyer_call(&source, call.clone(), auth)
             .await
             .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
         match answer {
@@ -485,15 +498,37 @@ impl<L: LatestLedger> LedgerApi<L> {
         let admission = match replayed {
             Some(admission) => admission,
             None => {
-                let latest = self.ledger.latest_ledger().await.map_err(|error| {
+                let unreachable = |error: RpcError| {
                     tracing::warn!(error = %error, "reading the latest ledger");
                     Refusal::NetworkUnavailable
-                })?;
+                };
+                let latest = self.ledger.latest_ledger().await.map_err(unreachable)?;
                 let last_ledger = latest
                     .checked_add(self.policy.charge_validity_ledgers)
                     .ok_or(Refusal::Internal)?;
+                // A vault counts the charge against the UTC day of ledger
+                // time it is admitted in; the prepaid ledger ignores it. A
+                // deployment with no ledger yet has no balances to charge.
+                let binding = self.store.ledger_binding(scope).await.map_err(store_failure)?;
+                let (day, vault) = if binding.is_some_and(|deployment| deployment.is_vault()) {
+                    let close_time = self.ledger.latest_close_time().await.map_err(unreachable)?;
+                    let day = u64::try_from(close_time).map_err(|_| Refusal::Internal)? / 86_400;
+                    let vault = VaultAdmission {
+                        latest,
+                        stale_after: self.policy.vault_events_stale_ledgers,
+                    };
+                    (day, Some(vault))
+                } else {
+                    (0, None)
+                };
                 self.store
-                    .admit_charge(scope, buyer_id, amount, key, last_ledger)
+                    .admit_charge(
+                        scope,
+                        buyer_id,
+                        amount,
+                        key,
+                        ChargeWindow { last_ledger, day, vault },
+                    )
                     .await
                     .map_err(store_failure)?
             }
@@ -507,6 +542,12 @@ impl<L: LatestLedger> LedgerApi<L> {
             Admission::Conflict => Err(Refusal::IdempotencyConflict),
             Admission::BuyerNotFound => Err(Refusal::BuyerNotFound),
             Admission::InsufficientBalance => Err(Refusal::InsufficientBalance),
+            Admission::AboveSpendingLimit => Err(Refusal::AboveSpendingLimit),
+            Admission::ExitRequested => Err(Refusal::ExitRequested),
+            Admission::VaultEventsStale => {
+                tracing::warn!("the worker's reading of the vault's events is behind");
+                Err(Refusal::NetworkUnavailable)
+            }
         }
     }
 
@@ -577,11 +618,17 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         let expiration_ledger = latest
             .checked_add(self.policy.authorization_validity_ledgers)
             .ok_or(Refusal::Internal)?;
+        let cap = match body.daily_limit {
+            None => None,
+            Some(_) if !deployment.is_vault() => return Err(Refusal::NotAVault.into()),
+            Some(limit) if limit < 0 => return Err(Refusal::InvalidLimit.into()),
+            Some(limit) => Some(limit),
+        };
         let intent = DepositIntent {
             owner: wallet.clone(),
             amount: i128::from(amount),
             deposit_id: random()?,
-            cap: None,
+            cap: cap.map(i128::from),
         };
         // `AddressV2` credentials commit the signature to the buyer's address
         // as well as the call, so it cannot authorize another account that
@@ -607,6 +654,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
                     key: &key,
                     amount,
                     deposit_id: intent.deposit_id,
+                    cap,
                     authorization_xdr: &authorization_xdr,
                     expiration_ledger,
                 },
@@ -665,8 +713,8 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         if unsigned(&signed) != prepared {
             return Err(Refusal::AuthorizationMismatch.into());
         }
-        // The deposit's transfer moves the buyer's USDC to the treasury: the
-        // buyer's entry is the only authorization the call needs.
+        // The deposit's transfer moves the buyer's USDC to the treasury or
+        // the vault: the buyer's entry is the only authorization it needs.
         self.verify_buyer_entry(&scope, &record.wallet, &signed, &prepared, |_| vec![])
             .await
             .map_err(|refusal| refusal.expired_as(Refusal::DepositExpired))?;
@@ -745,10 +793,19 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             .await
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
+        let ledger = |at: i64| u32::try_from(at).map_err(|_| corrupt("ledger beyond u32"));
+        let vault = balance.vault;
         Ok(Response::new(GetBalanceResponse {
             available: balance.available,
             pending_charges: balance.pending_charges,
             pending_withdrawals: balance.pending_withdrawals,
+            daily_limit: vault.cap,
+            pending_daily_limit: vault.pending_cap.map(|(cap, _)| cap),
+            pending_daily_limit_ledger: vault.pending_cap.map_or(Ok(0), |(_, at)| ledger(at))?,
+            exit_amount: vault.exit.map(|(amount, _)| amount),
+            exit_unlock_ledger: vault.exit.map_or(Ok(0), |(_, at)| ledger(at))?,
+            admitted_daily_limit: vault.admitted_cap,
+            reserved_for_exit: vault.reserved_for_exit,
         }))
     }
 
@@ -838,5 +895,53 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
         request: Request<GetRecurringChargeRequest>,
     ) -> Result<Response<GetRecurringChargeResponse>, Status> {
         self.get_recurring_charge_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_limit_change(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::PrepareLimitChangeRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::PrepareLimitChangeResponse>, Status> {
+        self.prepare_limit_change_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_limit_change(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::SubmitLimitChangeRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::SubmitLimitChangeResponse>, Status> {
+        self.submit_limit_change_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_limit_change(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::GetLimitChangeRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::GetLimitChangeResponse>, Status> {
+        self.get_limit_change_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn prepare_exit(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::PrepareExitRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::PrepareExitResponse>, Status> {
+        self.prepare_exit_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn submit_exit(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::SubmitExitRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::SubmitExitResponse>, Status> {
+        self.submit_exit_request(request).await
+    }
+
+    #[tracing::instrument(skip_all, fields(seller_deployment_id))]
+    async fn get_exit(
+        &self,
+        request: Request<fermah_pay_stellar_proto::v1::GetExitRequest>,
+    ) -> Result<Response<fermah_pay_stellar_proto::v1::GetExitResponse>, Status> {
+        self.get_exit_request(request).await
     }
 }

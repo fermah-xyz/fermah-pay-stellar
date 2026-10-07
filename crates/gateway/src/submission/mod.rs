@@ -86,6 +86,12 @@ labels! {
         Revocation => "revocation",
         /// Charges periods of mandates.
         RecurringBatch => "recurring_batch",
+        /// Vault: a buyer's new daily spending limit.
+        SetCap => "set_cap",
+        /// Vault: a buyer's request to exit without the operator.
+        RequestExit => "request_exit",
+        /// Vault: pays a buyer's unlocked exit; nobody authorizes it.
+        Exit => "exit",
     }
 }
 
@@ -93,7 +99,15 @@ impl Kind {
     /// Whether a buyer's authorization is part of the transaction: the
     /// buyer's wallet, which may be a contract account, takes part in it.
     const fn carries_buyer_authorization(self) -> bool {
-        matches!(self, Self::Deposit | Self::Withdrawal | Self::Mandate | Self::Revocation)
+        matches!(
+            self,
+            Self::Deposit
+                | Self::Withdrawal
+                | Self::Mandate
+                | Self::Revocation
+                | Self::SetCap
+                | Self::RequestExit
+        )
     }
 }
 

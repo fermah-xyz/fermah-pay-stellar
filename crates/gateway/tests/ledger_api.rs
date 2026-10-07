@@ -52,7 +52,7 @@ async fn ledger(h: &Harness) -> LedgerServiceClient<Channel> {
 async fn bind(h: &Harness, t: &Tenant) {
     let binding = LedgerBinding {
         contract: contract_strkey(CONTRACT),
-        treasury: treasury(),
+        treasury: Some(treasury()),
         operator: AccountAddress::from_public_key([12; 32]),
     };
     issuance::bind_ledger_contract(&h.issuer, t.deployment_id, &binding).await.unwrap();
@@ -86,7 +86,12 @@ async fn setup(h: &Harness) -> (Tenant, TestBuyer) {
 }
 
 fn prepare(buyer_id: &str, amount: i64, key: &str) -> PrepareDepositRequest {
-    PrepareDepositRequest { buyer_id: buyer_id.to_owned(), amount, idempotency_key: key.to_owned() }
+    PrepareDepositRequest {
+        buyer_id: buyer_id.to_owned(),
+        amount,
+        idempotency_key: key.to_owned(),
+        daily_limit: None,
+    }
 }
 
 async fn prepared(h: &Harness, t: &Tenant, b: &TestBuyer, amount: i64) -> Deposit {
@@ -250,7 +255,7 @@ async fn test_deposit_for_buyer_of_another_deployment_is_not_found(
 async fn bind_other(h: &Harness, t: &Tenant) {
     let binding = LedgerBinding {
         contract: contract_strkey([8; 32]),
-        treasury: treasury(),
+        treasury: Some(treasury()),
         operator: AccountAddress::from_public_key([12; 32]),
     };
     issuance::bind_ledger_contract(&h.issuer, t.deployment_id, &binding).await.unwrap();
@@ -979,7 +984,7 @@ async fn test_binding_follows_a_rotation_only_through_the_audited_sync(
     .unwrap();
     assert!(changed && !again);
     let bound = issuance::ledger_binding(&h.issuer, t.deployment_id).await.unwrap();
-    assert_eq!((bound.operator, bound.treasury), (operator, treasury.clone()));
+    assert_eq!((bound.operator, bound.treasury), (operator, Some(treasury.clone())));
     let audit: Vec<(String, String)> = sqlx::query_as(
         "SELECT previous_treasury, current_treasury FROM pay_stellar.ledger_binding_changes",
     )

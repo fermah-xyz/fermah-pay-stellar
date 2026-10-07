@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.buyers\n                SET cap = CASE WHEN pending_cap_at <= $5 THEN pending_cap ELSE cap END,\n                    pending_cap = $3, pending_cap_at = $4\n                WHERE seller_deployment_id = $1 AND wallet_address = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f25c10b5453fa9925b6d3508daa7afffddbac039d276f953580c5b82ca920173"
+}

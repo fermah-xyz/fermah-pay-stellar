@@ -355,7 +355,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         .unwrap();
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract(CONTRACT).to_string().to_string(),
-        treasury: treasury(),
+        treasury: Some(treasury()),
         operator: operator(),
     };
     issuance::bind_ledger_contract(&issuer, deployment, &binding).await.unwrap();

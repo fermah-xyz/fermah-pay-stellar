@@ -69,8 +69,12 @@ enum Command {
         /// `C...` address of the deployed contract.
         #[arg(long)]
         contract: String,
+        /// The prepaid ledger's treasury account.
+        #[arg(long, required_unless_present = "vault", conflicts_with = "vault")]
+        treasury: Option<AccountAddress>,
+        /// The contract is a prepaid vault, which holds its own USDC.
         #[arg(long)]
-        treasury: AccountAddress,
+        vault: bool,
         #[arg(long)]
         operator: AccountAddress,
     },
@@ -173,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
             let key = issuance::issue_api_key(&pool, deployment_id, &label).await?;
             serde_json::json!({ "key_id": key.id.to_string(), "token": key.token.as_str() })
         }
-        Command::BindLedger { deployment_id, contract, treasury, operator } => {
+        Command::BindLedger { deployment_id, contract, treasury, vault: _, operator } => {
             let binding = LedgerBinding { contract, treasury, operator };
             issuance::bind_ledger_contract(&pool, deployment_id, &binding).await?;
             serde_json::json!({
@@ -211,13 +215,10 @@ async fn main() -> anyhow::Result<()> {
             rpc.verify_network(bound.network).await.context("checking the RPC network")?;
             let contract = contract_id(&bound.contract)?;
             let usdc = contract_id(&bound.usdc)?;
-            let deployment = PrepaidDeployment {
-                contract,
-                usdc,
-                custody: Custody::Treasury(bound.treasury.clone()),
-            };
+            let custody = bound.treasury.clone().map_or(Custody::Vault, Custody::Treasury);
+            let deployment = PrepaidDeployment { contract, usdc, custody };
             let value = rpc
-                .read_contract(&bound.treasury, deployment.get_config_call())
+                .read_contract(&bound.operator, deployment.get_config_call())
                 .await
                 .context("reading the contract's configuration")?
                 .context("get_config returned nothing")?;

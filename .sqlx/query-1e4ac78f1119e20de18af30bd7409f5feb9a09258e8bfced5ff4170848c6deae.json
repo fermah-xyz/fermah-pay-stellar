@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT d.id, d.amount, d.deposit_id,\n                   d.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.deposits d\n            JOIN pay_stellar.buyers b ON b.id = d.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network\n            WHERE d.network = $1 AND l.operator_address = $2 AND d.state = 'signed'\n              AND d.id <> ALL($3)\n            ORDER BY d.created_at\n            LIMIT 1\n            ",
+  "query": "\n            SELECT r.id, r.kind, r.cap, r.amount, r.destination,\n                   r.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.vault_requests r\n            JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = r.seller_deployment_id AND l.network = r.network\n            WHERE r.network = $1 AND l.operator_address = $2 AND r.state = 'signed'\n              AND r.id <> ALL($3)\n            ORDER BY r.created_at\n            LIMIT 1\n            ",
   "describe": {
     "columns": [
       {
@@ -9,46 +9,68 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "pay_stellar.deposits",
+            "table": "pay_stellar.vault_requests",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "amount",
-        "type_info": "Int8",
+        "name": "kind",
+        "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "pay_stellar.deposits",
-            "name": "amount"
+            "table": "pay_stellar.vault_requests",
+            "name": "kind"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "deposit_id",
-        "type_info": "Bytea",
+        "name": "cap",
+        "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "pay_stellar.deposits",
-            "name": "deposit_id"
+            "table": "pay_stellar.vault_requests",
+            "name": "cap"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "signed_authorization_xdr!",
-        "type_info": "Text",
+        "name": "amount",
+        "type_info": "Int8",
         "origin": {
           "Table": {
-            "table": "pay_stellar.deposits",
-            "name": "signed_authorization_xdr"
+            "table": "pay_stellar.vault_requests",
+            "name": "amount"
           }
         }
       },
       {
         "ordinal": 4,
+        "name": "destination",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "destination"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "signed_authorization_xdr!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "wallet_address",
         "type_info": "Text",
         "origin": {
@@ -59,7 +81,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 7,
         "name": "contract_address",
         "type_info": "Text",
         "origin": {
@@ -70,7 +92,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 8,
         "name": "usdc_address",
         "type_info": "Text",
         "origin": {
@@ -81,7 +103,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 9,
         "name": "treasury_address",
         "type_info": "Text",
         "origin": {
@@ -102,13 +124,15 @@
     "nullable": [
       false,
       false,
-      false,
+      true,
+      true,
+      true,
       true,
       false,
       false,
       false,
-      false
+      true
     ]
   },
-  "hash": "c71260a2b520890a60d1fa9db9b4e783795fd6e5ab8faf10b3496350d824a675"
+  "hash": "1e4ac78f1119e20de18af30bd7409f5feb9a09258e8bfced5ff4170848c6deae"
 }

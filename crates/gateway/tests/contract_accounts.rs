@@ -47,7 +47,7 @@ async fn setup(h: &Harness) -> (Tenant, String) {
     let t = h.tenant("shop", "main", Network::Testnet).await;
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract(CONTRACT).to_string().to_string(),
-        treasury: treasury(),
+        treasury: Some(treasury()),
         operator: AccountAddress::from_public_key([12; 32]),
     };
     issuance::bind_ledger_contract(&h.issuer, t.deployment_id, &binding).await.unwrap();
@@ -123,6 +123,7 @@ async fn test_a_contract_account_deposit_is_accepted_only_when_the_network_accep
         buyer_id: buyer_id.clone(),
         amount: 1_000_000,
         idempotency_key: key.to_owned(),
+        daily_limit: None,
     };
     let refused = ledger(&h)
         .await
@@ -222,6 +223,7 @@ async fn test_only_the_buyers_part_of_a_failed_simulation_refuses_the_entry(
                     buyer_id: buyer_id.clone(),
                     amount: 1_000_000,
                     idempotency_key: key.to_owned(),
+                    daily_limit: None,
                 },
                 &t.token,
             ))
@@ -265,7 +267,12 @@ async fn test_a_contract_account_entry_for_another_call_is_refused_before_the_ne
     let deposit = ledger(&h)
         .await
         .prepare_deposit(authed(
-            PrepareDepositRequest { buyer_id, amount: 1_000_000, idempotency_key: "d".to_owned() },
+            PrepareDepositRequest {
+                buyer_id,
+                amount: 1_000_000,
+                idempotency_key: "d".to_owned(),
+                daily_limit: None,
+            },
             &t.token,
         ))
         .await

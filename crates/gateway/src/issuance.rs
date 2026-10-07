@@ -130,9 +130,11 @@ pub async fn revoke_api_key(pool: &PgPool, key_id: Uuid) -> Result<bool, Issuanc
 /// The on-chain accounts a deployment's ledger contract was constructed with.
 #[derive(Clone, Debug)]
 pub struct LedgerBinding {
-    /// `C...` address of the prepaid ledger contract.
+    /// `C...` address of the ledger contract.
     pub contract: String,
-    pub treasury: AccountAddress,
+    /// The prepaid ledger's treasury; `None` binds a vault, which holds its
+    /// own USDC.
+    pub treasury: Option<AccountAddress>,
     pub operator: AccountAddress,
 }
 
@@ -152,15 +154,16 @@ pub async fn bind_ledger_contract(
         r#"
         INSERT INTO pay_stellar.ledger_contracts
             (seller_deployment_id, network, contract_address, usdc_address, treasury_address,
-             operator_address)
-        VALUES ($1, $2, $3, $4, $5, $6)
+             operator_address, custody)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
         seller_deployment_id,
         network.caip2(),
         binding.contract,
         usdc,
-        binding.treasury.as_str(),
+        binding.treasury.as_ref().map(AccountAddress::as_str),
         binding.operator.as_str(),
+        if binding.treasury.is_some() { "treasury" } else { "vault" },
     )
     .execute(pool)
     .await
@@ -174,7 +177,8 @@ pub struct BoundLedger {
     pub network: Network,
     pub contract: String,
     pub usdc: String,
-    pub treasury: AccountAddress,
+    /// `None` for a vault, which holds its own USDC.
+    pub treasury: Option<AccountAddress>,
     pub operator: AccountAddress,
 }
 
@@ -198,7 +202,7 @@ pub async fn ledger_binding(
         network: row.network.parse().map_err(|_| IssuanceError::UnknownDeployment)?,
         contract: row.contract_address,
         usdc: row.usdc_address,
-        treasury: account(&row.treasury_address)?,
+        treasury: row.treasury_address.as_deref().map(account).transpose()?,
         operator: account(&row.operator_address)?,
     })
 }

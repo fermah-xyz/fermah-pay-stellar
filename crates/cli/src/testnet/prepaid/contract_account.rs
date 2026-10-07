@@ -204,6 +204,7 @@ impl Context {
                     buyer_id: buyer_id.clone(),
                     amount: DEPOSIT,
                     idempotency_key: format!("deposit-{}", unix_now()),
+                    daily_limit: None,
                 },
                 token,
             )?)

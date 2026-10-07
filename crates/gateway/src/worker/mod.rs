@@ -43,6 +43,7 @@ use uuid::Uuid;
 
 mod recurring;
 mod reserve;
+mod vault;
 mod withdrawals;
 
 pub use reserve::{Reserve, ReserveSettingsError};
@@ -146,10 +147,12 @@ fn address<A: std::str::FromStr>(raw: &str) -> Result<A, WorkerError> {
     raw.parse().map_err(|_| WorkerError::Corrupt("address outside the CHECK constraint"))
 }
 
+/// A bound deployment; the binding table holds a treasury exactly when the
+/// ledger is not a vault.
 fn deployment(
     contract: &str,
     usdc: &str,
-    treasury: &str,
+    treasury: Option<&str>,
 ) -> Result<PrepaidDeployment, WorkerError> {
     let contract_id = |raw: &str| {
         stellar_strkey::Contract::from_string(raw)
@@ -159,7 +162,10 @@ fn deployment(
     Ok(PrepaidDeployment {
         contract: contract_id(contract)?,
         usdc: contract_id(usdc)?,
-        custody: Custody::Treasury(address(treasury)?),
+        custody: match treasury {
+            Some(treasury) => Custody::Treasury(address(treasury)?),
+            None => Custody::Vault,
+        },
     })
 }
 
@@ -291,11 +297,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         }
         #[allow(clippy::cast_precision_loss)]
         metrics::gauge!("pay_stellar_submissions_in_flight").set(open as f64);
+        // Vault limit and exit events first: settling and admission rely on
+        // the buyers' rows being current.
+        self.ingest_vault_events().await?;
         self.settle().await?;
         self.conclude_lapsed_deposits().await?;
         self.conclude_lapsed_withdrawals().await?;
         self.conclude_lapsed_mandates().await?;
         self.conclude_lapsed_revocations().await?;
+        self.conclude_vault_requests().await?;
         self.expire_charges().await?;
         self.expire_recurring().await?;
         self.end_mandates().await?;
@@ -326,6 +336,12 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             }
             if next.is_none() {
                 next = self.submit_revocation().await?;
+            }
+            if next.is_none() {
+                next = self.submit_vault_request().await?;
+            }
+            if next.is_none() {
+                next = self.submit_exit().await?;
             }
             if next.is_none() {
                 next = self.submit_charges().await?;
@@ -461,7 +477,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             let pinned = deployment(
                 &contract.contract_address,
                 &contract.usdc_address,
-                &contract.treasury_address,
+                contract.treasury_address.as_deref(),
             )?;
             let instance_key = pinned.instance_key();
             let instance = chain
@@ -474,16 +490,24 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 continue;
             };
             let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(wasm) });
-            let read = chain
-                .ledger_entries(&[instance_key.clone(), code_key.clone()])
-                .await
-                .map_err(WorkerError::Chain)?;
+            // A vault's USDC is an entry of the USDC contract, extended only
+            // when the vault's balance moves: kept alive here too.
+            let balance_key = pinned.is_vault().then(|| pinned.vault_balance_key());
+            let mut keys = vec![instance_key.clone(), code_key.clone()];
+            keys.extend(balance_key.clone());
+            let read = chain.ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
             let mut shortest = u32::MAX;
             for entry in &read.entries {
                 let left = entry
                     .live_until_ledger
                     .map_or(0, |until| until.saturating_sub(read.latest_ledger));
-                let part = if entry.key == code_key { "code" } else { "instance" };
+                let part = if entry.key == code_key {
+                    "code"
+                } else if Some(&entry.key) == balance_key.as_ref() {
+                    "balance"
+                } else {
+                    "instance"
+                };
                 metrics::gauge!(
                     "pay_stellar_contract_ttl_ledgers",
                     "deployment" => contract.seller_deployment_id.to_string(),
@@ -492,18 +516,22 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 .set(f64::from(left));
                 shortest = shortest.min(left);
             }
-            if read.entries.len() < 2 || shortest >= self.settings.ttl_threshold_ledgers {
+            let has = |key: &LedgerKey| read.entries.iter().any(|entry| entry.key == *key);
+            if !has(&instance_key)
+                || !has(&code_key)
+                || shortest >= self.settings.ttl_threshold_ledgers
+            {
                 continue;
             }
-            let prepared = match self
-                .engine
-                .prepare_extend(vec![instance_key, code_key], self.settings.ttl_extend_to_ledgers)
-                .await
-            {
-                Ok(prepared) => prepared,
-                Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => break,
-                Err(error) => return Err(error.into()),
-            };
+            // A vault that holds nothing yet has no balance entry to extend.
+            let extend: Vec<LedgerKey> = keys.into_iter().filter(|key| has(key)).collect();
+            let prepared =
+                match self.engine.prepare_extend(extend, self.settings.ttl_extend_to_ledgers).await
+                {
+                    Ok(prepared) => prepared,
+                    Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => break,
+                    Err(error) => return Err(error.into()),
+                };
             let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
             match self.engine.record(&mut conn, &prepared).await {
                 Ok(_) => {}
@@ -662,6 +690,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 "mandate" => self.settle_mandate(row.id, &resolution).await?,
                 "revocation" => self.settle_revocation(row.id, &resolution).await?,
                 "recurring_batch" => self.settle_recurring(row.id, &resolution).await?,
+                "set_cap" | "request_exit" => {
+                    self.settle_vault_request(row.id, &resolution).await?
+                }
                 _ => {}
             }
         }
@@ -692,8 +723,11 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .await
         .map_err(store("read submitted charges"))?;
         let Some(first) = rows.first() else { return Ok(()) };
-        let deployment =
-            deployment(&first.contract_address, &first.usdc_address, &first.treasury_address)?;
+        let deployment = deployment(
+            &first.contract_address,
+            &first.usdc_address,
+            first.treasury_address.as_deref(),
+        )?;
 
         // What the batch's answer settles directly; the rest is decided from
         // each charge's record on the contract.
@@ -1027,7 +1061,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             deployment: deployment(
                 &row.contract_address,
                 &row.usdc_address,
-                &row.treasury_address,
+                row.treasury_address.as_deref(),
             )?,
         };
         match resolution.state {
@@ -1178,7 +1212,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     deployment: deployment(
                         &row.contract_address,
                         &row.usdc_address,
-                        &row.treasury_address,
+                        row.treasury_address.as_deref(),
                     )?,
                 })
             })
@@ -1192,7 +1226,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     async fn submit_deposit(&self) -> Result<Option<Uuid>, WorkerError> {
         let Some(row) = sqlx::query!(
             r#"
-            SELECT d.id, d.amount, d.deposit_id,
+            SELECT d.id, d.amount, d.deposit_id, d.cap,
                    d.signed_authorization_xdr AS "signed_authorization_xdr!",
                    b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address
             FROM pay_stellar.deposits d
@@ -1215,12 +1249,12 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             return Ok(None);
         };
         let deployment =
-            deployment(&row.contract_address, &row.usdc_address, &row.treasury_address)?;
+            deployment(&row.contract_address, &row.usdc_address, row.treasury_address.as_deref())?;
         let intent = DepositIntent {
             owner: address(&row.wallet_address)?,
             amount: i128::from(row.amount),
             deposit_id: hash32(row.deposit_id)?,
-            cap: None,
+            cap: row.cap.map(i128::from),
         };
         let entry = SorobanAuthorizationEntry::from_xdr_base64(
             &row.signed_authorization_xdr,
@@ -1357,12 +1391,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         else {
             return Ok(None);
         };
-        let deployment =
-            deployment(&target.contract_address, &target.usdc_address, &target.treasury_address)?;
+        let deployment = deployment(
+            &target.contract_address,
+            &target.usdc_address,
+            target.treasury_address.as_deref(),
+        )?;
         let limit = i64::try_from(self.settings.max_batch.min(MAX_BATCH)).unwrap_or(1);
         let batch = sqlx::query!(
             r#"
-            SELECT c.id, c.charge_id, c.last_ledger, c.amount, b.wallet_address
+            SELECT c.id, c.charge_id, c.last_ledger, c.amount, c.day, b.wallet_address
             FROM pay_stellar.charges c
             JOIN pay_stellar.buyers b ON b.id = c.buyer_id
             WHERE c.seller_deployment_id = $1 AND c.state = 'admitted' AND c.last_ledger > $3
@@ -1388,7 +1425,8 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                     amount: i128::from(c.amount),
                     last_ledger: u32::try_from(c.last_ledger)
                         .map_err(|_| WorkerError::Corrupt("charge last ledger out of range"))?,
-                    day: 0,
+                    day: u64::try_from(c.day)
+                        .map_err(|_| WorkerError::Corrupt("charge day out of range"))?,
                 })
             })
             .collect::<Result<Vec<_>, WorkerError>>()?;

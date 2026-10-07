@@ -4,7 +4,7 @@
 //! deployment is indistinguishable from a missing one.
 
 use fermah_pay_stellar_chain::prepaid::{Custody, PrepaidDeployment};
-use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey, Network};
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress, IdempotencyKey, Network};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -13,11 +13,13 @@ use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 
 mod mandates;
+mod vault;
 
 pub use mandates::{
     MandateRecord, MandateState, NewMandate, NewRecurringCharge, NewRevocation, RecurringAdmission,
     RecurringChargeRecord, RecurringChargeState, RevocationRecord, RevocationState,
 };
+pub use vault::{NewVaultRequest, VaultRequestKind, VaultRequestRecord, VaultRequestState};
 
 const DEPOSIT_KEY: &str = "deposits_idempotency_key";
 const CHARGE_KEY: &str = "charges_idempotency_key";
@@ -138,6 +140,8 @@ pub struct NewDeposit<'a> {
     pub key: &'a IdempotencyKey,
     pub amount: i64,
     pub deposit_id: [u8; 32],
+    /// Vault: the daily spending limit signed with the deposit.
+    pub cap: Option<i64>,
     pub authorization_xdr: &'a str,
     pub expiration_ledger: u32,
 }
@@ -191,6 +195,9 @@ pub enum WithdrawalSigning {
     NotOpen,
     /// The available balance does not cover the amount; nothing changed.
     InsufficientBalance,
+    /// Vault: the withdrawal would not leave what the buyer's exit may take;
+    /// nothing changed.
+    ExitRequested,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,6 +209,37 @@ pub enum Admission {
     Conflict,
     BuyerNotFound,
     InsufficientBalance,
+    /// Vault: past the buyer's daily spending limit, counting a lower limit
+    /// they asked for.
+    AboveSpendingLimit,
+    /// Vault: the charge would not leave what the buyer's exit still needs.
+    ExitRequested,
+    /// Vault: the worker has not read the contract's events recently enough
+    /// for a limit change or exit made outside the gateway to be known.
+    VaultEventsStale,
+}
+
+/// When a charge may settle and what it counts against.
+#[derive(Clone, Copy, Debug)]
+pub struct ChargeWindow {
+    /// The last ledger the contract accepts it in.
+    pub last_ledger: u32,
+    /// The UTC day of ledger time it is admitted in; a vault counts it
+    /// against that day's share of the buyer's limit.
+    pub day: u64,
+    /// What admitting against a vault also checks; `None` for a prepaid
+    /// ledger.
+    pub vault: Option<VaultAdmission>,
+}
+
+/// What admitting a charge against a vault also checks.
+#[derive(Clone, Copy, Debug)]
+pub struct VaultAdmission {
+    /// The latest ledger the network reports.
+    pub latest: u32,
+    /// How far behind `latest` the worker's reading of the contract's
+    /// events may be.
+    pub stale_after: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -209,6 +247,64 @@ pub struct Balance {
     pub available: i64,
     pub pending_charges: i64,
     pub pending_withdrawals: i64,
+    pub vault: VaultBuyer,
+}
+
+/// A vault buyer's limit and exit; zero or absent for a prepaid ledger's.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct VaultBuyer {
+    /// The limit in force as the contract's events last showed it.
+    pub cap: i64,
+    /// A lower limit and the ledger it applies from, as the events showed.
+    pub pending_cap: Option<(i64, i64)>,
+    /// An exit's amount and unlock ledger, as the events showed.
+    pub exit: Option<(i64, i64)>,
+    /// What admission applies: the lowest limit known, counting the buyer's
+    /// signed requests not resolved yet, and the most an exit may take.
+    pub admitted_cap: i64,
+    pub reserved_for_exit: i64,
+}
+
+/// What a vault buyer's admission must respect beyond the balance: the
+/// lowest daily limit known and the amount an exit may take. Known means
+/// shown by the contract's events (the buyer's row) or signed through the
+/// API and not resolved yet: a lower limit or an exit counts from the moment
+/// the buyer signs it, before the contract has seen it, and stops counting
+/// only once the request is resolved and its effect, if any, is in the row.
+pub(crate) async fn reservations(
+    tx: &mut sqlx::PgConnection,
+    buyer_id: Uuid,
+) -> Result<(i64, i64), StoreError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT LEAST(b.cap, b.pending_cap,
+                     (SELECT MIN(r.cap) FROM pay_stellar.vault_requests r
+                      WHERE r.buyer_id = b.id AND r.kind = 'set_cap'
+                        AND r.state IN ('signed', 'submitted')),
+                     (SELECT MIN(d.cap) FROM pay_stellar.deposits d
+                      WHERE d.buyer_id = b.id AND d.cap IS NOT NULL
+                        AND d.state IN ('signed', 'submitted'))) AS "cap!",
+               GREATEST(COALESCE(b.exit_amount, 0),
+                        COALESCE((SELECT MAX(r.amount) FROM pay_stellar.vault_requests r
+                                  WHERE r.buyer_id = b.id AND r.kind = 'request_exit'
+                                    AND r.state IN ('signed', 'submitted')), 0)) AS "exit!"
+        FROM pay_stellar.buyers b WHERE b.id = $1
+        "#,
+        buyer_id,
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(query("read the buyer's reservations"))?;
+    Ok((row.cap, row.exit))
+}
+
+/// A binding's custody, from its stored kind and treasury.
+fn custody(kind: &str, treasury: Option<&str>) -> Result<Custody, StoreError> {
+    match (kind, treasury) {
+        ("treasury", Some(treasury)) => Ok(Custody::Treasury(address(treasury)?)),
+        ("vault", None) => Ok(Custody::Vault),
+        _ => Err(StoreError::Corrupt("ledger binding custody")),
+    }
 }
 
 /// The on-chain identifier of the charge a seller names with `key`: the
@@ -256,7 +352,7 @@ impl Store {
     ) -> Result<Option<PrepaidDeployment>, StoreError> {
         let row = sqlx::query!(
             r#"
-            SELECT contract_address, usdc_address, treasury_address
+            SELECT contract_address, usdc_address, treasury_address, custody
             FROM pay_stellar.ledger_contracts
             WHERE seller_deployment_id = $1 AND network = $2
             "#,
@@ -270,10 +366,29 @@ impl Store {
             Ok(PrepaidDeployment {
                 contract: contract_id(&row.contract_address)?,
                 usdc: contract_id(&row.usdc_address)?,
-                custody: Custody::Treasury(address(&row.treasury_address)?),
+                custody: custody(&row.custody, row.treasury_address.as_deref())?,
             })
         })
         .transpose()
+    }
+
+    /// The operator account the caller's deployment is bound to.
+    pub async fn ledger_operator(
+        &self,
+        scope: &Scope,
+    ) -> Result<Option<AccountAddress>, StoreError> {
+        let row = sqlx::query_scalar!(
+            r#"
+            SELECT operator_address FROM pay_stellar.ledger_contracts
+            WHERE seller_deployment_id = $1 AND network = $2
+            "#,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(query("read ledger operator"))?;
+        row.map(|operator| address(&operator)).transpose()
     }
 
     /// The caller's buyer holding `wallet`; a wallet belongs to at most one
@@ -350,8 +465,8 @@ impl Store {
             r#"
             INSERT INTO pay_stellar.deposits
                 (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, deposit_id,
-                 authorization_xdr, expiration_ledger)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 authorization_xdr, expiration_ledger, cap)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
             id,
             deposit.buyer_id,
@@ -362,6 +477,7 @@ impl Store {
             deposit.deposit_id.as_slice(),
             deposit.authorization_xdr,
             i64::from(deposit.expiration_ledger),
+            deposit.cap,
         )
         .execute(&mut *tx)
         .await;
@@ -413,6 +529,8 @@ impl Store {
                 SELECT (SELECT count(*) FROM pay_stellar.mandates
                         WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day')
                      + (SELECT count(*) FROM pay_stellar.revocations
+                        WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day')
+                     + (SELECT count(*) FROM pay_stellar.vault_requests
                         WHERE seller_deployment_id = $1 AND created_at > now() - interval '1 day')
                        AS "recent!"
                 "#,
@@ -475,14 +593,17 @@ impl Store {
                 .fetch_one(&mut *tx)
                 .await
             }
-            // Mandates and revocations share one quota: each is a change to
-            // the buyer's standing authorization the operator pays to send.
+            // Mandates, revocations, limit changes and exit requests share
+            // one quota: each is a change to the buyer's standing
+            // authorization the operator pays to send.
             "mandates" => {
                 sqlx::query_scalar!(
                     r#"
                 SELECT (SELECT count(*) FROM pay_stellar.mandates
                         WHERE buyer_id = $1 AND created_at > now() - interval '1 day')
                      + (SELECT count(*) FROM pay_stellar.revocations
+                        WHERE buyer_id = $1 AND created_at > now() - interval '1 day')
+                     + (SELECT count(*) FROM pay_stellar.vault_requests
                         WHERE buyer_id = $1 AND created_at > now() - interval '1 day')
                        AS "recent!"
                 "#,
@@ -543,7 +664,9 @@ impl Store {
     }
 
     /// Stores the verified signed entry if the deposit still awaits one.
-    /// Returns whether it did; a concurrent submission may have won.
+    /// Returns whether it did; a concurrent submission may have won. A vault
+    /// deposit's limit counts towards admission from then on (see
+    /// [`reservations`]).
     pub async fn sign_deposit(
         &self,
         scope: &Scope,
@@ -580,9 +703,9 @@ impl Store {
         buyer_id: Uuid,
         amount: i64,
         key: &IdempotencyKey,
-        last_ledger: u32,
+        window: ChargeWindow,
     ) -> Result<Admission, StoreError> {
-        match self.try_admit_charge(scope, buyer_id, amount, key, last_ledger).await {
+        match self.try_admit_charge(scope, buyer_id, amount, key, window).await {
             // Same key, another buyer: the two requests locked different rows
             // and raced to the key. Reading after the winner committed decides.
             Err(StoreError::Query { source, .. }) if is_violation_of(&source, CHARGE_KEY) => {
@@ -601,8 +724,10 @@ impl Store {
         buyer_id: Uuid,
         amount: i64,
         key: &IdempotencyKey,
-        last_ledger: u32,
+        window: ChargeWindow,
     ) -> Result<Admission, StoreError> {
+        let ChargeWindow { last_ledger, day, vault } = window;
+        let day = i64::try_from(day).map_err(|_| StoreError::Corrupt("day beyond i64"))?;
         let mut tx = self.pool.begin().await.map_err(query("begin charge admission"))?;
         let buyer = sqlx::query!(
             r#"
@@ -626,6 +751,42 @@ impl Store {
         if buyer.available < amount {
             return Ok(Admission::InsufficientBalance);
         }
+        if let Some(vault) = vault {
+            let read = sqlx::query_scalar!(
+                "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
+                scope.seller_deployment_id(),
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(query("read vault event cursor"))?;
+            if read.is_none_or(|read| i64::from(vault.latest) - read > i64::from(vault.stale_after))
+            {
+                return Ok(Admission::VaultEventsStale);
+            }
+            // A lower limit applies to every charge from the moment it is
+            // known, not only to charges that could settle after it takes
+            // effect: one admitted later but settling sooner would otherwise
+            // use up the day's share the lower limit leaves. Likewise an
+            // exit's amount stays free from every charge.
+            let (cap, exit) = reservations(&mut tx, buyer_id).await?;
+            let counted = sqlx::query_scalar!(
+                r#"
+                SELECT COALESCE(SUM(amount), 0)::BIGINT AS "counted!" FROM pay_stellar.charges
+                WHERE buyer_id = $1 AND day = $2 AND state <> 'refused'
+                "#,
+                buyer_id,
+                day,
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(query("count the day's charges"))?;
+            if counted.saturating_add(amount) > cap {
+                return Ok(Admission::AboveSpendingLimit);
+            }
+            if buyer.available - amount < exit {
+                return Ok(Admission::ExitRequested);
+            }
+        }
         sqlx::query!(
             "UPDATE pay_stellar.buyers SET available = available - $2 WHERE id = $1",
             buyer_id,
@@ -639,8 +800,8 @@ impl Store {
             r#"
             INSERT INTO pay_stellar.charges
                 (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, charge_id,
-                 last_ledger)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 last_ledger, day)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id, created_at
             "#,
             Uuid::now_v7(),
@@ -651,6 +812,7 @@ impl Store {
             amount,
             charge_id.as_slice(),
             i64::from(last_ledger),
+            day,
         )
         .fetch_one(&mut *tx)
         .await
@@ -779,7 +941,8 @@ impl Store {
     ) -> Result<Option<Balance>, StoreError> {
         let row = sqlx::query!(
             r#"
-            SELECT b.available,
+            SELECT b.id, b.available, b.cap, b.pending_cap, b.pending_cap_at, b.exit_amount,
+                   b.exit_unlock_at,
                    COALESCE((SELECT SUM(c.amount) FROM pay_stellar.charges c
                              WHERE c.buyer_id = b.id AND c.state IN ('admitted', 'submitted')),
                             0)::BIGINT AS "pending!",
@@ -798,10 +961,20 @@ impl Store {
         .fetch_optional(&self.pool)
         .await
         .map_err(query("read balance"))?;
-        Ok(row.map(|row| Balance {
+        let Some(row) = row else { return Ok(None) };
+        let mut conn = self.pool.acquire().await.map_err(query("acquire connection"))?;
+        let (admitted_cap, reserved_for_exit) = reservations(&mut conn, row.id).await?;
+        Ok(Some(Balance {
             available: row.available,
             pending_charges: row.pending,
             pending_withdrawals: row.withdrawing,
+            vault: VaultBuyer {
+                cap: row.cap,
+                pending_cap: row.pending_cap.zip(row.pending_cap_at),
+                exit: row.exit_amount.zip(row.exit_unlock_at),
+                admitted_cap,
+                reserved_for_exit,
+            },
         }))
     }
 
@@ -916,7 +1089,7 @@ impl Store {
         let mut tx = self.pool.begin().await.map_err(query("begin withdrawal signing"))?;
         let buyer = sqlx::query!(
             r#"
-            SELECT b.available, w.amount FROM pay_stellar.withdrawals w
+            SELECT b.id, b.available, w.amount FROM pay_stellar.withdrawals w
             JOIN pay_stellar.buyers b ON b.id = w.buyer_id
             WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3
             FOR UPDATE OF b
@@ -946,6 +1119,12 @@ impl Store {
         }
         if buyer.available < buyer.amount {
             return Ok(WithdrawalSigning::InsufficientBalance);
+        }
+        // A withdrawal, like a charge, leaves free what an exit may take, so
+        // the exit pays in full and nothing held is taken by it.
+        let (_, exit) = reservations(&mut tx, buyer.id).await?;
+        if buyer.available - buyer.amount < exit {
+            return Ok(WithdrawalSigning::ExitRequested);
         }
         sqlx::query!(
             r#"

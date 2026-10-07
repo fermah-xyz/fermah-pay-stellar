@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT c.id, c.charge_id, c.last_ledger, c.amount, b.wallet_address\n            FROM pay_stellar.charges c\n            JOIN pay_stellar.buyers b ON b.id = c.buyer_id\n            WHERE c.seller_deployment_id = $1 AND c.state = 'admitted' AND c.last_ledger > $3\n            ORDER BY c.created_at, c.id\n            LIMIT $2\n            ",
+  "query": "\n            SELECT c.id, c.charge_id, c.last_ledger, c.amount, c.day, b.wallet_address\n            FROM pay_stellar.charges c\n            JOIN pay_stellar.buyers b ON b.id = c.buyer_id\n            WHERE c.seller_deployment_id = $1 AND c.state = 'admitted' AND c.last_ledger > $3\n            ORDER BY c.created_at, c.id\n            LIMIT $2\n            ",
   "describe": {
     "columns": [
       {
@@ -49,6 +49,17 @@
       },
       {
         "ordinal": 4,
+        "name": "day",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.charges",
+            "name": "day"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "wallet_address",
         "type_info": "Text",
         "origin": {
@@ -71,8 +82,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "f4d6f336a19b7b96251971b82a7df451da816b891f60af341640f94c361fba40"
+  "hash": "67c624b02b6ac7955ed220795662dbf8007134932464f7548d6d4f157c260fdc"
 }

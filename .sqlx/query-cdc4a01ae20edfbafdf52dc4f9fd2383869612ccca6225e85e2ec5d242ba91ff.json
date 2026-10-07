@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.vault_requests\n                SET state = $2, resolved_at = now(), last_error = COALESCE($3, last_error)\n                WHERE id = $1 AND state IN ('awaiting_signature', 'signed', 'submitted')\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cdc4a01ae20edfbafdf52dc4f9fd2383869612ccca6225e85e2ec5d242ba91ff"
+}

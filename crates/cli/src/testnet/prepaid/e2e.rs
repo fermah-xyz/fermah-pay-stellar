@@ -241,7 +241,7 @@ impl Context {
             deployment,
             &LedgerBinding {
                 contract: recorded.contract.clone(),
-                treasury: recorded.treasury.parse()?,
+                treasury: Some(recorded.treasury.parse()?),
                 operator: operator.address(),
             },
         )
@@ -265,6 +265,7 @@ impl Context {
                 withdrawals_to_other_accounts: false,
                 max_buyer_resource_fee:
                     fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
+                vault_events_stale_ledgers: 2880,
             },
         );
         let mut gateway_stop = stopped.clone();
@@ -384,6 +385,7 @@ impl Context {
                     buyer_id: buyer_id.clone(),
                     amount: DEPOSIT,
                     idempotency_key: "deposit-1".to_owned(),
+                    daily_limit: None,
                 },
                 token,
             )?)
