@@ -53,6 +53,7 @@ its role accounts are listed under
 
 ```text
 contracts/prepaid     Soroban prepaid ledger contract
+contracts/vault       Soroban prepaid vault: holds the USDC, buyer-signed limits, exits (not yet deployed)
 contracts/example-account
                       a minimal contract account (smart wallet) for tests
 crates/domain         validated values (network, account address, external reference)
