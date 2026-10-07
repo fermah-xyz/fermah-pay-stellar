@@ -53,7 +53,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
 async fn bind(h: &Harness, tenant: &Tenant, pay_to: &str) {
     let binding = LedgerBinding {
         contract: pay_to.to_owned(),
-        treasury: AccountAddress::from_public_key([11; 32]),
+        treasury: Some(AccountAddress::from_public_key([11; 32])),
         operator: AccountAddress::from_public_key([12; 32]),
     };
     issuance::bind_ledger_contract(&h.issuer, tenant.deployment_id, &binding).await.unwrap();

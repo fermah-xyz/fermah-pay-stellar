@@ -80,6 +80,27 @@ service LedgerService {
   // returns the existing charge with `created = false`.
   rpc CreateRecurringCharge(CreateRecurringChargeRequest) returns (CreateRecurringChargeResponse);
   rpc GetRecurringCharge(GetRecurringChargeRequest) returns (GetRecurringChargeResponse);
+
+  // Vault deployments only (refused with `not_a_vault` otherwise).
+  //
+  // Creates a change of the buyer's daily spending limit and returns the
+  // authorization entry the wallet must sign. A limit at least the one in
+  // force applies once the contract processes it; a lower one applies on
+  // the contract only after its notice, but charges are admitted against it
+  // as soon as the signed entry is submitted. Idempotent like
+  // `PrepareDeposit`.
+  rpc PrepareLimitChange(PrepareLimitChangeRequest) returns (PrepareLimitChangeResponse);
+  rpc SubmitLimitChange(SubmitLimitChangeRequest) returns (SubmitLimitChangeResponse);
+  rpc GetLimitChange(GetLimitChangeRequest) returns (GetLimitChangeResponse);
+  // Creates the buyer's request to take `amount` to `destination` without
+  // the operator, payable by anyone once the contract's notice has passed,
+  // and returns the authorization entry the wallet must sign. Once it is
+  // submitted, charges and withdrawals leave its amount free. A cooperative
+  // withdrawal (`PrepareWithdrawal`) pays at once instead. Idempotent like
+  // `PrepareDeposit`.
+  rpc PrepareExit(PrepareExitRequest) returns (PrepareExitResponse);
+  rpc SubmitExit(SubmitExitRequest) returns (SubmitExitResponse);
+  rpc GetExit(GetExitRequest) returns (GetExitResponse);
 }
 
 enum DepositState {
@@ -126,6 +147,10 @@ message PrepareDepositRequest {
   int64 amount = 2;
   // 1-128 characters of [A-Za-z0-9._:@+-], unique within the deployment.
   string idempotency_key = 3;
+  // Vault deployments: the buyer's daily spending limit, signed with the
+  // deposit, as for `PrepareLimitChange`. A buyer with no limit can deposit
+  // but cannot be charged.
+  optional int64 daily_limit = 4;
 }
 
 message PrepareDepositResponse {
@@ -221,6 +246,19 @@ message GetBalanceResponse {
   int64 pending_charges = 2;
   // Held for signed withdrawals not yet final.
   int64 pending_withdrawals = 3;
+  // Vault deployments only. As the contract's events last showed them: the
+  // daily spending limit in force; a lower limit and the ledger it applies
+  // from; an exit's amount and the ledger it unlocks at.
+  int64 daily_limit = 4;
+  optional int64 pending_daily_limit = 5;
+  uint32 pending_daily_limit_ledger = 6;
+  optional int64 exit_amount = 7;
+  uint32 exit_unlock_ledger = 8;
+  // What admission applies now: the lowest daily limit known, counting
+  // limits the buyer signed that are not resolved yet, and the amount an
+  // exit may take, which charges and withdrawals leave free.
+  int64 admitted_daily_limit = 9;
+  int64 reserved_for_exit = 10;
 }
 
 enum WithdrawalState {
@@ -479,4 +517,107 @@ message GetRecurringChargeRequest {
 
 message GetRecurringChargeResponse {
   RecurringCharge recurring_charge = 1;
+}
+
+enum VaultRequestState {
+  VAULT_REQUEST_STATE_UNSPECIFIED = 0;
+  // Waiting for the buyer's signed authorization entry.
+  VAULT_REQUEST_STATE_AWAITING_SIGNATURE = 1;
+  // Signed and verified; waiting to be submitted.
+  VAULT_REQUEST_STATE_SIGNED = 2;
+  // In a transaction sent to the network.
+  VAULT_REQUEST_STATE_SUBMITTED = 3;
+  // The contract holds it: the limit, or the exit request.
+  VAULT_REQUEST_STATE_CONFIRMED = 4;
+  // Included as failed, and the contract does not hold it.
+  VAULT_REQUEST_STATE_FAILED = 5;
+  // The authorization lapsed and the contract does not hold it.
+  VAULT_REQUEST_STATE_EXPIRED = 6;
+}
+
+message LimitChange {
+  string limit_change_id = 1;
+  string buyer_id = 2;
+  // The daily spending limit, in USDC base units.
+  int64 daily_limit = 3;
+  VaultRequestState state = 4;
+  string authorization_entry_xdr = 5;
+  string signature_payload = 6;
+  uint32 expiration_ledger = 7;
+  string transaction_hash = 8;
+  uint32 ledger = 9;
+  string created_at = 10;
+}
+
+message PrepareLimitChangeRequest {
+  string buyer_id = 1;
+  int64 daily_limit = 2;
+  string idempotency_key = 3;
+}
+
+message PrepareLimitChangeResponse {
+  LimitChange limit_change = 1;
+  bool created = 2;
+}
+
+message SubmitLimitChangeRequest {
+  string limit_change_id = 1;
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitLimitChangeResponse {
+  LimitChange limit_change = 1;
+}
+
+message GetLimitChangeRequest {
+  string limit_change_id = 1;
+}
+
+message GetLimitChangeResponse {
+  LimitChange limit_change = 1;
+}
+
+message Exit {
+  string exit_id = 1;
+  string buyer_id = 2;
+  int64 amount = 3;
+  // Account that receives the USDC.
+  string destination = 4;
+  VaultRequestState state = 5;
+  string authorization_entry_xdr = 6;
+  string signature_payload = 7;
+  uint32 expiration_ledger = 8;
+  string transaction_hash = 9;
+  uint32 ledger = 10;
+  string created_at = 11;
+}
+
+message PrepareExitRequest {
+  string buyer_id = 1;
+  int64 amount = 2;
+  // Account to receive the USDC; the buyer's wallet when empty.
+  string destination = 3;
+  string idempotency_key = 4;
+}
+
+message PrepareExitResponse {
+  Exit exit = 1;
+  bool created = 2;
+}
+
+message SubmitExitRequest {
+  string exit_id = 1;
+  string signed_authorization_entry_xdr = 2;
+}
+
+message SubmitExitResponse {
+  Exit exit = 1;
+}
+
+message GetExitRequest {
+  string exit_id = 1;
+}
+
+message GetExitResponse {
+  Exit exit = 1;
 }

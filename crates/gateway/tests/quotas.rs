@@ -39,7 +39,7 @@ async fn start(opts: PgPoolOptions, connect: PgConnectOptions) -> (Harness, Tena
     let t = h.tenant("shop", "main", Network::Testnet).await;
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract([7; 32]).to_string().to_string(),
-        treasury: AccountAddress::from_public_key([11; 32]),
+        treasury: Some(AccountAddress::from_public_key([11; 32])),
         operator: AccountAddress::from_public_key([12; 32]),
     };
     issuance::bind_ledger_contract(&h.issuer, t.deployment_id, &binding).await.unwrap();
@@ -72,6 +72,7 @@ async fn deposit(
         buyer_id: buyer_id.to_owned(),
         amount: 100,
         idempotency_key: key.to_owned(),
+        daily_limit: None,
     };
     Ok(LedgerServiceClient::new(h.channel().await)
         .prepare_deposit(authed(request, &t.token))
@@ -225,6 +226,7 @@ async fn test_deposits_per_buyer_are_limited_per_day_even_when_concurrent(
                     buyer_id: alice,
                     amount: 100,
                     idempotency_key: format!("d-{i}"),
+                    daily_limit: None,
                 };
                 LedgerServiceClient::new(channel).prepare_deposit(authed(request, &token)).await
             })
@@ -290,6 +292,7 @@ async fn test_deposits_per_deployment_are_limited_across_buyers_even_when_concur
                 buyer_id: buyer.clone(),
                 amount: 100,
                 idempotency_key: key.to_owned(),
+                daily_limit: None,
             };
             tokio::spawn(async move {
                 LedgerServiceClient::new(channel).prepare_deposit(authed(request, &token)).await

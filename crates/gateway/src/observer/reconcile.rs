@@ -164,7 +164,12 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
     }
 
     async fn reconcile_one(&self, deployment: &Deployment) -> Result<Vec<Recorded>, ObserverError> {
-        let reading = self.read_chain(deployment).await?;
+        // A vault holds its own USDC; this reconciles a treasury's.
+        let Some(treasury) = &deployment.treasury else {
+            tracing::debug!(seller_deployment_id = %deployment.id, "vault not reconciled");
+            return Ok(Vec::new());
+        };
+        let reading = self.read_chain(deployment, treasury).await?;
         // Events up to the reading's ledger must all be stored before the
         // event sums can describe that ledger.
         self.catch_up(deployment).await?;
@@ -392,8 +397,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             .into_iter()
             .find(|d| d.id == deployment)
             .ok_or(ObserverError::UnknownDeployment(deployment))?;
+        let treasury = bound.treasury.clone().ok_or(ObserverError::UnreadableContract)?;
         let before = quiet_books(operator, deployment).await?;
-        let reading = self.read_chain(&bound).await?;
+        let reading = self.read_chain(&bound, &treasury).await?;
         let after = quiet_books(operator, deployment).await?;
         if before != after {
             return Err(ObserverError::NotQuiet);
@@ -431,14 +437,18 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
     /// Reads the instance entry and the treasury's trustline in one call.
     /// The trustline read is the treasury the same read names; after a
     /// rotation the binding's may be stale, so it is read again.
-    async fn read_chain(&self, deployment: &Deployment) -> Result<Reading, ObserverError> {
+    async fn read_chain(
+        &self,
+        deployment: &Deployment,
+        bound: &AccountAddress,
+    ) -> Result<Reading, ObserverError> {
         let usdc = circle_usdc(self.network);
         let probe = PrepaidDeployment {
             contract: deployment.contract,
             usdc: asset_contract_id(&usdc, self.network),
-            custody: Custody::Treasury(deployment.treasury.clone()),
+            custody: Custody::Treasury(bound.clone()),
         };
-        let mut treasury = deployment.treasury.clone();
+        let mut treasury = bound.clone();
         for _ in 0..3 {
             let line = trustline_key(&treasury, &usdc);
             let reserve = self.reserves.get(&treasury).cloned();

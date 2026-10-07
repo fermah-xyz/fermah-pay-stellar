@@ -17,7 +17,7 @@ use fermah_pay_stellar_chain::stellar_xdr::{
     SorobanAuthorizationEntry, SorobanCredentials,
 };
 use fermah_pay_stellar_chain::transaction::account_id;
-use fermah_pay_stellar_domain::ChainAddress;
+use fermah_pay_stellar_domain::{AccountAddress, ChainAddress};
 use uuid::Uuid;
 
 use super::{Worker, WorkerError, address, deployment, hash32, store};
@@ -70,7 +70,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             deployment: deployment(
                 &row.contract_address,
                 &row.usdc_address,
-                &row.treasury_address,
+                row.treasury_address.as_deref(),
             )?,
         };
         match resolution.state {
@@ -245,20 +245,20 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 deployment: deployment(
                     &row.contract_address,
                     &row.usdc_address,
-                    &row.treasury_address,
+                    row.treasury_address.as_deref(),
                 )?,
             });
         }
         self.conclude_withdrawals(&signed, "expired").await
     }
 
-    /// Sends the oldest signed withdrawal of a deployment whose treasury key
-    /// this worker holds, with a treasury authorization valid for as long
-    /// as the operator's authorization of a batch.
+    /// Sends the oldest signed withdrawal this worker can co-sign: of a
+    /// vault, with the operator's authorization; of a prepaid ledger whose
+    /// treasury key it holds, with the treasury's. The co-signature is valid
+    /// for as long as the operator's authorization of a batch.
     #[tracing::instrument(skip_all, fields(withdrawal_id, submission_id))]
     pub(super) async fn submit_withdrawal(&self) -> Result<Option<Uuid>, WorkerError> {
-        let Some(treasury) = &self.treasury else { return Ok(None) };
-        let treasury_address = treasury.address();
+        let treasury_address = self.treasury.as_ref().map(|treasury| treasury.address());
         let latest = self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
         let Some(row) = sqlx::query!(
             r#"
@@ -269,14 +269,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             JOIN pay_stellar.buyers b ON b.id = w.buyer_id
             JOIN pay_stellar.ledger_contracts l
               ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network
-            WHERE w.network = $1 AND l.operator_address = $2 AND l.treasury_address = $3
+            WHERE w.network = $1 AND l.operator_address = $2
+              AND (l.custody = 'vault' OR l.treasury_address = $3)
               AND w.state = 'signed' AND w.id <> ALL($4) AND w.expiration_ledger > $5
             ORDER BY w.created_at
             LIMIT 1
             "#,
             self.network().caip2(),
             self.operator_address.as_str(),
-            treasury_address.as_str(),
+            treasury_address.as_ref().map(AccountAddress::as_str),
             &self.set_aside_ids(),
             i64::from(latest),
         )
@@ -287,7 +288,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             return Ok(None);
         };
         let deployment =
-            deployment(&row.contract_address, &row.usdc_address, &row.treasury_address)?;
+            deployment(&row.contract_address, &row.usdc_address, row.treasury_address.as_deref())?;
         let intent = WithdrawIntent {
             owner: address(&row.wallet_address)?,
             amount: i128::from(row.amount),
@@ -307,11 +308,24 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             self.set_aside(row.id);
             return Ok(None);
         }
+        let (cosigner, cosigner_address, role) = match (&self.treasury, deployment.treasury()) {
+            (_, None) => (
+                &self.operator,
+                self.operator_address.clone(),
+                crate::submission::SigningRole::Operator,
+            ),
+            (Some(treasury), Some(_)) => {
+                (treasury, treasury.address(), crate::submission::SigningRole::Treasury)
+            }
+            (None, Some(_)) => {
+                return Err(WorkerError::Corrupt("withdrawal without its co-signer"));
+            }
+        };
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).map_err(WorkerError::Randomness)?;
         let unsigned = SorobanAuthorizationEntry {
             credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
-                address: ScAddress::Account(account_id(&treasury_address)),
+                address: ScAddress::Account(account_id(&cosigner_address)),
                 nonce: i64::from_le_bytes(nonce),
                 signature_expiration_ledger: latest
                     .saturating_add(self.settings.operator_authorization_ledgers),
@@ -319,17 +333,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             }),
             root_invocation: deployment.cosigner_withdraw_authorization(&intent),
         };
-        let treasury_entry =
-            sign_entry_with(&unsigned, network_id(self.network()), treasury.as_ref())
+        let cosigner_entry =
+            sign_entry_with(&unsigned, network_id(self.network()), cosigner.as_ref())
                 .await
-                .inspect_err(|_| {
-                    crate::submission::signing_failed(crate::submission::SigningRole::Treasury)
-                })
+                .inspect_err(|_| crate::submission::signing_failed(role))
                 .map_err(WorkerError::Signing)?;
         let function = HostFunction::InvokeContract(deployment.withdraw_call(&intent));
         let prepared = match self
             .engine
-            .prepare(Kind::Withdrawal, function, vec![owner_entry, treasury_entry])
+            .prepare(Kind::Withdrawal, function, vec![owner_entry, cosigner_entry])
             .await
         {
             Ok(prepared) => prepared,

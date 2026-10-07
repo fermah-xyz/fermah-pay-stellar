@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT LEAST(b.cap, b.pending_cap,\n                     (SELECT MIN(r.cap) FROM pay_stellar.vault_requests r\n                      WHERE r.buyer_id = b.id AND r.kind = 'set_cap'\n                        AND r.state IN ('signed', 'submitted')),\n                     (SELECT MIN(d.cap) FROM pay_stellar.deposits d\n                      WHERE d.buyer_id = b.id AND d.cap IS NOT NULL\n                        AND d.state IN ('signed', 'submitted'))) AS \"cap!\",\n               GREATEST(COALESCE(b.exit_amount, 0),\n                        COALESCE((SELECT MAX(r.amount) FROM pay_stellar.vault_requests r\n                                  WHERE r.buyer_id = b.id AND r.kind = 'request_exit'\n                                    AND r.state IN ('signed', 'submitted')), 0)) AS \"exit!\"\n        FROM pay_stellar.buyers b WHERE b.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cap!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "exit!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "49a4201596c287e801a40bb224a381c2630d0775c388ad6cd6826b9b639bfe3a"
+}

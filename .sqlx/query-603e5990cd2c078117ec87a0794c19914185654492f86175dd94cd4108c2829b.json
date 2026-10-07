@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT w.id, w.amount, w.withdrawal_id, w.destination_address,\n                   w.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network\n            WHERE w.network = $1 AND l.operator_address = $2 AND l.treasury_address = $3\n              AND w.state = 'signed' AND w.id <> ALL($4) AND w.expiration_ledger > $5\n            ORDER BY w.created_at\n            LIMIT 1\n            ",
+  "query": "\n            SELECT w.id, w.amount, w.withdrawal_id, w.destination_address,\n                   w.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = w.seller_deployment_id AND l.network = w.network\n            WHERE w.network = $1 AND l.operator_address = $2\n              AND (l.custody = 'vault' OR l.treasury_address = $3)\n              AND w.state = 'signed' AND w.id <> ALL($4) AND w.expiration_ledger > $5\n            ORDER BY w.created_at\n            LIMIT 1\n            ",
   "describe": {
     "columns": [
       {
@@ -121,8 +121,8 @@
       false,
       false,
       false,
-      false
+      true
     ]
   },
-  "hash": "368aec9f12d7e92a5c4361d3b9e33207e3a5dc99e30cb5b9f3fc5b506ac22690"
+  "hash": "603e5990cd2c078117ec87a0794c19914185654492f86175dd94cd4108c2829b"
 }

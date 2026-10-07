@@ -191,6 +191,10 @@ struct Net {
     /// The contract's events, and the oldest ledger the node retains.
     events: EventStream,
     oldest: u32,
+    /// The contract is a vault: the operator co-signs withdrawals, and the
+    /// buyers' limit and exit calls run. Their events are the tests' to
+    /// publish.
+    vault: bool,
 }
 
 #[derive(Clone)]
@@ -365,8 +369,9 @@ impl Net {
                 if !authorized.contains(&owner) {
                     return Err("owner did not authorize".to_owned());
                 }
-                if !authorized.contains(&treasury()) {
-                    return Err("treasury did not authorize".to_owned());
+                let cosigner = if self.vault { operator.clone() } else { treasury() };
+                if !authorized.contains(&cosigner) {
+                    return Err("co-signer did not authorize".to_owned());
                 }
                 if !state.withdrawals.insert((owner.clone(), id)) {
                     return Err("Error(Contract, #114)".to_owned());
@@ -593,6 +598,13 @@ impl Net {
                     Some(("recurring", event)),
                 ))
             }
+            b"set_cap" | b"request_exit" if self.vault => {
+                if !authorized.contains(&owner_of(&args[0])) {
+                    return Err("owner did not authorize".to_owned());
+                }
+                Ok((state, ScVal::Void, None))
+            }
+            b"exit" if self.vault => Ok((state, ScVal::Void, None)),
             other => panic!("unexpected call {}", String::from_utf8_lossy(other)),
         }
     }
@@ -1003,9 +1015,10 @@ impl Chain for Stellar {
             }
         }
         let fee_balance = self.with(|n| n.fee_balance);
-        let (instance_until, code_until) =
-            self.with(|n| (n.instance_live_until, n.code_live_until));
+        let (instance_until, code_until, vault, held) = self
+            .with(|n| (n.instance_live_until, n.code_live_until, n.vault, n.state.treasury_usdc));
         let instance_key = self.deployment.instance_key();
+        let balance_key = self.deployment.vault_balance_key();
         let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(WASM) });
         let contract_entry = |key: &LedgerKey| {
             let until = instance_until?;
@@ -1016,6 +1029,14 @@ impl Chain for Stellar {
                         executable: ContractExecutable::Wasm(Hash(WASM)),
                         storage: None,
                     }),
+                );
+                record.live_until_ledger = Some(until);
+                Some(record)
+            } else if vault && *key == balance_key {
+                // The USDC the vault holds lives as long as its instance here.
+                let mut record = contract_data(
+                    key,
+                    ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(held).unwrap() }),
                 );
                 record.live_until_ledger = Some(until);
                 Some(record)
@@ -1183,12 +1204,26 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
     world_with(opts, connect, false).await
 }
 
+/// A world whose ledger is a vault.
+async fn vault_world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
+    world_of(opts, connect, false, true).await
+}
+
 /// A world whose gateway lets withdrawals pay other accounts when
 /// `other_destinations`, which production refuses by default.
 async fn world_with(
     opts: PgPoolOptions,
     connect: PgConnectOptions,
     other_destinations: bool,
+) -> World {
+    world_of(opts, connect, other_destinations, false).await
+}
+
+async fn world_of(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+    other_destinations: bool,
+    vault: bool,
 ) -> World {
     let operator = SecretKey::generate().unwrap();
     let clock =
@@ -1223,11 +1258,12 @@ async fn world_with(
             clock: clock.clone(),
             events: EventStream::default(),
             oldest: 1,
+            vault,
         })),
         deployment: PrepaidDeployment {
             contract: CONTRACT,
             usdc,
-            custody: Custody::Treasury(treasury()),
+            custody: if vault { Custody::Vault } else { Custody::Treasury(treasury()) },
         },
         operator: operator.address(),
     };
@@ -1244,7 +1280,7 @@ async fn world_with(
     let tenant = h.tenant("shop", "main", Network::Testnet).await;
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract(CONTRACT).to_string().to_string(),
-        treasury: treasury(),
+        treasury: (!vault).then(treasury),
         operator: operator.address(),
     };
     issuance::bind_ledger_contract(&h.issuer, tenant.deployment_id, &binding).await.unwrap();
@@ -1431,6 +1467,7 @@ impl World {
             buyer_id: buyer.id.clone(),
             amount,
             idempotency_key: key.to_owned(),
+            daily_limit: None,
         };
         let deposit = self
             .ledger()
@@ -4483,4 +4520,331 @@ async fn test_withdrawals_pay_only_the_buyers_wallet_unless_the_operator_allows_
             .into_inner();
         assert_eq!(prepared.withdrawal.unwrap().destination, x.key.address().to_string());
     }
+}
+
+// ---- vaults -------------------------------------------------------------------
+
+fn address_val(account: &AccountAddress) -> ScVal {
+    ScVal::Address(ScAddress::Account(fermah_pay_stellar_chain::transaction::account_id(account)))
+}
+
+fn i128_val(value: i64) -> ScVal {
+    ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(value).unwrap() })
+}
+
+/// Publishes a vault event about `owner` in the latest ledger, as the
+/// contract would.
+fn vault_event(w: &World, name: &str, owner: &AccountAddress, data: ScVal) {
+    w.stellar.with(|n| {
+        let closed = n.clock.now().format(&time::format_description::well_known::Rfc3339).unwrap();
+        n.events.emit(CONTRACT, n.latest, closed, vec![symbol(name), address_val(owner)], data);
+    });
+}
+
+fn vec_val(items: Vec<ScVal>) -> ScVal {
+    ScVal::Vec(Some(ScVec(items.try_into().unwrap())))
+}
+
+/// The buyer's limit and exit as the worker applied them: limit, pending
+/// limit, exit, available.
+async fn vault_row(
+    w: &World,
+    buyer: &TestBuyer,
+) -> (i64, Option<(i64, i64)>, Option<(i64, i64)>, i64) {
+    let row: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>, i64) = sqlx::query_as(
+        "SELECT cap, pending_cap, pending_cap_at, exit_amount, exit_unlock_at, available
+         FROM pay_stellar.buyers WHERE id = $1::uuid",
+    )
+    .bind(&buyer.id)
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    (row.0, row.1.zip(row.2), row.3.zip(row.4), row.5)
+}
+
+async fn read_through(w: &World) -> i64 {
+    sqlx::query_scalar("SELECT ledger FROM pay_stellar.vault_event_cursors")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_events_reach_the_buyer_once(opts: PgPoolOptions, connect: PgConnectOptions) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let owner = x.key.address();
+    let ledger = w.stellar.with(|n| {
+        n.latest += 1;
+        n.latest
+    });
+    vault_event(&w, "cap_raised", &owner, i128_val(50));
+    vault_event(&w, "cap_lowered", &owner, vec_val(vec![i128_val(20), ScVal::U32(ledger + 900)]));
+    vault_event(
+        &w,
+        "exit_requested",
+        &owner,
+        vec_val(vec![i128_val(30), address_val(&owner), ScVal::U32(ledger + 1_000)]),
+    );
+    w.settle(&w.worker()).await;
+    assert_eq!(
+        vault_row(&w, &x).await,
+        (50, Some((20, i64::from(ledger) + 900)), Some((30, i64::from(ledger) + 1_000)), 100)
+    );
+    assert_eq!(read_through(&w).await, i64::from(ledger));
+
+    // The exit pays out once, however often the worker runs.
+    w.stellar.with(|n| n.latest += 1);
+    vault_event(&w, "exit", &owner, vec_val(vec![address_val(&owner), i128_val(30)]));
+    w.settle(&w.worker()).await;
+    w.stellar.with(|n| n.latest += 1);
+    w.settle(&w.worker()).await;
+    assert_eq!(vault_row(&w, &x).await.2, None);
+    assert_eq!(vault_row(&w, &x).await.3, 70);
+}
+
+/// Signs a limit change for `buyer` through the API.
+async fn signed_limit_change(w: &World, buyer: &TestBuyer, limit: i64, key: &str) -> String {
+    let prepared = w
+        .ledger()
+        .await
+        .prepare_limit_change(authed(
+            fermah_pay_stellar_proto::v1::PrepareLimitChangeRequest {
+                buyer_id: buyer.id.clone(),
+                daily_limit: limit,
+                idempotency_key: key.into(),
+            },
+            &w.tenant.token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .limit_change
+        .unwrap();
+    let entry = SorobanAuthorizationEntry::from_xdr_base64(
+        &prepared.authorization_entry_xdr,
+        Limits::none(),
+    )
+    .unwrap();
+    let signed = sign_entry(&entry, network_id(Network::Testnet), &[&buyer.key])
+        .unwrap()
+        .to_xdr_base64(Limits::none())
+        .unwrap();
+    w.ledger()
+        .await
+        .submit_limit_change(authed(
+            fermah_pay_stellar_proto::v1::SubmitLimitChangeRequest {
+                limit_change_id: prepared.limit_change_id.clone(),
+                signed_authorization_entry_xdr: signed,
+            },
+            &w.tenant.token,
+        ))
+        .await
+        .unwrap();
+    prepared.limit_change_id
+}
+
+async fn vault_request_state(w: &World, id: &str) -> String {
+    sqlx::query_scalar("SELECT state FROM pay_stellar.vault_requests WHERE id = $1::uuid")
+        .bind(id)
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+/// A limit change stays open, and counts towards admission, until the
+/// worker has read the contract's events past the ledger that included it.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_request_closes_only_once_its_events_are_read(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let id = signed_limit_change(&w, &x, 10, "l-1").await;
+    let worker = w.worker();
+    worker.step().await.unwrap();
+    assert_eq!(vault_request_state(&w, &id).await, "submitted");
+    let sent = w.stellar.with(|n| n.sent.clone());
+    let (call, auth, _) = invocation(sent.last().unwrap());
+    assert_eq!(call.function_name.0.as_slice(), b"set_cap");
+    assert_eq!(auth.len(), 1);
+
+    // Included at the ledger the worker has read through, but read before
+    // the inclusion: the reading lags it by one ledger.
+    let included: i64 = sqlx::query_scalar(
+        "SELECT s.ledger::bigint FROM pay_stellar.submissions s
+         JOIN pay_stellar.vault_requests r ON r.submission_id = s.id WHERE r.id = $1::uuid",
+    )
+    .bind(&id)
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET ledger = $1")
+        .bind(included - 1)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    worker.step().await.unwrap();
+    assert_eq!(vault_request_state(&w, &id).await, "submitted");
+
+    w.stellar.with(|n| n.latest += 1);
+    worker.step().await.unwrap();
+    assert_eq!(vault_request_state(&w, &id).await, "confirmed");
+}
+
+/// A request nobody sent closes only once the events past its
+/// authorization's last ledger are read: by then any use of it elsewhere
+/// is in the buyer's row.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_unsent_vault_request_expires_once_its_events_are_read(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let prepared = w
+        .ledger()
+        .await
+        .prepare_limit_change(authed(
+            fermah_pay_stellar_proto::v1::PrepareLimitChangeRequest {
+                buyer_id: x.id.clone(),
+                daily_limit: 10,
+                idempotency_key: "l-1".into(),
+            },
+            &w.tenant.token,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .limit_change
+        .unwrap();
+    let id = prepared.limit_change_id;
+    let last = prepared.expiration_ledger;
+    let worker = w.worker();
+    // Read up to its last ledger: it could still be used, and stays open.
+    w.stellar.with(|n| n.latest = last);
+    worker.step().await.unwrap();
+    assert_eq!(read_through(&w).await, i64::from(last));
+    assert_eq!(vault_request_state(&w, &id).await, "awaiting_signature");
+    // Read past it: closed.
+    w.stellar.with(|n| n.latest = last + 1);
+    worker.step().await.unwrap();
+    assert_eq!(vault_request_state(&w, &id).await, "expired");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_withdrawal_is_cosigned_by_the_operator(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let wallet = x.key.address();
+    let (prepared, signed) = w.prepared_withdrawal(&x, 40, "w-1").await.unwrap();
+    let held = w.submit_withdrawal(&prepared, &signed).await.unwrap();
+    // No treasury key: the operator co-signs a vault's withdrawals.
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+    assert_eq!(usdc_of(&w, &wallet), 40);
+    let sent = w.stellar.with(|n| n.sent.clone());
+    let withdrawal = sent
+        .iter()
+        .map(invocation)
+        .find(|(call, _, _)| call.function_name.0.as_slice() == b"withdraw")
+        .unwrap();
+    let signers: Vec<ScAddress> = withdrawal
+        .1
+        .iter()
+        .filter_map(|entry| match &entry.credentials {
+            SorobanCredentials::AddressV2(creds) => Some(creds.address.clone()),
+            _ => None,
+        })
+        .collect();
+    let operator =
+        ScAddress::Account(fermah_pay_stellar_chain::transaction::account_id(&w.stellar.operator));
+    assert!(signers.contains(&operator), "{signers:?}");
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_unlocked_exit_is_sent_for_the_buyer(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let latest = w.stellar.with(|n| n.latest);
+    // Locked: not sent.
+    sqlx::query(
+        "UPDATE pay_stellar.buyers SET exit_amount = 10, exit_unlock_at = $2 WHERE id = $1::uuid",
+    )
+    .bind(&x.id)
+    .bind(i64::from(latest) + 1)
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+    let exits = |w: &World| {
+        w.stellar.with(|n| {
+            n.sent.iter().filter(|e| invocation(e).0.function_name.0.as_slice() == b"exit").count()
+        })
+    };
+    w.settle(&w.worker()).await;
+    assert_eq!(exits(&w), 0);
+    w.stellar.with(|n| n.latest += 1);
+    w.settle(&w.worker()).await;
+    assert_eq!(exits(&w), 1);
+    let sent = w.stellar.with(|n| n.sent.clone());
+    let exit = sent
+        .iter()
+        .map(invocation)
+        .find(|(c, _, _)| c.function_name.0.as_slice() == b"exit")
+        .unwrap();
+    assert_eq!((exit.0.args.to_vec(), exit.1.len()), (vec![address_val(&x.key.address())], 0));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_charges_carry_the_day_they_were_admitted_in(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    sqlx::query("UPDATE pay_stellar.buyers SET cap = 100 WHERE id = $1::uuid")
+        .bind(&x.id)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.charge(&x, 10, "c-1").await;
+    w.settle(&w.worker()).await;
+    let day: i64 = sqlx::query_scalar("SELECT day FROM pay_stellar.charges")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap();
+    let sent = w.stellar.with(|n| n.sent.clone());
+    let (call, _, _) = sent
+        .iter()
+        .map(invocation)
+        .find(|(c, _, _)| c.function_name.0.as_slice() == b"charge_batch")
+        .unwrap();
+    let ScVal::Vec(Some(ScVec(charges))) = &call.args[0] else { panic!("charges") };
+    let ScVal::Vec(Some(ScVec(fields))) = &charges[0] else { panic!("charge") };
+    assert_eq!(fields.last(), Some(&ScVal::U64(u64::try_from(day).unwrap())));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_vaults_usdc_is_kept_alive_with_its_instance(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let worker = w.worker();
+    let latest = w.stellar.with(|n| n.latest);
+    w.stellar.with(|n| {
+        n.instance_live_until = Some(latest + TTL_THRESHOLD - 1);
+        n.code_live_until = latest + TTL_EXTEND_TO;
+    });
+    worker.step().await.unwrap();
+    let sent = extensions_sent(&w);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains(&w.stellar.deployment.vault_balance_key()), "{:?}", sent[0]);
 }

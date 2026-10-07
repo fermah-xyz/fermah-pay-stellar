@@ -135,6 +135,15 @@ pub struct Config {
           value_parser = clap::value_parser!(u32).range(1..=17_280))]
     pub charge_validity_ledgers: u32,
 
+    /// Vault deployments: ledgers the worker's reading of the contract's
+    /// events may lag the network before charges are refused. A limit
+    /// change or exit a buyer makes outside the gateway reaches admission
+    /// only through it, so this plus `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS`
+    /// must stay below the contract's notice of 18720 ledgers.
+    #[arg(long, env = "PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS", default_value = "2880",
+          value_parser = clap::value_parser!(u32).range(1..=17_999))]
+    pub vault_events_stale_ledgers: u32,
+
     /// Maximum database connections.
     #[arg(long, env = "PAY_STELLAR_DATABASE_MAX_CONNECTIONS", default_value = "16")]
     pub database_max_connections: NonZeroU32,

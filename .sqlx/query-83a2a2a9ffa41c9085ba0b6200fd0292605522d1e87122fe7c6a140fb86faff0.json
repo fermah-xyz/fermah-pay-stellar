@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.buyers\n                SET available = GREATEST(available - $3, 0), exit_amount = NULL,\n                    exit_unlock_at = NULL\n                WHERE seller_deployment_id = $1 AND wallet_address = $2\n                RETURNING available = 0 AS \"emptied!\"\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "emptied!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "83a2a2a9ffa41c9085ba0b6200fd0292605522d1e87122fe7c6a140fb86faff0"
+}

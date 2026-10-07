@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO pay_stellar.charges\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, charge_id,\n                 last_ledger)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n            RETURNING id, created_at\n            ",
+  "query": "\n            INSERT INTO pay_stellar.charges\n                (id, buyer_id, seller_deployment_id, network, idempotency_key, amount, charge_id,\n                 last_ledger, day)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n            RETURNING id, created_at\n            ",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,7 @@
         "Text",
         "Int8",
         "Bytea",
+        "Int8",
         "Int8"
       ]
     },
@@ -43,5 +44,5 @@
       false
     ]
   },
-  "hash": "8818e0ad8e6e0cc2ad696fb2b951ad0dc8c546bf7ca9f11cb77230081034678c"
+  "hash": "66aaedd157fc497a8101bea24d794c97d2414d5bc5a79fc7b106a4ff669f563d"
 }

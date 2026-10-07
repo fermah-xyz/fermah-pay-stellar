@@ -171,6 +171,7 @@ impl Context {
                         buyer_id: created.buyer_id.clone(),
                         amount: DEPOSIT,
                         idempotency_key: format!("deposit-{i}"),
+                        daily_limit: None,
                     },
                     token,
                 )?)

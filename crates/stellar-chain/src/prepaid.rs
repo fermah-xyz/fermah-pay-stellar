@@ -30,6 +30,8 @@ pub const MAX_RECURRING_BATCH: usize = 35;
 pub const MAX_CHARGE_WINDOW: u32 = 17_280;
 /// Ledgers a charge record outlives the charge's last ledger.
 pub const CHARGE_RECORD_GRACE: u32 = 720;
+/// Vault: ledgers from a buyer's lower limit or exit request to its effect.
+pub const VAULT_NOTICE_LEDGERS: u32 = 18_720;
 
 /// Who holds a deployment's USDC.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -638,6 +640,20 @@ impl PrepaidDeployment {
             contract: ScAddress::Contract(ContractId(Hash(self.contract))),
             key: vec_val(vec![symbol_val("Recurring"), account_val(owner), bytes_val(charge_id)]),
             durability: ContractDataDurability::Temporary,
+        })
+    }
+
+    /// Ledger key of the USDC contract's balance entry for this contract:
+    /// what a vault holds. Like any persistent entry it must be kept alive.
+    #[must_use]
+    pub fn vault_balance_key(&self) -> LedgerKey {
+        LedgerKey::ContractData(LedgerKeyContractData {
+            contract: ScAddress::Contract(ContractId(Hash(self.usdc))),
+            key: vec_val(vec![
+                symbol_val("Balance"),
+                ScVal::Address(ScAddress::Contract(ContractId(Hash(self.contract)))),
+            ]),
+            durability: ContractDataDurability::Persistent,
         })
     }
 

@@ -189,6 +189,7 @@ pub async fn start_with_options<L: LatestLedger>(
             withdrawals_to_other_accounts: other_destinations,
             max_buyer_resource_fee:
                 fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
+            vault_events_stale_ledgers: 2880,
         },
     );
     let limits = ServerLimits {

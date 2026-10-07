@@ -86,7 +86,10 @@ pub async fn quarantined_recurring(
                 deployment: PrepaidDeployment {
                     contract: contract_id(&row.contract_address)?,
                     usdc: contract_id(&row.usdc_address)?,
-                    custody: Custody::Treasury(address(&row.treasury_address)?),
+                    custody: match row.treasury_address.as_deref() {
+                        Some(treasury) => Custody::Treasury(address(treasury)?),
+                        None => Custody::Vault,
+                    },
                 },
             })
         })

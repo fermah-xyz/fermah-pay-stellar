@@ -67,6 +67,25 @@ labels! {
         PeriodAlreadyCharged => "period_already_charged",
         InvalidRecurringChargeId => "invalid_recurring_charge_id",
         RecurringChargeNotFound => "recurring_charge_not_found",
+        /// A limit change, an exit or a deposit limit for a deployment whose
+        /// ledger is not a vault.
+        NotAVault => "not_a_vault",
+        /// A daily spending limit below zero.
+        InvalidLimit => "invalid_limit",
+        /// The charge would take the buyer past the daily spending limit
+        /// they signed, counting a lower limit they asked for.
+        AboveSpendingLimit => "above_spending_limit",
+        /// The available balance minus the charge would not leave what the
+        /// buyer's exit request still needs.
+        ExitRequested => "exit_requested",
+        InvalidLimitChangeId => "invalid_limit_change_id",
+        LimitChangeNotFound => "limit_change_not_found",
+        LimitChangeExpired => "limit_change_expired",
+        LimitChangeAlreadySigned => "limit_change_already_signed",
+        InvalidExitId => "invalid_exit_id",
+        ExitNotFound => "exit_not_found",
+        ExitExpired => "exit_expired",
+        ExitAlreadySigned => "exit_already_signed",
         NetworkUnavailable => "network_unavailable",
         Internal => "internal",
     }
@@ -99,7 +118,10 @@ impl Refusal {
             | Self::MandateTooLong
             | Self::InvalidRevocationId
             | Self::AboveMandate
-            | Self::InvalidRecurringChargeId => Code::InvalidArgument,
+            | Self::InvalidRecurringChargeId
+            | Self::InvalidLimit
+            | Self::InvalidLimitChangeId
+            | Self::InvalidExitId => Code::InvalidArgument,
             Self::BuyerQuotaExceeded
             | Self::DepositQuotaExceeded
             | Self::WithdrawalQuotaExceeded
@@ -115,7 +137,9 @@ impl Refusal {
             | Self::WithdrawalNotFound
             | Self::MandateNotFound
             | Self::RevocationNotFound
-            | Self::RecurringChargeNotFound => Code::NotFound,
+            | Self::RecurringChargeNotFound
+            | Self::LimitChangeNotFound
+            | Self::ExitNotFound => Code::NotFound,
             Self::InsufficientBalance
             | Self::LedgerNotConfigured
             | Self::DepositExpired
@@ -129,7 +153,14 @@ impl Refusal {
             | Self::MandateNotActive
             | Self::MandateEnded
             | Self::DestinationNotAllowed
-            | Self::WalletTooCostly => Code::FailedPrecondition,
+            | Self::WalletTooCostly
+            | Self::NotAVault
+            | Self::AboveSpendingLimit
+            | Self::ExitRequested
+            | Self::LimitChangeExpired
+            | Self::LimitChangeAlreadySigned
+            | Self::ExitExpired
+            | Self::ExitAlreadySigned => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

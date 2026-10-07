@@ -61,7 +61,7 @@ fn signing(record: &WithdrawalRecord, signed: &SorobanAuthorizationEntry) -> Sig
     }
 }
 
-fn parse_destination(raw: &str, wallet: &ChainAddress) -> Result<ChainAddress, Refusal> {
+pub(super) fn parse_destination(raw: &str, wallet: &ChainAddress) -> Result<ChainAddress, Refusal> {
     if raw.is_empty() {
         return Ok(wallet.clone());
     }
@@ -291,6 +291,7 @@ impl<L: LatestLedger> LedgerApi<L> {
             WithdrawalSigning::InsufficientBalance => {
                 return Err(Refusal::InsufficientBalance.into());
             }
+            WithdrawalSigning::ExitRequested => return Err(Refusal::ExitRequested.into()),
             WithdrawalSigning::Held | WithdrawalSigning::NotOpen => {}
         }
         // Whether this request or a concurrent one stored the signature, the

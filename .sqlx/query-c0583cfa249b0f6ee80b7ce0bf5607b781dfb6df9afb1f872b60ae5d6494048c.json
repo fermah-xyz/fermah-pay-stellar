@@ -1,0 +1,187 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT r.id, r.buyer_id, b.wallet_address, r.kind, r.cap, r.amount, r.destination,\n                   r.state, r.authorization_xdr, r.signed_authorization_xdr, r.expiration_ledger,\n                   r.created_at, s.outer_hash AS \"outer_hash?\", s.ledger AS \"ledger?\"\n            FROM pay_stellar.vault_requests r\n            JOIN pay_stellar.buyers b\n              ON b.id = r.buyer_id AND b.seller_deployment_id = r.seller_deployment_id\n             AND b.network = r.network\n            LEFT JOIN pay_stellar.submissions s ON s.id = r.submission_id\n            WHERE r.seller_deployment_id = $1 AND r.network = $2\n              AND (r.id = $3 OR r.idempotency_key = $4)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "buyer_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "buyer_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "wallet_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "wallet_address"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "cap",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "cap"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "amount",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "destination",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "destination"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "authorization_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "signed_authorization_xdr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "signed_authorization_xdr"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "expiration_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "expiration_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_requests",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "outer_hash?",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "outer_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "ledger?",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.submissions",
+            "name": "ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "c0583cfa249b0f6ee80b7ce0bf5607b781dfb6df9afb1f872b60ae5d6494048c"
+}

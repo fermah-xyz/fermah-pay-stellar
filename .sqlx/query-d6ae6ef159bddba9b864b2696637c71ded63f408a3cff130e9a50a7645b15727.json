@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT COALESCE(SUM(amount), 0)::BIGINT AS \"counted!\" FROM pay_stellar.charges\n                WHERE buyer_id = $1 AND day = $2 AND state <> 'refused'\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "counted!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d6ae6ef159bddba9b864b2696637c71ded63f408a3cff130e9a50a7645b15727"
+}

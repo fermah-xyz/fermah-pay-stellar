@@ -139,7 +139,8 @@ fn store(operation: &'static str) -> impl FnOnce(sqlx::Error) -> ObserverError {
 pub struct Deployment {
     pub id: Uuid,
     pub contract: [u8; 32],
-    pub treasury: AccountAddress,
+    /// `None` for a vault, which holds its own USDC.
+    pub treasury: Option<AccountAddress>,
     pub operator: AccountAddress,
 }
 
@@ -542,7 +543,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             deployments.push(Deployment {
                 id: row.seller_deployment_id,
                 contract: contract.0,
-                treasury: account(&row.treasury_address)?,
+                treasury: row.treasury_address.as_deref().map(account).transpose()?,
                 operator: account(&row.operator_address)?,
             });
         }
@@ -1507,7 +1508,7 @@ async fn bound_role(
     .map_err(store("read binding"))?;
     Ok(match role {
         Role::Operator => Some(row.operator_address),
-        Role::Treasury => Some(row.treasury_address),
+        Role::Treasury => row.treasury_address,
         Role::Admin | Role::Seller => None,
     })
 }
