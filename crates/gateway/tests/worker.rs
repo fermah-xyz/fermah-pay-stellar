@@ -5268,10 +5268,9 @@ async fn test_an_event_of_a_vault_buyer_read_without_an_account_reads_it_again(
         n.latest += 1;
     });
     vault_event(&w, "cap_raised", &x.key.address(), i128_val(50));
-    // The event marks the buyer for reading; the next round reads it.
+    // The event marks the buyer for reading, and the same round reads it.
     w.worker().step().await.unwrap();
-    assert_eq!(synced_at(&w, &x).await, None);
-    w.worker().step().await.unwrap();
+    assert!(synced_at(&w, &x).await.is_some());
     assert_eq!(vault_row(&w, &x).await.2, Some((30, i64::from(unlock))));
 }
 

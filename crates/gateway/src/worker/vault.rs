@@ -59,6 +59,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 let position = self.vault_position(id, &vault.network, latest, &served).await?;
                 self.sync_vault_buyers(id, &served).await?;
                 self.apply_vault_events(id, served.contract, position).await?;
+                // Buyers an event marked for reading again, read in the same
+                // round: their charges wait only for this read.
+                self.sync_vault_buyers(id, &served).await?;
                 Ok::<_, WorkerError>(latest)
             };
             match read.await {
