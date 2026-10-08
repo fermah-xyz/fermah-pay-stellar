@@ -99,6 +99,7 @@ jobs:
           CHANNEL: ${{ secrets.TESTNET_CHANNEL_SECRET }}
           TREASURY: ${{ secrets.TESTNET_TREASURY_SECRET }}
           DEPLOYMENT: ${{ vars.TESTNET_DEPLOYMENT_JSON }}
+          VAULT_DEPLOYMENT: ${{ vars.TESTNET_VAULT_DEPLOYMENT_JSON }}
         run: |
           umask 077
           profile="$RUNNER_TEMP/testnet-profile"
@@ -111,6 +112,7 @@ jobs:
           printf '%s' "$CHANNEL" > "$profile/channel-1.secret"
           printf '%s' "$TREASURY" > "$profile/treasury.secret"
           printf '%s' "$DEPLOYMENT" > "$profile/deployment.json"
+          printf '%s' "$VAULT_DEPLOYMENT" > "$profile/vault-deployment.json"
           echo "PAY_STELLAR_TESTNET_PROFILE=$profile" >> "$GITHUB_ENV"
       - name: Run end to end
         env:
@@ -136,6 +138,16 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar -c 'CREATE DATABASE pay_stellar_x402'
           ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence x402-conformance
+      # The vault: a deposit carrying the buyer's daily limit, charges within
+      # and past it, a withdrawal co-signed by the operator, a lower limit
+      # and an exit request, against the recorded vault deployment.
+      - name: Run the vault end to end
+        env:
+          PGPASSWORD: ci-only
+          PAY_STELLAR_E2E_DATABASE_URL: postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_vault
+        run: |
+          psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar -c 'CREATE DATABASE pay_stellar_vault'
+          ./target/debug/fermah-pay-stellar-testnet --evidence-dir evidence vault-end-to-end
       # The event decoders against what the deployed contract really emitted.
       - name: Read the contract's events
         env:
@@ -193,6 +205,27 @@ jobs:
               "| (c) Second period charged | \(link(.second_period.transaction_hash)) |",
               "| (d) Charge after the last period: \(.charge_after_last_period.outcome) | \(link(.charge_after_last_period.transaction_hash)) |",
               "| Mandate revoked; allowance \(.revocation.allowance_after.amount // "absent") | \(link(.revocation.transaction_hash)) |"
+            ' "$record"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarise the vault transactions
+        if: always()
+        run: |
+          record=$(ls evidence/*vault-end-to-end.json 2>/dev/null | head -1)
+          [ -n "$record" ] || { echo "No vault evidence record was written." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "## The vault on Stellar testnet"
+            echo
+            echo "| Step | Transaction |"
+            echo "|---|---|"
+            jq -r '
+              def link(h): "[\(h[0:12])…](https://stellar.expert/explorer/testnet/tx/\(h))";
+              "| Deposit with a daily limit of \(.deposit.daily_limit) | \(link(.deposit.transaction_hash)) |",
+              (.charges[] | "| Charge (\(.amount) units) | \(link(.transaction_hash)) |"),
+              "| Charge past the limit | refused: \(.charge_past_limit.refusal) |",
+              "| Withdrawal co-signed by the operator | \(link(.withdrawal.transaction_hash)) |",
+              "| Lower limit, in force from ledger \(.lower_limit.applies_from_ledger) | \(link(.lower_limit.transaction_hash)) |",
+              "| Exit request, unlocking at ledger \(.exit.unlocks_at_ledger) | \(link(.exit.transaction_hash)) |",
+              "| Vault solvency | holds \(.observed.solvency.vault_usdc), owes \(.observed.solvency.liabilities) + \(.observed.solvency.revenue) |"
             ' "$record"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
