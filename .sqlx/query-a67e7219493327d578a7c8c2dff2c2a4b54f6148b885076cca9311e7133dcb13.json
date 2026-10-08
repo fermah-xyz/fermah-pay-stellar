@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT d.id, d.amount, d.deposit_id, d.cap,\n                   d.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.deposits d\n            JOIN pay_stellar.buyers b ON b.id = d.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network\n            WHERE d.network = $1 AND l.operator_address = $2 AND d.state = 'signed'\n              AND d.id <> ALL($3)\n            ORDER BY d.created_at\n            LIMIT 1\n            ",
+  "query": "\n            SELECT d.id, d.amount, d.deposit_id, d.cap,\n                   d.signed_authorization_xdr AS \"signed_authorization_xdr!\",\n                   b.wallet_address, l.contract_address, l.usdc_address, l.treasury_address\n            FROM pay_stellar.deposits d\n            JOIN pay_stellar.buyers b ON b.id = d.buyer_id\n            JOIN pay_stellar.ledger_contracts l\n              ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network\n            WHERE d.network = $1 AND l.operator_address = $2 AND d.state = 'signed'\n              AND d.id <> ALL($3)\n              -- A vault takes no new money while proposed code may be\n              -- installed; a deposit signed before the proposal waits, and\n              -- lapses if the proposal outlasts its authorization.\n              AND NOT EXISTS (\n                  SELECT 1 FROM pay_stellar.vault_event_cursors c\n                  WHERE c.seller_deployment_id = d.seller_deployment_id\n                    AND c.upgrade_pending_until >= $4)\n            ORDER BY d.created_at\n            LIMIT 1\n            ",
   "describe": {
     "columns": [
       {
@@ -107,7 +107,8 @@
       "Left": [
         "Text",
         "Text",
-        "UuidArray"
+        "UuidArray",
+        "Int8"
       ]
     },
     "nullable": [
@@ -122,5 +123,5 @@
       true
     ]
   },
-  "hash": "b8a073522ac1fd4690d4ce962a5de46aba85166096cad90e89631a804e5753d8"
+  "hash": "a67e7219493327d578a7c8c2dff2c2a4b54f6148b885076cca9311e7133dcb13"
 }

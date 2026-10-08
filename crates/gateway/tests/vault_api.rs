@@ -512,6 +512,7 @@ async fn test_deposits_and_mandates_wait_while_an_upgrade_may_be_installed(
     connect: PgConnectOptions,
 ) {
     let h = start(opts, connect, Network::Testnet).await;
+    h.ledger.set(10_000);
     let t = vault(&h).await;
     let b = buyer(&h, &t, 0, 0).await;
     let pending_until = |until: i64| {
@@ -540,8 +541,15 @@ async fn test_deposits_and_mandates_wait_while_an_upgrade_may_be_installed(
     let status =
         ledger(&h).await.prepare_mandate(authed(mandate("m-1"), &t.token)).await.unwrap_err();
     assert_refused(&status, Code::FailedPrecondition, "upgrade_pending");
-    // Lapsed: new money is taken again.
+    // Lapsed, but known only from a reading that lags: whether another
+    // proposal is open is unknown, so refused.
     pending_until(latest - 1).await.unwrap();
+    events_read_to(&h, &t, h.ledger.get() - STALE_AFTER - 1).await;
+    let status =
+        ledger(&h).await.prepare_deposit(authed(deposit("d-1"), &t.token)).await.unwrap_err();
+    assert_refused(&status, Code::Unavailable, "network_unavailable");
+    // Lapsed and read recently: new money is taken again.
+    events_read_to(&h, &t, h.ledger.get()).await;
     ledger(&h).await.prepare_deposit(authed(deposit("d-1"), &t.token)).await.unwrap();
     ledger(&h).await.prepare_mandate(authed(mandate("m-1"), &t.token)).await.unwrap();
 }

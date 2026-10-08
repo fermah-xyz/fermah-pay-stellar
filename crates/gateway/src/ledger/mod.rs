@@ -563,8 +563,17 @@ impl<L: LatestLedger> LedgerApi<L> {
         if !deployment.is_vault() {
             return Ok(());
         }
-        let until =
+        // A proposal reaches the gateway only through the worker's reading
+        // of the vault's events: one that lags may not show it yet.
+        let (read, until) =
             self.store.vault_upgrade_pending_until(scope).await.map_err(|e| internal(&e))?;
+        let stale = read.is_none_or(|read| {
+            i64::from(latest) - read > i64::from(self.policy.vault_events_stale_ledgers)
+        });
+        if stale {
+            tracing::warn!("the worker's reading of the vault's events is behind");
+            return Err(Refusal::NetworkUnavailable.into());
+        }
         if until.is_some_and(|until| i64::from(latest) <= until) {
             return Err(Refusal::UpgradePending.into());
         }

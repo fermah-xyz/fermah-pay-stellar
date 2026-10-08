@@ -1133,9 +1133,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 -- the node no longer served, archived with its limit and
                 -- exit; the deposit restored it, so it is read again.
                 vault_synced_ledger = CASE
-                    WHEN b.cap = 0 AND b.pending_cap IS NULL AND b.exit_amount IS NULL
-                         AND b.available >= 0
-                    THEN NULL ELSE b.vault_synced_ledger END
+                    WHEN b.vault_entry_absent AND b.available >= 0 THEN NULL
+                    ELSE b.vault_synced_ledger END,
+                vault_entry_absent = b.vault_entry_absent AND b.available < 0
             FROM confirmed WHERE b.id = confirmed.buyer_id
             "#,
             id,
@@ -1246,12 +1246,20 @@ impl<C: Chain, K: Clock> Worker<C, K> {
               ON l.seller_deployment_id = d.seller_deployment_id AND l.network = d.network
             WHERE d.network = $1 AND l.operator_address = $2 AND d.state = 'signed'
               AND d.id <> ALL($3)
+              -- A vault takes no new money while proposed code may be
+              -- installed; a deposit signed before the proposal waits, and
+              -- lapses if the proposal outlasts its authorization.
+              AND NOT EXISTS (
+                  SELECT 1 FROM pay_stellar.vault_event_cursors c
+                  WHERE c.seller_deployment_id = d.seller_deployment_id
+                    AND c.upgrade_pending_until >= $4)
             ORDER BY d.created_at
             LIMIT 1
             "#,
             self.network().caip2(),
             self.operator_address.as_str(),
             &self.set_aside_ids(),
+            i64::from(self.latest_ledger().await?),
         )
         .fetch_optional(&self.pool)
         .await

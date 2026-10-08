@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.buyers\n                SET cap = $2, pending_cap = $3, pending_cap_at = $4, exit_amount = $5,\n                    exit_unlock_at = $6, vault_synced_ledger = $7, vault_entry_absent = $8\n                WHERE id = $1 AND vault_synced_ledger IS NULL\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4836c9a102518e6007e0e14eb09107c3b3adb4ebdcb99678cce0b76af70fd7a1"
+}

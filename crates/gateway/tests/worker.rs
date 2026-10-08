@@ -1320,7 +1320,16 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
 
 /// A world whose ledger is a vault.
 async fn vault_world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
-    world_of(opts, connect, false, true).await
+    let w = world_of(opts, connect, false, true).await;
+    // The worker reads a vault's instance before its events; alive well past
+    // the extension threshold, so it is read and not extended.
+    w.stellar.with(|n| {
+        n.instance_live_until = Some(n.latest + TTL_EXTEND_TO);
+        n.code_live_until = n.latest + TTL_EXTEND_TO;
+    });
+    // The gateway takes a vault's money only once the worker reads it.
+    w.worker().step().await.unwrap();
+    w
 }
 
 /// A world whose gateway lets withdrawals pay other accounts when
@@ -5184,11 +5193,10 @@ async fn test_the_worker_follows_a_proposed_vault_upgrade(
 ) {
     let w = vault_world(opts, connect).await;
     let window = i64::from(fermah_pay_stellar_chain::prepaid::VAULT_UPGRADE_WINDOW_LEDGERS);
+    // As for a vault the worker starts reading only now.
+    sqlx::query("DELETE FROM pay_stellar.vault_event_cursors").execute(&w.h.owner).await.unwrap();
     w.stellar.with(|n| {
         n.pending_upgrade = Some(([7; 32], 5_000));
-        // Alive well past the worker's threshold: read, not extended.
-        n.instance_live_until = Some(n.latest + TTL_EXTEND_TO);
-        n.code_live_until = n.latest + TTL_EXTEND_TO;
     });
     w.worker().step().await.unwrap();
     assert_eq!(upgrade_pending_until(&w).await, Some(5_000 + window));
@@ -5236,4 +5244,83 @@ async fn test_a_vault_buyer_read_without_an_account_is_read_again_after_a_deposi
     assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
     w.settle(&w.worker()).await;
     assert_eq!(vault_row(&w, &x).await.2, Some((30, i64::from(unlock))));
+}
+
+/// An event of a buyer read as having no account (a limit set together with
+/// a deposit, or on an entry restored from the archive) has the worker read
+/// the buyer again, with any exit the restored entry held.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_event_of_a_vault_buyer_read_without_an_account_reads_it_again(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.buyer("x", 100).await;
+    w.worker().step().await.unwrap();
+    assert_eq!(vault_row(&w, &x).await.2, None);
+    let unlock = w.stellar.with(|n| n.latest) + 1_000;
+    w.stellar.with(|n| {
+        n.state.accounts.insert(x.key.address(), 0);
+        n.vault_accounts.insert(
+            x.key.address(),
+            VaultEntry { cap: 50, pending: None, exit: Some((30, unlock)) },
+        );
+        n.latest += 1;
+    });
+    vault_event(&w, "cap_raised", &x.key.address(), i128_val(50));
+    // The event marks the buyer for reading, and the same round reads it.
+    w.worker().step().await.unwrap();
+    assert!(synced_at(&w, &x).await.is_some());
+    assert_eq!(vault_row(&w, &x).await.2, Some((30, i64::from(unlock))));
+}
+
+/// A deposit signed before the admin proposed new code is not sent while the
+/// code may be installed, and is once the proposal is closed.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_signed_vault_deposit_waits_while_an_upgrade_may_be_installed(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.buyer("x", 100).await;
+    let deposit = w.deposit(&x, 100, "fund-x").await;
+    let latest = w.stellar.with(|n| n.latest);
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = $1")
+        .bind(i64::from(latest) + 100)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Signed);
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = NULL")
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
+}
+
+/// A vault starts being read only once the node serves its instance as of
+/// the latest ledger: a proposal it holds must not be missed.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_is_not_read_before_its_instance_is(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    sqlx::query("DELETE FROM pay_stellar.vault_event_cursors").execute(&w.h.owner).await.unwrap();
+    let alive = w.stellar.with(|n| n.instance_live_until.take());
+    w.worker().step().await.unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pay_stellar.vault_event_cursors")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    w.stellar.with(|n| n.instance_live_until = alive);
+    w.worker().step().await.unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM pay_stellar.vault_event_cursors")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
 }

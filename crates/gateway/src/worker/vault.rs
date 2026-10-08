@@ -59,6 +59,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 let position = self.vault_position(id, &vault.network, latest, &served).await?;
                 self.sync_vault_buyers(id, &served).await?;
                 self.apply_vault_events(id, served.contract, position).await?;
+                // Buyers an event marked for reading again, read in the same
+                // round: their charges wait only for this read.
+                self.sync_vault_buyers(id, &served).await?;
                 Ok::<_, WorkerError>(latest)
             };
             match read.await {
@@ -109,13 +112,17 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 .ledger_entries(&[served.instance_key()])
                 .await
                 .map_err(WorkerError::Chain)?;
-            // An archived instance takes no deposit either: nothing pending
-            // can matter until it is restored, and its events say so then.
-            let pending = match read.entries.first() {
-                None => None,
-                Some(record) => pending_upgrade(&record.data)
-                    .ok_or(WorkerError::Corrupt("the vault's instance does not decode"))?,
+            // Without the instance as of `latest` or later, a proposal made
+            // before the events start being read would be missed: the vault
+            // stays unread (and its charges refused) until a node serves it.
+            let Some(record) = read.entries.first() else {
+                return Err(WorkerError::Corrupt("the vault's instance is not served"));
             };
+            if read.latest_ledger < latest {
+                return Err(WorkerError::Corrupt("the node is behind the latest ledger"));
+            }
+            let pending = pending_upgrade(&record.data)
+                .ok_or(WorkerError::Corrupt("the vault's instance does not decode"))?;
             // Read at or after `latest`: events from there on apply on top.
             let start = EventCursor::end_of_ledger(latest);
             sqlx::query!(
@@ -200,6 +207,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                         .ok_or(WorkerError::Corrupt("a vault account entry does not decode"))
                 })
                 .transpose()?;
+            let absent = account.is_none();
             let (cap, pending, exit) = account.map_or((0, None, None), |account| {
                 (
                     saturate(account.cap),
@@ -211,7 +219,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 r#"
                 UPDATE pay_stellar.buyers
                 SET cap = $2, pending_cap = $3, pending_cap_at = $4, exit_amount = $5,
-                    exit_unlock_at = $6, vault_synced_ledger = $7
+                    exit_unlock_at = $6, vault_synced_ledger = $7, vault_entry_absent = $8
                 WHERE id = $1 AND vault_synced_ledger IS NULL
                 "#,
                 buyer.id,
@@ -221,6 +229,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 exit.map(|(amount, _)| amount),
                 exit.map(|(_, unlock)| unlock),
                 at,
+                absent,
             )
             .execute(&mut *tx)
             .await
@@ -540,6 +549,28 @@ async fn apply(
     event: &LedgerEvent,
 ) -> Result<(), WorkerError> {
     let ledger = i64::from(ledger);
+    // An event of a buyer whose entry read as absent means the entry exists
+    // again, possibly restored from the archive with an exit it held: the
+    // buyer is read again, and this and later events apply meanwhile.
+    if let LedgerEvent::CapRaised { owner, .. }
+    | LedgerEvent::CapLowered { owner, .. }
+    | LedgerEvent::ExitRequested { owner, .. }
+    | LedgerEvent::Exited { owner, .. } = event
+    {
+        sqlx::query!(
+            r#"
+            UPDATE pay_stellar.buyers
+            SET vault_synced_ledger = NULL, vault_entry_absent = false
+            WHERE seller_deployment_id = $1 AND wallet_address = $2
+              AND vault_entry_absent AND available >= 0
+            "#,
+            deployment,
+            owner.to_string(),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(store("read a restored vault buyer again"))?;
+    }
     match event {
         LedgerEvent::CapRaised { owner, cap } => {
             sqlx::query!(

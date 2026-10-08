@@ -172,7 +172,23 @@ impl Context {
             pinned: pinned.clone(),
         };
         let stack = self.stack_on(database_url, "vault", sources, Quotas::default(), bound).await?;
-        let outcome = self.vault_flow(&stack.endpoint, &stack.token, &pinned, &recorded).await;
+        // The gateway takes the vault's money only once the worker reads it.
+        let reading = until(
+            "the worker's first reading of the vault",
+            || async {
+                Ok(sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM pay_stellar.vault_event_cursors",
+                )
+                .fetch_one(&stack.records)
+                .await?)
+            },
+            |rows| *rows > 0,
+        )
+        .await;
+        let outcome = match reading {
+            Ok(_) => self.vault_flow(&stack.endpoint, &stack.token, &pinned, &recorded).await,
+            Err(error) => Err(error),
+        };
         stack.stop().await;
         evidence::write(&self.evidence_dir, "vault-end-to-end", outcome?)
     }

@@ -976,8 +976,8 @@ impl PrepaidVault {
         DailyLimitsChanged { previous, current: limits }.publish(&env);
     }
 
-    /// Sets or, with `None`, removes the launch limits. They only refuse
-    /// deposits, so they apply at once.
+    /// Sets or, with `None`, removes the launch limits. They only refuse new
+    /// deposits and mandates, never a way out, so they apply at once.
     pub fn set_launch_limits(env: Env, limits: Option<LaunchLimits>) {
         config(&env).admin.require_auth();
         if limits.as_ref().is_some_and(|l| l.max_balance <= 0 || l.max_total <= 0) {
