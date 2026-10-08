@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.buyers b\n                SET available = GREATEST(b.available - $3, CASE\n                        WHEN b.vault_synced_ledger IS NULL THEN 0\n                        ELSE -((SELECT COALESCE(SUM(c.amount), 0) FROM pay_stellar.charges c\n                                WHERE c.buyer_id = b.id\n                                  AND c.state IN ('admitted', 'submitted', 'quarantined'))\n                             + (SELECT COALESCE(SUM(w.amount), 0) FROM pay_stellar.withdrawals w\n                                WHERE w.buyer_id = b.id AND w.state IN ('signed', 'submitted')))\n                    END),\n                    exit_amount = CASE\n                        WHEN b.vault_synced_ledger IS NULL OR b.vault_synced_ledger < $4 THEN NULL\n                        ELSE b.exit_amount END,\n                    exit_unlock_at = CASE\n                        WHEN b.vault_synced_ledger IS NULL OR b.vault_synced_ledger < $4 THEN NULL\n                        ELSE b.exit_unlock_at END\n                WHERE b.seller_deployment_id = $1 AND b.wallet_address = $2\n                RETURNING b.available < 0 AS \"short!\"\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "short!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "af76369e6660b3ff93e0d34f108d8e15378a98ab4e37ebd0e8fbd153a99a00ca"
+}

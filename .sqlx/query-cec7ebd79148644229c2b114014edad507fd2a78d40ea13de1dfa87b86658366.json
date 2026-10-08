@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT l.seller_deployment_id, l.network, l.contract_address, c.cursor AS \"cursor?\"\n            FROM pay_stellar.ledger_contracts l\n            LEFT JOIN pay_stellar.vault_event_cursors c\n              ON c.seller_deployment_id = l.seller_deployment_id\n            WHERE l.network = $1 AND l.operator_address = $2 AND l.custody = 'vault'\n            ORDER BY l.seller_deployment_id\n            ",
+  "query": "\n            SELECT l.seller_deployment_id, l.network, l.contract_address, l.usdc_address\n            FROM pay_stellar.ledger_contracts l\n            WHERE l.network = $1 AND l.operator_address = $2 AND l.custody = 'vault'\n            ORDER BY l.seller_deployment_id\n            ",
   "describe": {
     "columns": [
       {
@@ -38,12 +38,12 @@
       },
       {
         "ordinal": 3,
-        "name": "cursor?",
+        "name": "usdc_address",
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "pay_stellar.vault_event_cursors",
-            "name": "cursor"
+            "table": "pay_stellar.ledger_contracts",
+            "name": "usdc_address"
           }
         }
       }
@@ -61,5 +61,5 @@
       false
     ]
   },
-  "hash": "086431105d16e15ad5778e0b55016e0ce549f1013d0809121f24ac18c1c0b30a"
+  "hash": "cec7ebd79148644229c2b114014edad507fd2a78d40ea13de1dfa87b86658366"
 }

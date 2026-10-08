@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM pay_stellar.vault_requests r\n            JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n            WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2\n              AND r.kind = 'request_exit' AND r.amount = $3 AND r.destination = $4\n              AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $5\n              AND r.created_at <= $6::text::timestamptz\n        ) AS \"known!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "known!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "15b706afd23fd77b949201b1eb8a912f3b1bf72e7040f34fb1c142c141f19478"
+}

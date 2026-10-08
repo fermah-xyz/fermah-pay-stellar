@@ -2,9 +2,10 @@
 
 What each party, key or piece of infrastructure could do if it turned
 hostile or leaked, what stops it, how it is seen, and what is left. Buyers
-and sellers are untrusted; so is any single key. The operator is trusted for
-one thing: paying buyers' withdrawals out of the treasury
-([below](#an-operator-that-does-not-pay-withdrawals)). The [monitoring
+and sellers are untrusted; so is any single key. On the prepaid ledger the
+operator is trusted for one thing: paying buyers' withdrawals out of the
+treasury ([below](#an-operator-that-does-not-pay-withdrawals)). The
+[vault](#the-vault) removes that trust. The [monitoring
 plan](../self-hosting/monitoring-plan.md) lists the signals below with their
 alerts and dashboard panels, and [drills](../self-hosting/monitoring-drills.md)
 raise them on testnet.
@@ -35,11 +36,9 @@ alone.
 **Response.** Run a worker with the treasury's key, top the treasury up from
 the cold reserve, or rotate the treasury role to a key the operator holds.
 
-**Left.** Buyers rely on the operator to pay withdrawals, as with any
-prepaid balance held by an issuer. A way out that needs no operator would
-have the treasury grant the contract an allowance the contract spends only
-for a withdrawal left unpaid past a delay. That changes the contract and
-its custody, and is not built.
+**Left.** On the prepaid ledger, buyers rely on the operator to pay
+withdrawals, as with any prepaid balance held by an issuer. The
+[vault](#the-vault) gives buyers a way out that needs no operator.
 
 ## Compromised operator key
 
@@ -185,3 +184,21 @@ costs a fee whatever its amount.
 | Fee account key | spend its XLM | holds only XLM for fees; signs only fee bumps | `PayStellarFeeAccountLow` |
 | RPC node | answer stale or wrong data, or stop answering | decisions only from ledgers the node reports, absence only after authorizations lapse, independent reads by the observer | `event_gap`, `PayStellarObserverLagging`, `PayStellarNodeStalled`, `PayStellarObserverStalled` |
 | Database role | change rows its grants allow | the narrowest grants per process, final states that cannot be left, append-only audit tables ([database](../self-hosting/database.md)) | reconciliation findings against the contract |
+
+## The vault
+
+The [vault](../architecture/vault-contract.md) holds the buyers' USDC in
+the contract itself. It changes what several keys can do:
+
+| Party | Can on the vault | Stopped by | Seen |
+|---|---|---|---|
+| Operator, or an operator that stops paying | refuse to co-sign withdrawals; charge within each buyer's limits | each buyer's [daily spending limit](../architecture/vault-contract.md#the-buyers-spending-limit) on top of `max_charge` and the daily limits; the buyer's [exit](../architecture/vault-contract.md#leaving), which needs no operator and pays the destination the buyer signed | `unknown_charge` and the other per-event findings, as on the prepaid ledger |
+| Admin keys | pause; change limits; propose new code | a pause never blocks exits, withdrawals or revenue payouts; new code installs only `UPGRADE_DELAY_LEDGERS` (about a week) after its proposal, longer than the exit notice, so a buyer who does not accept it can leave first | `upgrade_proposed` (critical) and `PayStellarVaultUpgradeProposed` at the proposal, `admin_change` for limits and cancellations, `code_changed` if the code is anything but Wasm |
+| Buyer's wallet, through another client | lower its limit or request an exit without the gateway | the notice: neither takes effect on-chain before every charge admitted earlier can settle; the gateway applies both to admission as soon as the worker reads them, and refuses charges while that reading lags | `vault_changed_elsewhere`, `PayStellarVaultChangedOutsideGateway` |
+| USDC issuer | freeze the vault's balance; claw back, if it enables clawback | nothing in the contract; Circle's USDC has no clawback enabled today | `treasury_deauthorized` and `PayStellarTreasuryDeauthorized` while frozen; `treasury_deficit` after a clawback |
+| Seller key | pay out the seller's revenue | the vault pays revenue to the seller alone; the seller role moves only with the current seller's authorization | the revenue events in reconciliation |
+
+**Left.**
+- A buyer's mandate allowance belongs to the vault's address, not its code. New code could spend what is left of it, so a buyer with a mandate revokes it before an upgrade's effective ledger as well as exiting.
+- An admin pause longer than the margin between the notice and the charge window lets admitted charges expire before an exit unlocks. That costs the seller those charges, never a buyer's balance.
+- A worker stopped for longer than its RPC node retains events cannot read the events it missed. It stops reading that vault and charges stay refused until an operator recovers it ([lost vault events](../self-hosting/vault.md#lost-vault-events)).

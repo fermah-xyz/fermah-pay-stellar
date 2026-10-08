@@ -213,6 +213,53 @@ Use a fresh database for each run. A minimal run, `--buyers 1
 accounts `channel-2` and `channel-3` that [the dev stack](dev-stack.md) sends
 from.
 
+## 9. The vault
+
+The [vault](../architecture/vault-contract.md) holds the buyers' USDC itself
+instead of a treasury. It is a separate deployment, recorded in the profile
+next to the prepaid ledger:
+
+```bash
+just contract-build
+testnet deploy-vault --wasm target/contract-wasm/fermah_pay_stellar_vault.wasm \
+  --min-deposit 100000 --max-charge 10000000 \
+  --max-balance 5000000000 --max-total 100000000000
+testnet vault-end-to-end \
+  --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_vault
+```
+
+`--max-balance` and `--max-total` are the launch limits: the admin bounds
+what one buyer and all buyers together may hold (500 and 10,000 USDC here).
+The end-to-end run binds a new deployment to the vault and, through the gRPC
+API:
+
+1. a new buyer with 0 XLM deposits 0.1 USDC and sets a daily spending limit
+   of 0.04 USDC with the same signature;
+2. two charges within the limit settle, and a third that would pass it is
+   refused at once (`above_spending_limit`);
+3. a withdrawal is paid to the wallet: the buyer signs, and the worker adds
+   the operator's signature;
+4. the buyer lowers the limit, which admission applies at once and the
+   contract only after its notice;
+5. the buyer requests an exit of 0.025 USDC; a withdrawal that would take
+   part of it is refused (`exit_requested`), and completing the exit before
+   its notice is refused by the contract in simulation;
+6. the run compares every figure `GetBalance` reports with the vault's
+   account entry, and the vault's USDC with what it owes.
+
+The exit unlocks about a day later (18,720 ledgers). Anyone may then
+complete it; the recorded `vault-exit` evidence comes from the submitter
+account, neither the buyer nor the operator:
+
+```bash
+testnet vault-exit --buyer G...     # the buyer address in the vault-end-to-end record
+```
+
+Admin changes to the vault go through the
+[multi-signature flow](../self-hosting/keys.md) of
+`fermah-pay-stellar-contract`, with the vault's actions `propose-upgrade`,
+`cancel-upgrade`, `install-upgrade` and `set-launch-limits`.
+
 ## On a local network
 
 Every command above also runs against a standalone network on this machine,
@@ -242,9 +289,9 @@ just db-create pay_stellar_local
 localnet end-to-end --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_local
 ```
 
-The image is pinned to the digest the CI job uses. `recurring-end-to-end`
-and `x402-conformance` run the same way, each on a database of its own, as in
-step 6. For a disposable run, `--profile-dir` keeps the profile somewhere
+The image is pinned to the digest the CI job uses. `recurring-end-to-end`,
+`x402-conformance`, and `deploy-vault` followed by `vault-end-to-end` run the
+same way, each on a database of its own, as in steps 6 and 9. For a disposable run, `--profile-dir` keeps the profile somewhere
 else.
 
 A local network has no Circle issuer. Its USDC is a stand-in issued by a key
@@ -254,6 +301,6 @@ to `~/.config/fermah-pay-stellar/local` and evidence to
 `target/local-evidence`. Each record is marked as a local test run: it is not
 evidence of anything on a public network.
 
-The `Local end-to-end` CI job runs these steps, with the recurring and x402
-runs, on every change to the code, the contract or the schema. The `testnet` workflow remains the check against
+The `Local end-to-end` CI job runs these steps, with the recurring, x402 and
+vault runs, on every change to the code, the contract or the schema. The `testnet` workflow remains the check against
 Circle USDC on a public network.

@@ -1,0 +1,60 @@
+{
+  "action": {
+    "contract": "CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF",
+    "description": "the admin proposed an upgrade of the vault to the code it already runs; it is cancelled once the alert fired",
+    "proposal": {
+      "fee_charged_stroops": 323599,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "dc86a44d71cfadb8b0c993e8026ba64f9f682d07ae95a37971f845a7ffff48ad",
+      "ledger": 5079444,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/7dc65758dba91bb272dbd820dbe9f64f27f9dc6fde1e4b47d114c623a4ad82e4",
+      "resources": {
+        "disk_read_bytes": 348,
+        "footprint_read_only": 2,
+        "footprint_read_write": 2,
+        "instructions": 1800094,
+        "write_bytes": 1068
+      },
+      "transaction_hash": "7dc65758dba91bb272dbd820dbe9f64f27f9dc6fde1e4b47d114c623a4ad82e4"
+    },
+    "wasm_hash": "dc89a2995ffce1c803a6b707fc9b142436b91a905cc3dab94c1898ca0519ef2f"
+  },
+  "alert": {
+    "annotations": {
+      "action": "Review the proposed Wasm before the effective ledger in the finding; if nobody planned it, cancel it with the admin keys and treat them as exposed",
+      "summary": "The admin proposed new code for a vault; it installs once the timelock passes"
+    },
+    "labels": {
+      "alertname": "PayStellarVaultUpgradeProposed",
+      "kind": "upgrade_proposed",
+      "severity": "critical"
+    },
+    "name": "PayStellarVaultUpgradeProposed",
+    "starts_at": "2026-10-08T00:53:52.720Z",
+    "state": "active"
+  },
+  "cleanup": {
+    "fee_charged_stroops": 17431,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+    "inner_transaction_hash": "874dc26608c6781c161c35b0cb2bc9d1379b5d301f33452895833c3579facd33",
+    "ledger": 5079451,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/3d2345e0277e361e0648e7c4a202ef802c68b6be7c4ee81773f48cd80873b2b7",
+    "resources": {
+      "disk_read_bytes": 348,
+      "footprint_read_only": 2,
+      "footprint_read_write": 2,
+      "instructions": 1809863,
+      "write_bytes": 932
+    },
+    "transaction_hash": "3d2345e0277e361e0648e7c4a202ef802c68b6be7c4ee81773f48cd80873b2b7"
+  },
+  "criterion": "monitoring-drill",
+  "expected": "the alert PayStellarVaultUpgradeProposed becomes active in Alertmanager",
+  "network": "stellar:testnet",
+  "observed_after_secs": 39,
+  "recorded_at": "2026-10-08T00:54:04.139968139Z",
+  "threat": "compromised admin keys proposing new vault code",
+  "vector": "vault-upgrade"
+}

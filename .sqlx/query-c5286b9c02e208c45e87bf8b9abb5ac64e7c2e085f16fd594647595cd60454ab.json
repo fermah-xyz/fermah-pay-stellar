@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT available, vault_synced_ledger FROM pay_stellar.buyers\n            WHERE id = $1 AND product_id = $2 AND seller_deployment_id = $3 AND network = $4\n            FOR UPDATE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "available",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "available"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "vault_synced_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "vault_synced_ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "c5286b9c02e208c45e87bf8b9abb5ac64e7c2e085f16fd594647595cd60454ab"
+}

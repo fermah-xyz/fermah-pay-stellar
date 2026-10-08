@@ -5,7 +5,8 @@
 //! records what it did and the alert.
 //!
 //! No drill moves USDC out of the treasury or changes the contract's own
-//! state: the shared testnet contract stays as the workflows expect it.
+//! state: the shared testnet contract stays as the workflows expect it. The
+//! vault upgrade drill cancels the upgrade it proposes once its alert fired.
 
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,7 @@ use anyhow::{Context as _, bail, ensure};
 use fermah_pay_stellar_chain::authorization::sign_entry;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
-use fermah_pay_stellar_chain::prepaid::{ChargeRequest, DepositIntent, instance_wasm};
+use fermah_pay_stellar_chain::prepaid::{AdminAction, ChargeRequest, DepositIntent, instance_wasm};
 use fermah_pay_stellar_chain::rpc::{hex_lower, http_client};
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry, WriteXdr,
@@ -42,6 +43,9 @@ const SMALL: i64 = 100_000;
 pub struct Stack {
     pub gateway: String,
     pub api_key: zeroize::Zeroizing<String>,
+    /// The API key of the deployment bound to the profile's vault, if the
+    /// stack provisioned one.
+    pub vault_api_key: Option<zeroize::Zeroizing<String>>,
     pub alertmanager: String,
     pub timeout: Duration,
 }
@@ -59,6 +63,10 @@ pub enum Vector {
     AdminCode,
     /// A flood of deposits reaches the deployment's daily quota.
     Dust,
+    /// A buyer's wallet changes its vault limit outside the gateway.
+    VaultLimit,
+    /// The admin proposes new code for the vault.
+    VaultUpgrade,
     /// Every drill above, in an order that keeps the quota for the last.
     All,
 }
@@ -71,6 +79,8 @@ impl Vector {
             Self::Allowance => "allowance",
             Self::AdminCode => "admin-code",
             Self::Dust => "dust",
+            Self::VaultLimit => "vault-limit",
+            Self::VaultUpgrade => "vault-upgrade",
             Self::All => "all",
         }
     }
@@ -79,13 +89,19 @@ impl Vector {
 impl Context {
     pub async fn drill(&self, stack: &Stack, vector: Vector) -> anyhow::Result<()> {
         let vectors = match vector {
-            Vector::All => vec![
-                Vector::BuyerKey,
-                Vector::Allowance,
-                Vector::OperatorKey,
-                Vector::AdminCode,
-                Vector::Dust,
-            ],
+            Vector::All => {
+                let mut all = vec![
+                    Vector::BuyerKey,
+                    Vector::Allowance,
+                    Vector::OperatorKey,
+                    Vector::AdminCode,
+                ];
+                if stack.vault_api_key.is_some() {
+                    all.extend([Vector::VaultLimit, Vector::VaultUpgrade]);
+                }
+                all.push(Vector::Dust);
+                all
+            }
             one => vec![one],
         };
         for vector in vectors {
@@ -109,9 +125,18 @@ impl Context {
                 Vector::Allowance => self.drill_allowance(stack).await?,
                 Vector::AdminCode => self.drill_admin_code().await?,
                 Vector::Dust => self.drill_dust(stack).await?,
+                Vector::VaultLimit => self.drill_vault_limit(stack).await?,
+                Vector::VaultUpgrade => self.drill_vault_upgrade().await?,
                 Vector::All => unreachable!("expanded above"),
             };
-            let fired = wait_for_alert(stack, alert, labels).await?;
+            let fired = wait_for_alert(stack, alert, labels).await;
+            // The proposal is dropped whether or not the alert fired, so the
+            // vault is left without a pending upgrade.
+            let cleanup = match vector {
+                Vector::VaultUpgrade => Some(self.cancel_vault_upgrade().await?),
+                _ => None,
+            };
+            let fired = fired?;
             let record = json!({
                 "criterion": "monitoring-drill",
                 "vector": vector.name(),
@@ -126,6 +151,7 @@ impl Context {
                     "state": fired["status"]["state"],
                 },
                 "observed_after_secs": started.elapsed().as_secs(),
+                "cleanup": cleanup,
             });
             evidence::write(&self.evidence_dir, &format!("drill-{}", vector.name()), record)?;
             println!("{}: {alert} active after {} s", vector.name(), started.elapsed().as_secs());
@@ -141,10 +167,12 @@ impl Context {
         Ok((BuyerServiceClient::new(channel.clone()), LedgerServiceClient::new(channel)))
     }
 
-    /// A new wallet holding `usdc` and no XLM, registered as a buyer.
+    /// A new wallet holding `usdc` and no XLM, registered as a buyer of the
+    /// deployment `token` belongs to.
     async fn registered_buyer(
         &self,
         stack: &Stack,
+        token: &str,
         usdc: i64,
     ) -> anyhow::Result<(SecretKey, String)> {
         let FundedBuyer { key, .. } = self.funded_buyer(usdc).await?;
@@ -155,7 +183,7 @@ impl Context {
                     external_ref: format!("drill-{}", unix_now()),
                     wallet_address: key.address().to_string(),
                 },
-                &stack.api_key,
+                token,
             )?)
             .await?
             .into_inner()
@@ -216,7 +244,7 @@ impl Context {
     }
 
     async fn drill_buyer_key(&self, stack: &Stack) -> Alerted {
-        let (buyer, buyer_id) = self.registered_buyer(stack, DEPOSIT).await?;
+        let (buyer, buyer_id) = self.registered_buyer(stack, &stack.api_key, DEPOSIT).await?;
         let (_, mut ledger) = self.clients(stack).await?;
         let token: &str = &stack.api_key;
         // Credit through the API, so a withdrawal can be prepared.
@@ -298,7 +326,7 @@ impl Context {
 
     async fn drill_allowance(&self, stack: &Stack) -> Alerted {
         let (_, pinned) = self.deployment()?;
-        let (buyer, buyer_id) = self.registered_buyer(stack, DEPOSIT).await?;
+        let (buyer, buyer_id) = self.registered_buyer(stack, &stack.api_key, DEPOSIT).await?;
         let (_, mut ledger) = self.clients(stack).await?;
         let token: &str = &stack.api_key;
         let prepared = ledger
@@ -485,6 +513,136 @@ impl Context {
     }
 }
 
+impl Context {
+    async fn drill_vault_limit(&self, stack: &Stack) -> Alerted {
+        let (_, pinned) = self.vault()?;
+        let token: &str =
+            stack.vault_api_key.as_deref().context("the stack provisioned no vault deployment")?;
+        let (buyer, buyer_id) = self.registered_buyer(stack, token, DEPOSIT).await?;
+        let (_, mut ledger) = self.clients(stack).await?;
+        let prepared = ledger
+            .prepare_deposit(authed(
+                PrepareDepositRequest {
+                    buyer_id,
+                    amount: DEPOSIT,
+                    idempotency_key: format!("drill-vault-deposit-{}", unix_now()),
+                    daily_limit: Some(SMALL),
+                },
+                token,
+            )?)
+            .await?
+            .into_inner()
+            .deposit
+            .context("no deposit returned")?;
+        let entry = SorobanAuthorizationEntry::from_xdr_base64(
+            &prepared.authorization_entry_xdr,
+            Limits::none(),
+        )?;
+        let signed = sign_entry(&entry, network_id(self.network), &[&buyer])?;
+        ledger
+            .submit_deposit(authed(
+                SubmitDepositRequest {
+                    deposit_id: prepared.deposit_id.clone(),
+                    signed_authorization_entry_xdr: signed.to_xdr_base64(Limits::none())?,
+                },
+                token,
+            )?)
+            .await?;
+        let deposit = until(
+            "deposit",
+            || {
+                let mut ledger = ledger.clone();
+                let request = GetDepositRequest { deposit_id: prepared.deposit_id.clone() };
+                async move {
+                    ledger
+                        .get_deposit(authed(request, token)?)
+                        .await?
+                        .into_inner()
+                        .deposit
+                        .context("no deposit")
+                }
+            },
+            |d| !matches!(d.state(), DepositState::Signed | DepositState::Submitted),
+        )
+        .await?;
+        ensure!(deposit.state() == DepositState::Confirmed, "deposit ended {:?}", deposit.state());
+        // The buyer raises the limit on the vault itself, through a wallet
+        // other than this gateway.
+        let (source, fee_source) = (self.profile.key(SPONSOR)?, self.profile.key(FEE_SOURCE)?);
+        let submitter = self.submitter(&source, &fee_source);
+        let cap = i128::from(DEPOSIT);
+        let function = HostFunction::InvokeContract(pinned.set_cap_call(&buyer.address(), cap));
+        let tree = pinned.set_cap_authorization(&buyer.address(), cap);
+        let auth = self.authorize(&submitter, &function, &[(&buyer, tree)]).await?;
+        let raised = submitter.submit(function, auth).await?;
+        Ok((
+            "a buyer's vault limit changed outside the gateway",
+            json!({
+                "description": "a new buyer deposited to the vault through the API with a daily limit, then raised the limit on the vault directly, as a wallet other than this gateway would",
+                "deposit_transaction": deposit.transaction_hash,
+                "limit_raised": receipt_json(&raised),
+            }),
+        ))
+    }
+
+    async fn drill_vault_upgrade(&self) -> Alerted {
+        let (recorded, pinned) = self.vault()?;
+        let read = self.rpc.get_ledger_entries(&[pinned.instance_key()]).await?;
+        let running = read
+            .first()
+            .and_then(|record| instance_wasm(&record.data))
+            .context("the vault instance cannot be read")?;
+        // A proposal already pending, someone else's, would be replaced and
+        // then cancelled: refused. Installing it is simulated only, and with
+        // none pending the vault answers `NoUpgrade` (error 127).
+        let (source, fee_source) = (self.profile.key(SPONSOR)?, self.profile.key(FEE_SOURCE)?);
+        let install = AdminAction::InstallUpgrade.call(pinned.contract);
+        match self.submitter(&source, &fee_source).read(HostFunction::InvokeContract(install)).await
+        {
+            Err(error) if format!("{error:#}").contains("Error(Contract, #127)") => {}
+            other => {
+                bail!("the vault may have an upgrade pending ({other:?}); not proposing another")
+            }
+        }
+        // The code it already runs: installing it would change nothing, and
+        // the proposal is cancelled once the alert fired.
+        let proposed =
+            self.vault_admin(&AdminAction::ProposeUpgrade { wasm_hash: running }).await?;
+        Ok((
+            "compromised admin keys proposing new vault code",
+            json!({
+                "description": "the admin proposed an upgrade of the vault to the code it already runs; it is cancelled once the alert fired",
+                "contract": recorded.contract,
+                "wasm_hash": hex_lower(&running),
+                "proposal": receipt_json(&proposed),
+            }),
+        ))
+    }
+
+    async fn cancel_vault_upgrade(&self) -> anyhow::Result<Value> {
+        Ok(receipt_json(&self.vault_admin(&AdminAction::CancelUpgrade).await?))
+    }
+
+    /// Sends `action` to the recorded vault, authorized by the admin.
+    async fn vault_admin(
+        &self,
+        action: &AdminAction,
+    ) -> anyhow::Result<fermah_pay_stellar_chain::sponsored::Receipt> {
+        let (recorded, pinned) = self.vault()?;
+        let admin: fermah_pay_stellar_domain::AccountAddress = recorded.admin.parse()?;
+        let (source, fee_source) = (self.profile.key(SPONSOR)?, self.profile.key(FEE_SOURCE)?);
+        let submitter = self.submitter(&source, &fee_source);
+        let function = HostFunction::InvokeContract(action.call(pinned.contract));
+        let (_, tree) = action
+            .authorizations(pinned.contract, &admin)
+            .into_iter()
+            .next()
+            .context("no admin authorization")?;
+        let auth = self.admin_authorization(&submitter, &function, tree).await?;
+        Ok(submitter.submit(function, vec![auth]).await?)
+    }
+}
+
 /// The threat a drill stands for, and what it did.
 type Alerted = anyhow::Result<(&'static str, Value)>;
 
@@ -502,6 +660,8 @@ const fn expected(vector: Vector) -> (&'static str, &'static [(&'static str, &'s
         Vector::Dust => {
             ("PayStellarDeploymentQuotaReached", &[("reason", "deployment_deposit_quota_exceeded")])
         }
+        Vector::VaultLimit => ("PayStellarVaultChangedOutsideGateway", &[]),
+        Vector::VaultUpgrade => ("PayStellarVaultUpgradeProposed", &[]),
         Vector::All => ("", &[]),
     }
 }

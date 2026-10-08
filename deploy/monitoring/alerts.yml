@@ -172,6 +172,13 @@ groups:
         annotations:
           summary: "The settlement worker's rounds keep failing"
           action: "Read the worker's error logs"
+      - alert: PayStellarVaultEventsBehind
+        expr: pay_stellar_vault_events_behind_ledgers > 720
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "The worker's reading of vault {{ $labels.deployment }}'s events is over an hour of ledgers behind"
+          action: "Its charges and withdrawals are refused once it lags PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS (2880 by default). Check the worker's logs for the vault: an RPC node that lost the events needs the recovery in docs/self-hosting/vault.md"
       - alert: PayStellarObserverLagging
         expr: pay_stellar_observer_lag_ledgers > 720
         for: 10m

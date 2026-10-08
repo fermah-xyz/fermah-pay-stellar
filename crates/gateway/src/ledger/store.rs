@@ -198,6 +198,9 @@ pub enum WithdrawalSigning {
     /// Vault: the withdrawal would not leave what the buyer's exit may take;
     /// nothing changed.
     ExitRequested,
+    /// Vault: the worker has not read the contract's events recently enough
+    /// for an exit made outside the gateway to be known; nothing changed.
+    VaultEventsStale,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -313,6 +316,29 @@ fn custody(kind: &str, treasury: Option<&str>) -> Result<Custody, StoreError> {
 #[must_use]
 pub fn charge_id(key: &IdempotencyKey) -> [u8; 32] {
     Sha256::digest(key.as_str().as_bytes()).into()
+}
+
+/// Whether a vault buyer's row can be trusted for admission: its account
+/// entry was read, and the worker's reading of the contract's events is
+/// recent enough for a limit change or exit made outside the gateway to be
+/// known.
+async fn vault_current(
+    tx: &mut sqlx::PgConnection,
+    scope: &Scope,
+    vault: VaultAdmission,
+    synced: Option<i64>,
+) -> Result<bool, StoreError> {
+    if synced.is_none() {
+        return Ok(false);
+    }
+    let read = sqlx::query_scalar!(
+        "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
+        scope.seller_deployment_id(),
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(query("read vault event cursor"))?;
+    Ok(read.is_some_and(|read| i64::from(vault.latest) - read <= i64::from(vault.stale_after)))
 }
 
 fn query(operation: &'static str) -> impl FnOnce(sqlx::Error) -> StoreError {
@@ -673,6 +699,23 @@ impl Store {
         id: Uuid,
         signed_authorization_xdr: &str,
     ) -> Result<bool, StoreError> {
+        // The buyer's row first, as admission locks it: a limit this
+        // deposit carries counts for every charge admitted after it.
+        let mut tx = self.pool.begin().await.map_err(query("begin deposit signing"))?;
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            WHERE d.id = $1 AND d.seller_deployment_id = $2 AND d.network = $3
+            FOR UPDATE OF b
+            "#,
+            id,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(query("lock the depositing buyer"))?;
         let updated = sqlx::query!(
             r#"
             UPDATE pay_stellar.deposits
@@ -685,9 +728,10 @@ impl Store {
             scope.network().caip2(),
             signed_authorization_xdr,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(query("sign deposit"))?;
+        tx.commit().await.map_err(query("commit deposit signing"))?;
         Ok(updated.rows_affected() == 1)
     }
 
@@ -731,7 +775,7 @@ impl Store {
         let mut tx = self.pool.begin().await.map_err(query("begin charge admission"))?;
         let buyer = sqlx::query!(
             r#"
-            SELECT available FROM pay_stellar.buyers
+            SELECT available, vault_synced_ledger FROM pay_stellar.buyers
             WHERE id = $1 AND product_id = $2 AND seller_deployment_id = $3 AND network = $4
             FOR UPDATE
             "#,
@@ -752,15 +796,7 @@ impl Store {
             return Ok(Admission::InsufficientBalance);
         }
         if let Some(vault) = vault {
-            let read = sqlx::query_scalar!(
-                "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
-                scope.seller_deployment_id(),
-            )
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(query("read vault event cursor"))?;
-            if read.is_none_or(|read| i64::from(vault.latest) - read > i64::from(vault.stale_after))
-            {
+            if !vault_current(&mut tx, scope, vault, buyer.vault_synced_ledger).await? {
                 return Ok(Admission::VaultEventsStale);
             }
             // A lower limit applies to every charge from the moment it is
@@ -965,7 +1001,9 @@ impl Store {
         let mut conn = self.pool.acquire().await.map_err(query("acquire connection"))?;
         let (admitted_cap, reserved_for_exit) = reservations(&mut conn, row.id).await?;
         Ok(Some(Balance {
-            available: row.available,
+            // Below zero only while an exit's payout is still held for open
+            // charges or withdrawals; none of it can be spent.
+            available: row.available.max(0),
             pending_charges: row.pending,
             pending_withdrawals: row.withdrawing,
             vault: VaultBuyer {
@@ -1085,11 +1123,13 @@ impl Store {
         scope: &Scope,
         id: Uuid,
         signed_authorization_xdr: &str,
+        vault: Option<VaultAdmission>,
     ) -> Result<WithdrawalSigning, StoreError> {
         let mut tx = self.pool.begin().await.map_err(query("begin withdrawal signing"))?;
         let buyer = sqlx::query!(
             r#"
-            SELECT b.id, b.available, w.amount FROM pay_stellar.withdrawals w
+            SELECT b.id, b.available, b.vault_synced_ledger, w.amount
+            FROM pay_stellar.withdrawals w
             JOIN pay_stellar.buyers b ON b.id = w.buyer_id
             WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3
             FOR UPDATE OF b
@@ -1119,6 +1159,11 @@ impl Store {
         }
         if buyer.available < buyer.amount {
             return Ok(WithdrawalSigning::InsufficientBalance);
+        }
+        if let Some(vault) = vault
+            && !vault_current(&mut tx, scope, vault, buyer.vault_synced_ledger).await?
+        {
+            return Ok(WithdrawalSigning::VaultEventsStale);
         }
         // A withdrawal, like a charge, leaves free what an exit may take, so
         // the exit pays in full and nothing held is taken by it.

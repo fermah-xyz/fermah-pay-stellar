@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT b.id FROM pay_stellar.vault_requests r\n            JOIN pay_stellar.buyers b ON b.id = r.buyer_id\n            WHERE r.id = $1 AND r.seller_deployment_id = $2 AND r.network = $3\n            FOR UPDATE OF b\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "97a8b5a5f3aca0147b59ffd24a9ea73893d1af1d2d6442e3ff2f837daad9b451"
+}

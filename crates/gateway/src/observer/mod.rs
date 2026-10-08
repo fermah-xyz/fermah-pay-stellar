@@ -955,13 +955,15 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     LedgerEvent::CapRaised { owner, cap }
                     | LedgerEvent::CapLowered { owner, cap, .. },
                 ) => {
-                    let known = prepared_cap(&mut tx, deployment.id, owner, *cap, ledger).await?;
+                    let when = (ledger, record.ledger_closed_at.as_str());
+                    let known = prepared_cap(&mut tx, deployment.id, owner, *cap, when).await?;
                     let verdict = vault_changed_elsewhere(known, &described.payload);
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
                 }
                 Some(LedgerEvent::ExitRequested { owner, amount, destination, .. }) => {
+                    let when = (ledger, record.ledger_closed_at.as_str());
                     let known =
-                        prepared_exit(&mut tx, deployment.id, owner, *amount, destination, ledger)
+                        prepared_exit(&mut tx, deployment.id, owner, *amount, destination, when)
                             .await?;
                     let verdict = vault_changed_elsewhere(known, &described.payload);
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
@@ -1480,14 +1482,15 @@ fn vault_changed_elsewhere(known: bool, payload: &serde_json::Value) -> Verdict 
 }
 
 /// Whether a limit the gateway prepared for `owner` can be the one included
-/// at `ledger`: a limit request or a deposit carrying a limit, signed for
-/// exactly `cap`, whose signature was still valid then.
+/// at `at` (a ledger and its close time): a limit request or a deposit
+/// carrying a limit, signed for exactly `cap`, that existed when that ledger
+/// closed and whose signature was still valid then.
 async fn prepared_cap(
     conn: &mut PgConnection,
     deployment: Uuid,
     owner: &ChainAddress,
     cap: i128,
-    ledger: i64,
+    (ledger, closed_at): (i64, &str),
 ) -> Result<bool, ObserverError> {
     // A limit beyond the column range cannot be one the gateway signed.
     let Ok(cap) = i64::try_from(cap) else { return Ok(false) };
@@ -1498,17 +1501,20 @@ async fn prepared_cap(
             JOIN pay_stellar.buyers b ON b.id = r.buyer_id
             WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2 AND r.kind = 'set_cap'
               AND r.cap = $3 AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $4
+              AND r.created_at <= $5::text::timestamptz
             UNION ALL
             SELECT 1 FROM pay_stellar.deposits d
             JOIN pay_stellar.buyers b ON b.id = d.buyer_id
             WHERE d.seller_deployment_id = $1 AND b.wallet_address = $2
               AND d.cap = $3 AND d.signed_at IS NOT NULL AND d.expiration_ledger >= $4
+              AND d.created_at <= $5::text::timestamptz
         ) AS "known!"
         "#,
         deployment,
         owner.to_string(),
         cap,
         ledger,
+        closed_at,
     )
     .fetch_one(conn)
     .await
@@ -1516,15 +1522,16 @@ async fn prepared_cap(
 }
 
 /// Whether an exit the gateway prepared for `owner` can be the one included
-/// at `ledger`: signed for exactly this amount and destination, with the
-/// signature still valid then.
+/// at `at` (a ledger and its close time): signed for exactly this amount and
+/// destination, existing when that ledger closed, with the signature still
+/// valid then.
 async fn prepared_exit(
     conn: &mut PgConnection,
     deployment: Uuid,
     owner: &ChainAddress,
     amount: i128,
     destination: &ChainAddress,
-    ledger: i64,
+    (ledger, closed_at): (i64, &str),
 ) -> Result<bool, ObserverError> {
     let Ok(amount) = i64::try_from(amount) else { return Ok(false) };
     sqlx::query_scalar!(
@@ -1535,6 +1542,7 @@ async fn prepared_exit(
             WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2
               AND r.kind = 'request_exit' AND r.amount = $3 AND r.destination = $4
               AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $5
+              AND r.created_at <= $6::text::timestamptz
         ) AS "known!"
         "#,
         deployment,
@@ -1542,6 +1550,7 @@ async fn prepared_exit(
         amount,
         destination.to_string(),
         ledger,
+        closed_at,
     )
     .fetch_one(conn)
     .await

@@ -754,7 +754,15 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
             "pay_stellar_worker",
             "UPDATE",
             "buyers",
-            &["available", "cap", "pending_cap", "pending_cap_at", "exit_amount", "exit_unlock_at"],
+            &[
+                "available",
+                "cap",
+                "pending_cap",
+                "pending_cap_at",
+                "exit_amount",
+                "exit_unlock_at",
+                "vault_synced_ledger",
+            ],
         ),
         columns(
             "pay_stellar_worker",

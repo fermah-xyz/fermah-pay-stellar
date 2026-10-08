@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT b.id, b.available, w.amount FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3\n            FOR UPDATE OF b\n            ",
+  "query": "\n            SELECT b.id, b.available, b.vault_synced_ledger, w.amount\n            FROM pay_stellar.withdrawals w\n            JOIN pay_stellar.buyers b ON b.id = w.buyer_id\n            WHERE w.id = $1 AND w.seller_deployment_id = $2 AND w.network = $3\n            FOR UPDATE OF b\n            ",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "vault_synced_ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "vault_synced_ledger"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "amount",
         "type_info": "Int8",
         "origin": {
@@ -47,8 +58,9 @@
     "nullable": [
       false,
       false,
+      true,
       false
     ]
   },
-  "hash": "656e39463885e6f7fbb10d3f468e6d107b890e1fe543dddab1235f10c9e9fa75"
+  "hash": "58b930314ed9cb49d2ac45c36ac6f5263fe59489acb1ace63467850ce8c07890"
 }

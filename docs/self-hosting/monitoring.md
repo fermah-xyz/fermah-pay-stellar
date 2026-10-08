@@ -50,6 +50,8 @@ receivers:
 | `pay_stellar_withdrawals_waiting` | worker | signed withdrawals not yet sent |
 | `pay_stellar_oldest_waiting_withdrawal_seconds` | worker | how long the oldest of them has waited since it was signed |
 | `pay_stellar_fee_source_spendable_stroops` | worker | XLM the fee account can spend above its reserve; below the fee floor no new transaction is built |
+| `pay_stellar_vault_events_behind_ledgers{deployment}` | worker | ledgers between the network's latest and the last a vault's events were applied through |
+| `pay_stellar_vault_read_failures_total{deployment}` | worker | rounds in which a vault's account entries or events could not be read or applied; the round goes on for everything else |
 | `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
 | `pay_stellar_signing_failures_total{role}` | worker | signatures that failed or did not verify, by key: `operator`, `source`, `fee_source` |
 | `pay_stellar_worker_step_failures_total` | worker | settlement rounds that failed |
@@ -109,6 +111,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarObserverStalled` | critical | No observer has completed a round for 15 minutes, so nothing on-chain is being watched and every finding-based alert is silent. Check the observer, its RPC node and the database |
 | `PayStellarNodeStalled` | critical | The observer's RPC node has not advanced in 10 minutes: it stopped following the network, and the observer sees nothing new. Point the observer at a healthy node |
 | `PayStellarUnobservedBinding` | warning | A ledger binding names another USDC contract than this network's, so its deployment is not reconciled. Correct the binding |
+| `PayStellarVaultEventsBehind` | warning | The worker's reading of a vault's events is more than an hour behind. Its charges and withdrawals are refused once it lags `PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS`; see the worker's logs and [lost vault events](vault.md#lost-vault-events) |
 | `PayStellarObserverLagging` | warning | The observer is more than an hour behind. Fix it before the events it has not read leave the RPC node's retention |
 | `PayStellarNoLeader` | critical | Worker or observer processes are running but none holds the lease, so nothing is settled or observed. Check their logs for database errors |
 | `PayStellarProcessDown` | critical | Restart the process; the worker and the observer resume from the database |

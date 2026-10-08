@@ -131,20 +131,24 @@ Every such charge has settled, or expired, by then.
 
 That covers what the contract decides. The services cover the rest:
 
-- The worker reads the vault's events from a position stored per
-  deployment, applying each page's limit and exit events to the buyers'
-  rows in the same database transaction that moves the position, so no
-  event applies twice.
+- The worker first reads each buyer's account entry, so a limit or exit the
+  wallet set before the buyer was registered is known. It then reads the
+  vault's events from a position stored per deployment, applying each
+  page's limit and exit events to the buyers' rows in the same database
+  transaction that moves the position, so no event applies twice. It
+  refuses to read past events the RPC node no longer holds
+  ([lost vault events](../self-hosting/vault.md#lost-vault-events)).
 - Admission counts the lowest limit known, including one the buyer signed
   through the API that is not resolved yet, and keeps an exit's amount free
   from every charge and withdrawal, so the exit pays in full and nothing
   admitted is left without funds. A request stays counted until the events
   past the ledger that included it, or past its authorization's last
   ledger, have been applied.
-- Charges are refused while the worker's reading lags the network by more
-  than a set number of ledgers, which with the charge window must stay below
-  the notice: a limit change or exit made outside the gateway is then known
-  before any charge admitted without it could still settle.
+- Charges and withdrawals are refused until a buyer's entry has been read,
+  and while the worker's reading lags the network by more than a set number
+  of ledgers, which with the charge window must stay below the notice: a
+  limit change or exit made outside the gateway is then known before any
+  charge admitted without it could still settle.
 - A cooperative withdrawal is co-signed by the operator only for amounts the
   gateway has already held from the available balance.
 

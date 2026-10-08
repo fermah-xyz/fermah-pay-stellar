@@ -2112,16 +2112,20 @@ impl World {
         .unwrap();
     }
 
-    /// Where the worker has applied the vault's events through.
+    /// Where the worker has applied the vault's events through: every event
+    /// up to the end of `ledger`.
     async fn vault_cursor(&self, ledger: i64) {
+        let cursor = EventCursor::end_of_ledger(u32::try_from(ledger).unwrap()).to_string();
         sqlx::query(
             "INSERT INTO pay_stellar.vault_event_cursors
                 (seller_deployment_id, network, cursor, ledger)
-             VALUES ($1, 'stellar:testnet', '0000000000000000001-0000000001', $2)
-             ON CONFLICT (seller_deployment_id) DO UPDATE SET ledger = EXCLUDED.ledger",
+             VALUES ($1, 'stellar:testnet', $3, $2)
+             ON CONFLICT (seller_deployment_id)
+             DO UPDATE SET ledger = EXCLUDED.ledger, cursor = EXCLUDED.cursor",
         )
         .bind(self.deployment)
         .bind(ledger)
+        .bind(cursor)
         .execute(&self.owner)
         .await
         .unwrap();
@@ -2291,6 +2295,22 @@ async fn test_an_exit_is_within_the_expected_totals_before_and_after_the_worker_
     reconcile_times(&observer, CONFIRMATIONS).await;
     assert_eq!(w.findings().await, []);
 
+    // Applied by a worker whose last page ended at the exit itself: its
+    // ledger is not complete yet, but the exit is in.
+    let exit_id: String =
+        sqlx::query_scalar("SELECT event_id FROM pay_stellar.chain_events WHERE kind = 'exit'")
+            .fetch_one(&w.owner)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET cursor = $1, ledger = 1039")
+        .bind(&exit_id)
+        .execute(&w.owner)
+        .await
+        .unwrap();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+    w.vault_cursor(1100).await;
+
     // The worker claims to have applied it, but `available` never fell.
     w.set_available(alice, 70).await;
     reconcile_times(&observer, CONFIRMATIONS).await;
@@ -2327,4 +2347,29 @@ async fn test_code_that_is_not_wasm_is_critical_without_an_expected_hash(
     w.chain.with(|n| n.built_in = true);
     reconcile_times(&observer, CONFIRMATIONS).await;
     assert_eq!(w.findings().await, [pair("code_changed", "critical")]);
+}
+
+/// A request prepared only after the event cannot be what the event shows:
+/// the change was made elsewhere, even if the gateway later asked for the
+/// same.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_request_prepared_after_its_event_does_not_explain_it(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    let wallet = account(5);
+    w.vault_request(alice, "signed", Some(100), None, 1500).await;
+    w.vault_request(alice, "signed", None, Some((40, &wallet)), 1500).await;
+    w.chain.emit(1010, cap_raised_event(&account(1), 100));
+    w.chain.emit(1011, exit_requested_event(&account(1), 40, &wallet));
+    // Both requests were created after those ledgers closed.
+    sqlx::query("UPDATE pay_stellar.vault_requests SET created_at = $1")
+        .bind(closed(&w, 1011) + time::Duration::minutes(5))
+        .execute(&w.owner)
+        .await
+        .unwrap();
+    w.observer().observe().await.unwrap();
+    assert_eq!(w.findings().await, vec![pair("vault_changed_elsewhere", "warning"); 2]);
 }
