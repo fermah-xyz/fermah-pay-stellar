@@ -219,6 +219,11 @@ applies, and in addition:
   `exit_amount` with the ledger it unlocks at; and what admission applies
   now: `admitted_daily_limit` and `reserved_for_exit`.
 
+- **Upgrades**: while new code the admin proposed may still be installed,
+  `PrepareDeposit`, `SubmitDeposit`, `PrepareMandate` and `SubmitMandate`
+  are refused with `upgrade_pending`. Money already in the vault stays
+  covered by the notice; new money would not be.
+
 Limit changes and exit requests count against the buyer's and the
 deployment's mandate quotas, which they share with mandates and revocations.
 
@@ -300,5 +305,6 @@ the deposit or withdrawal unchanged, and holds nothing again.
 | `FAILED_PRECONDITION` | `exit_requested` | the charge or withdrawal would not leave free what the buyer's exit may take | nothing to do; the buyer is leaving |
 | `FAILED_PRECONDITION` | `limit_change_expired`, `exit_expired` | the request's authorization lapsed | prepare a new one |
 | `FAILED_PRECONDITION` | `limit_change_already_signed`, `exit_already_signed` | the request holds a different signed entry | nothing to do; poll it |
+| `FAILED_PRECONDITION` | `upgrade_pending` | a vault deployment's admin proposed new code that may still be installed; new deposits and mandates wait until the proposal is cancelled, installed or lapses (about ten days at most) | try again later; existing balances, charges, withdrawals and exits are unaffected |
 | `UNAVAILABLE` | `network_unavailable` | the Stellar RPC could not be reached, or, for a vault, the worker's reading of its events is behind; nothing was created | retry |
 | `INTERNAL` | `internal` | server-side failure; details are logged, not returned | retry later |

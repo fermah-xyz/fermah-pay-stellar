@@ -371,6 +371,23 @@ impl Store {
         .map_err(query("read bound deployments"))
     }
 
+    /// Vault: the last ledger proposed code may be installed in, if a
+    /// proposal is open as far as the worker has read.
+    pub async fn vault_upgrade_pending_until(
+        &self,
+        scope: &Scope,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(sqlx::query_scalar!(
+            "SELECT upgrade_pending_until FROM pay_stellar.vault_event_cursors
+             WHERE seller_deployment_id = $1",
+            scope.seller_deployment_id(),
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(query("read the vault's pending upgrade"))?
+        .flatten())
+    }
+
     /// The ledger contract the caller's deployment settles against.
     pub async fn ledger_binding(
         &self,

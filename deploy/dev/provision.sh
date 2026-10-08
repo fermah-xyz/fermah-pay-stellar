@@ -9,10 +9,14 @@ admin() { fermah-pay-stellar-admin --database-url "$ISSUER_DATABASE_URL" "$@"; }
 
 provision_vault() {
     vault=/profile/vault-deployment.json
-    if [ ! -f "$vault" ] || [ -f /state/vault.json ]; then
+    if [ ! -f "$vault" ]; then
         return 0
     fi
     vault_contract=$(jq -r .contract "$vault")
+    # Bound already, unless the profile now records another vault.
+    if [ -f /state/vault.json ] && [ "$(jq -r .contract /state/vault.json)" = "$vault_contract" ]; then
+        return 0
+    fi
     # A product of its own: a stack provisioned before the vault existed
     # kept no product identifier.
     vault_product=$(admin create-product --name dev-vault | jq -r .product_id)

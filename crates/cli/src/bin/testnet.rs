@@ -124,6 +124,9 @@ enum Command {
     VaultExit {
         #[arg(long)]
         buyer: AccountAddress,
+        /// `C...` address of an earlier vault, instead of the recorded one.
+        #[arg(long)]
+        contract: Option<String>,
     },
     /// Create buyers 1..=COUNT with zero XLM and top each up to USDC_EACH
     /// base units from the USDC reserve.
@@ -340,7 +343,9 @@ async fn main() -> anyhow::Result<()> {
         Command::VaultEndToEnd { database_url } => {
             context()?.vault_end_to_end(&database_url).await?;
         }
-        Command::VaultExit { buyer } => context()?.vault_exit(&buyer).await?,
+        Command::VaultExit { buyer, contract } => {
+            context()?.vault_exit(&buyer, contract.as_deref()).await?;
+        }
         Command::OnboardBuyers { count, usdc_each } => {
             context()?.onboard_buyers(count, usdc_each).await?
         }

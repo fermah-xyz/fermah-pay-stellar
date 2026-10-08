@@ -50,6 +50,7 @@ receivers:
 | `pay_stellar_withdrawals_waiting` | worker | signed withdrawals not yet sent |
 | `pay_stellar_oldest_waiting_withdrawal_seconds` | worker | how long the oldest of them has waited since it was signed |
 | `pay_stellar_fee_source_spendable_stroops` | worker | XLM the fee account can spend above its reserve; below the fee floor no new transaction is built |
+| `pay_stellar_vault_upgrade_pending{deployment}` | observer | 1 while code proposed for a vault may still be installed, 0 otherwise |
 | `pay_stellar_vault_events_behind_ledgers{deployment}` | worker | ledgers between the network's latest and the last a vault's events were applied through |
 | `pay_stellar_vault_read_failures_total{deployment}` | worker | rounds in which a vault's account entries or events could not be read or applied; the round goes on for everything else |
 | `pay_stellar_contract_ttl_ledgers{deployment,entry}` | worker | ledgers of life left for a served contract's `instance` and `code`, read every `PAY_STELLAR_TTL_CHECK_SECS` |
@@ -86,7 +87,7 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarWarningFinding` | warning | The observer recorded a warning finding, such as `admin_change`, `role_changed`, `event_gap` or `unknown_withdrawal`. Read it and act as [the observer guide](observer.md) says for its kind; an admin change nobody planned means the admin keys are exposed |
 | `PayStellarContractCodeUnexpected` | critical | The contract runs other code than `PAY_STELLAR_EXPECTED_WASM` names, for as long as it does. If nobody planned the upgrade, pause the contract and treat the admin keys as exposed |
 | `PayStellarContractCodeChanged` | warning | The contract started running other code in the last hour, whether or not any code is expected. Confirm the upgrade was planned |
-| `PayStellarVaultUpgradeProposed` | critical | The admin proposed new code for a vault (`upgrade_proposed`). Review it before the effective ledger in the finding; if nobody planned it, cancel it and treat the admin keys as exposed |
+| `PayStellarVaultUpgradeProposed` | critical | New code proposed for a vault (`upgrade_proposed`) may be installed; active until the proposal is cancelled, installed or lapses. Review it before the effective ledger in the finding; if nobody planned it, cancel it and treat the admin keys as exposed. New deposits and mandates are refused meanwhile |
 | `PayStellarTreasuryDeauthorized` | critical | USDC's issuer revoked the treasury's trustline authorization or froze the vault's balance: no deposit, withdrawal or exit can move USDC until it is restored, or, for a treasury, it is rotated |
 | `PayStellarTreasuryShort` | critical | The treasury and its cold reserve, or the vault, hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
 | `PayStellarChargeQuarantined` | critical | A charge's amount is held from its buyer until resolved; see [quarantine](quarantine.md) |

@@ -502,3 +502,46 @@ async fn test_vault_requests_are_idempotent_and_signed_by_the_buyer_only(
     // A refused submission counts for nothing.
     assert_eq!(balance(&h, &t, &b).await.admitted_daily_limit, 30);
 }
+
+/// While proposed code may still be installed, new money waits: a deposit or
+/// mandate made now would run under it without the notice existing buyers
+/// have to leave first.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_deposits_and_mandates_wait_while_an_upgrade_may_be_installed(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let t = vault(&h).await;
+    let b = buyer(&h, &t, 0, 0).await;
+    let pending_until = |until: i64| {
+        sqlx::query("UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = $1")
+            .bind(until)
+            .execute(&h.owner)
+    };
+    let deposit = |key: &str| PrepareDepositRequest {
+        buyer_id: b.id.clone(),
+        amount: 10_000_000,
+        idempotency_key: key.into(),
+        daily_limit: Some(5_000_000),
+    };
+    let mandate = |key: &str| fermah_pay_stellar_proto::v1::PrepareMandateRequest {
+        buyer_id: b.id.clone(),
+        amount: 1_000_000,
+        period_secs: 86_400,
+        cycles: 2,
+        idempotency_key: key.into(),
+    };
+    let latest = i64::from(h.ledger.get());
+    pending_until(latest).await.unwrap();
+    let status =
+        ledger(&h).await.prepare_deposit(authed(deposit("d-1"), &t.token)).await.unwrap_err();
+    assert_refused(&status, Code::FailedPrecondition, "upgrade_pending");
+    let status =
+        ledger(&h).await.prepare_mandate(authed(mandate("m-1"), &t.token)).await.unwrap_err();
+    assert_refused(&status, Code::FailedPrecondition, "upgrade_pending");
+    // Lapsed: new money is taken again.
+    pending_until(latest - 1).await.unwrap();
+    ledger(&h).await.prepare_deposit(authed(deposit("d-1"), &t.token)).await.unwrap();
+    ledger(&h).await.prepare_mandate(authed(mandate("m-1"), &t.token)).await.unwrap();
+}

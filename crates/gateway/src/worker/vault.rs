@@ -11,7 +11,8 @@
 //! lapsed at, by which any use of it by someone else has been applied too.
 
 use fermah_pay_stellar_chain::prepaid::{
-    LedgerEvent, PrepaidDeployment, ledger_event, vault_account,
+    LedgerEvent, PrepaidDeployment, VAULT_UPGRADE_WINDOW_LEDGERS, ledger_event, pending_upgrade,
+    vault_account,
 };
 use fermah_pay_stellar_chain::rpc::{EventCursor, EventPage, EventsFrom};
 use fermah_pay_stellar_chain::stellar_xdr::{
@@ -55,7 +56,7 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             let read = async {
                 let latest =
                     self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
-                let position = self.vault_position(id, &vault.network, latest).await?;
+                let position = self.vault_position(id, &vault.network, latest, &served).await?;
                 self.sync_vault_buyers(id, &served).await?;
                 self.apply_vault_events(id, served.contract, position).await?;
                 Ok::<_, WorkerError>(latest)
@@ -85,29 +86,55 @@ impl<C: Chain, K: Clock> Worker<C, K> {
 
     /// Where the vault's events were applied up to; a vault never read
     /// starts after `latest`, its buyers' earlier state being read from
-    /// their account entries instead.
+    /// their account entries instead, and a proposal already pending from
+    /// its instance.
     async fn vault_position(
         &self,
         id: Uuid,
         network: &str,
         latest: u32,
+        served: &PrepaidDeployment,
     ) -> Result<EventCursor, WorkerError> {
-        let start = EventCursor::end_of_ledger(latest);
-        sqlx::query!(
-            r#"
-            INSERT INTO pay_stellar.vault_event_cursors
-                (seller_deployment_id, network, cursor, ledger)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (seller_deployment_id) DO NOTHING
-            "#,
+        let known = sqlx::query_scalar!(
+            "SELECT cursor FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
             id,
-            network,
-            start.to_string(),
-            i64::from(latest),
         )
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(store("start reading vault events"))?;
+        .map_err(store("read the vault event position"))?;
+        if known.is_none() {
+            let read = self
+                .engine
+                .chain()
+                .ledger_entries(&[served.instance_key()])
+                .await
+                .map_err(WorkerError::Chain)?;
+            // An archived instance takes no deposit either: nothing pending
+            // can matter until it is restored, and its events say so then.
+            let pending = match read.entries.first() {
+                None => None,
+                Some(record) => pending_upgrade(&record.data)
+                    .ok_or(WorkerError::Corrupt("the vault's instance does not decode"))?,
+            };
+            // Read at or after `latest`: events from there on apply on top.
+            let start = EventCursor::end_of_ledger(latest);
+            sqlx::query!(
+                r#"
+                INSERT INTO pay_stellar.vault_event_cursors
+                    (seller_deployment_id, network, cursor, ledger, upgrade_pending_until)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (seller_deployment_id) DO NOTHING
+                "#,
+                id,
+                network,
+                start.to_string(),
+                i64::from(latest),
+                pending.map(|(_, effective_at)| install_deadline(effective_at)),
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(store("start reading vault events"))?;
+        }
         let cursor = sqlx::query_scalar!(
             "SELECT cursor FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
             id,
@@ -569,6 +596,27 @@ async fn apply(
             .await
             .map_err(store("apply an exit request"))?;
         }
+        LedgerEvent::UpgradeProposed { effective_at, .. } => {
+            sqlx::query!(
+                "UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = $2
+                 WHERE seller_deployment_id = $1",
+                deployment,
+                install_deadline(*effective_at),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store("apply an upgrade proposal"))?;
+        }
+        LedgerEvent::UpgradeCancelled { .. } | LedgerEvent::UpgradeInstalled { .. } => {
+            sqlx::query!(
+                "UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = NULL
+                 WHERE seller_deployment_id = $1",
+                deployment,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store("close an upgrade proposal"))?;
+        }
         LedgerEvent::Exited { owner, amount, .. } => {
             // What the exit paid left the vault whenever this event is read,
             // so it always comes off `available`. Beyond `available`, it took
@@ -611,6 +659,12 @@ async fn apply(
         _ => {}
     }
     Ok(())
+}
+
+/// The last ledger code proposed to be installable from `effective_at` may
+/// be installed in.
+fn install_deadline(effective_at: u32) -> i64 {
+    i64::from(effective_at) + i64::from(VAULT_UPGRADE_WINDOW_LEDGERS)
 }
 
 /// A vault amount as stored. The contract bounds transfers to `i64`, but not

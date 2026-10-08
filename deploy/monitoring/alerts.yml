@@ -30,11 +30,13 @@ groups:
           summary: "Deployment {{ $labels.deployment }}'s contract started running other code in the last hour"
           action: "Confirm the upgrade was planned; one nobody made means the admin keys are exposed"
       - alert: PayStellarVaultUpgradeProposed
-        expr: sum by (kind) (increase(pay_stellar_findings_total{kind="upgrade_proposed"}[15m])) > 0
+        expr: >-
+          max by (deployment) (pay_stellar_vault_upgrade_pending) == 1
+          or sum by (kind) (increase(pay_stellar_findings_total{kind="upgrade_proposed"}[15m])) > 0
         labels: { severity: critical }
         annotations:
-          summary: "The admin proposed new code for a vault; it installs once the timelock passes"
-          action: "Review the proposed Wasm before the effective ledger in the finding; if nobody planned it, cancel it with the admin keys and treat them as exposed"
+          summary: "New code proposed for a vault may be installed; it stays active until the proposal is cancelled, installed or lapses"
+          action: "Review the proposed Wasm before the effective ledger in the upgrade_proposed finding; if nobody planned it, cancel it with the admin keys and treat them as exposed. New deposits and mandates are refused meanwhile"
       - alert: PayStellarTreasuryDeauthorized
         expr: pay_stellar_treasury_authorized == 0
         for: 5m

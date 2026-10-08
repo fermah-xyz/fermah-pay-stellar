@@ -48,8 +48,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use fermah_pay_stellar_chain::prepaid::{
-    Custody, InstanceState, PrepaidDeployment, SacBalance, instance_state, instance_wasm,
-    sac_balance,
+    Custody, InstanceState, PrepaidDeployment, SacBalance, VAULT_UPGRADE_WINDOW_LEDGERS,
+    instance_state, instance_wasm, sac_balance,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, LedgerKey, TrustLineFlags};
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_key};
@@ -275,6 +275,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             (held > owed)
                 .then(|| Finding::new(FindingKind::TreasurySurplus, Severity::Info, solvency)),
         ));
+        // A vault's proposed code stands as a condition until it is
+        // cancelled, installed or lapses, not only as the proposal's
+        // finding: an alert on it lasts as long as buyers are exposed.
+        if matches!(reading.held, Held::Vault(_)) {
+            let pending = reading.state.pending_upgrade.is_some_and(|(_, effective_at)| {
+                reading.ledger <= effective_at.saturating_add(VAULT_UPGRADE_WINDOW_LEDGERS)
+            });
+            metrics::gauge!("pay_stellar_vault_upgrade_pending", "deployment" => deployment.id.to_string())
+                .set(if pending { 1.0 } else { 0.0 });
+        }
         // The admin can replace the contract's code, and with it what every
         // balance means, and an upgrade emits no event. The code each
         // contract runs is exported, so a change shows whether or not any

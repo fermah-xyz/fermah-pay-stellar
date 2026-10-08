@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = NULL\n                 WHERE seller_deployment_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d3eb974decf300f52b2d99c7a7340c46f2c9e5ae32b9a7fe8160f3b42b9c5e66"
+}

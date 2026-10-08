@@ -32,6 +32,8 @@ pub const MAX_CHARGE_WINDOW: u32 = 17_280;
 pub const CHARGE_RECORD_GRACE: u32 = 720;
 /// Vault: ledgers from a buyer's lower limit or exit request to its effect.
 pub const VAULT_NOTICE_LEDGERS: u32 = 18_720;
+/// Vault: ledgers after its delay in which proposed code may be installed.
+pub const VAULT_UPGRADE_WINDOW_LEDGERS: u32 = 51_840;
 
 /// Who holds a deployment's USDC.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1198,6 +1200,10 @@ pub enum LedgerEvent {
     UpgradeCancelled {
         wasm_hash: [u8; 32],
     },
+    /// Vault: the proposed code was installed.
+    UpgradeInstalled {
+        wasm_hash: [u8; 32],
+    },
 }
 
 /// What one account, and all the seller's accounts together, may be charged
@@ -1271,6 +1277,9 @@ pub fn ledger_event(topics: &[ScVal], data: &ScVal) -> Option<LedgerEvent> {
         }
         (b"upgrade_cancelled", []) => {
             return Some(LedgerEvent::UpgradeCancelled { wasm_hash: bytes32_of(data)? });
+        }
+        (b"upgrade_installed", []) => {
+            return Some(LedgerEvent::UpgradeInstalled { wasm_hash: bytes32_of(data)? });
         }
         _ => {}
     }
@@ -1542,6 +1551,9 @@ pub fn contract_totals(value: &ScVal) -> Option<Totals> {
 pub struct InstanceState {
     pub config: ContractConfig,
     pub totals: Totals,
+    /// Vault: proposed code and the ledger it is installable from; always
+    /// `None` for a prepaid ledger.
+    pub pending_upgrade: Option<([u8; 32], u32)>,
 }
 
 /// Decodes the contract instance entry read at [`PrepaidDeployment::instance_key`];
@@ -1583,10 +1595,45 @@ pub fn instance_state(entry: &LedgerEntryData) -> Option<InstanceState> {
             _ => None,
         })
     };
+    let pending_upgrade = pending_upgrade(entry)?;
     Some(InstanceState {
         config: contract_config(slot(b"Config")?)?,
         totals: contract_totals(slot(b"Totals")?)?,
+        pending_upgrade,
     })
+}
+
+/// Vault: the proposed code and the ledger it is installable from, from the
+/// contract instance entry; `Some(None)` with none pending, `None` if the
+/// entry is not a contract instance or its proposal does not decode.
+#[must_use]
+pub fn pending_upgrade(entry: &LedgerEntryData) -> Option<Option<([u8; 32], u32)>> {
+    let LedgerEntryData::ContractData(ContractDataEntry {
+        val: ScVal::ContractInstance(instance),
+        ..
+    }) = entry
+    else {
+        return None;
+    };
+    let Some(storage) = instance.storage.as_ref() else { return Some(None) };
+    let slot = storage.iter().find_map(|entry| match &entry.key {
+        ScVal::Vec(Some(ScVec(key)))
+            if matches!(key.as_slice(), [ScVal::Symbol(s)] if s.0.as_slice() == b"PendingUpgrade") =>
+        {
+            Some(&entry.val)
+        }
+        _ => None,
+    });
+    let Some(value) = slot else { return Some(None) };
+    let ScVal::Map(Some(fields)) = value else { return None };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    let ScVal::U32(effective_at) = field(b"effective_at")? else { return None };
+    Some(Some((bytes32_of(field(b"wasm_hash")?)?, *effective_at)))
 }
 
 /// The outcome held by a charge record read from the ledger; `None` if the

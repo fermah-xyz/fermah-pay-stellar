@@ -206,6 +206,9 @@ struct Net {
     /// Asked from a position older than it retains, the node answers from
     /// its oldest ledger instead of refusing.
     answers_from_oldest: bool,
+    /// Vault: code the admin proposed, and the ledger it is installable
+    /// from, as the instance holds it.
+    pending_upgrade: Option<([u8; 32], u32)>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1070,8 +1073,15 @@ impl Chain for Stellar {
             }
         }
         let fee_balance = self.with(|n| n.fee_balance);
-        let (instance_until, code_until, vault, held) = self
-            .with(|n| (n.instance_live_until, n.code_live_until, n.vault, n.state.treasury_usdc));
+        let (instance_until, code_until, vault, held, pending_upgrade) = self.with(|n| {
+            (
+                n.instance_live_until,
+                n.code_live_until,
+                n.vault,
+                n.state.treasury_usdc,
+                n.pending_upgrade,
+            )
+        });
         let instance_key = self.deployment.instance_key();
         let balance_key = self.deployment.vault_balance_key();
         let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(WASM) });
@@ -1082,7 +1092,34 @@ impl Chain for Stellar {
                     key,
                     ScVal::ContractInstance(ScContractInstance {
                         executable: ContractExecutable::Wasm(Hash(WASM)),
-                        storage: None,
+                        storage: pending_upgrade.map(|(hash, effective_at)| {
+                            let field = |key: &str, val| ScMapEntry { key: symbol(key), val };
+                            let proposal = ScVal::Map(Some(ScMap(
+                                vec![
+                                    field("effective_at", ScVal::U32(effective_at)),
+                                    field(
+                                        "wasm_hash",
+                                        ScVal::Bytes(
+                                            fermah_pay_stellar_chain::stellar_xdr::ScBytes(
+                                                hash.to_vec().try_into().unwrap(),
+                                            ),
+                                        ),
+                                    ),
+                                ]
+                                .try_into()
+                                .unwrap(),
+                            )));
+                            ScMap(
+                                vec![ScMapEntry {
+                                    key: ScVal::Vec(Some(ScVec(
+                                        vec![symbol("PendingUpgrade")].try_into().unwrap(),
+                                    ))),
+                                    val: proposal,
+                                }]
+                                .try_into()
+                                .unwrap(),
+                            )
+                        }),
                     }),
                 );
                 record.live_until_ledger = Some(until);
@@ -1339,6 +1376,7 @@ async fn world_of(
             vault_accounts: HashMap::new(),
             events_fail: false,
             answers_from_oldest: false,
+            pending_upgrade: None,
         })),
         deployment: PrepaidDeployment {
             contract: CONTRACT,
@@ -5120,4 +5158,82 @@ async fn test_a_vault_withdrawal_waits_for_a_recent_reading_of_the_events(
         .unwrap();
     w.submit_withdrawal(&prepared, &signed).await.unwrap();
     assert_eq!(vault_row(&w, &x).await.3, 60);
+}
+
+async fn upgrade_pending_until(w: &World) -> Option<i64> {
+    sqlx::query_scalar("SELECT upgrade_pending_until FROM pay_stellar.vault_event_cursors")
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+/// Publishes a vault event with no owner topic, as the admin's are.
+fn admin_event(w: &World, name: &str, data: ScVal) {
+    w.stellar.with(|n| {
+        let closed = n.clock.now().format(&time::format_description::well_known::Rfc3339).unwrap();
+        n.events.emit(CONTRACT, n.latest, closed, vec![symbol(name)], data);
+    });
+}
+
+/// The worker knows while proposed code may be installed: from the
+/// instance when it starts serving the vault, then from the events.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_worker_follows_a_proposed_vault_upgrade(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let window = i64::from(fermah_pay_stellar_chain::prepaid::VAULT_UPGRADE_WINDOW_LEDGERS);
+    w.stellar.with(|n| {
+        n.pending_upgrade = Some(([7; 32], 5_000));
+        // Alive well past the worker's threshold: read, not extended.
+        n.instance_live_until = Some(n.latest + TTL_EXTEND_TO);
+        n.code_live_until = n.latest + TTL_EXTEND_TO;
+    });
+    w.worker().step().await.unwrap();
+    assert_eq!(upgrade_pending_until(&w).await, Some(5_000 + window));
+
+    let hash = ScVal::Bytes(fermah_pay_stellar_chain::stellar_xdr::ScBytes(
+        [7_u8; 32].to_vec().try_into().unwrap(),
+    ));
+    w.stellar.with(|n| n.latest += 1);
+    admin_event(&w, "upgrade_cancelled", hash.clone());
+    w.worker().step().await.unwrap();
+    assert_eq!(upgrade_pending_until(&w).await, None);
+
+    w.stellar.with(|n| n.latest += 1);
+    admin_event(&w, "upgrade_proposed", vec_val(vec![hash.clone(), ScVal::U32(9_000)]));
+    w.worker().step().await.unwrap();
+    assert_eq!(upgrade_pending_until(&w).await, Some(9_000 + window));
+
+    w.stellar.with(|n| n.latest += 1);
+    admin_event(&w, "upgrade_installed", hash);
+    w.worker().step().await.unwrap();
+    assert_eq!(upgrade_pending_until(&w).await, None);
+}
+
+/// A buyer read as having no vault account is read again once a deposit is
+/// confirmed: an archived account the node no longer served comes back with
+/// the deposit, with any exit it held.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_buyer_read_without_an_account_is_read_again_after_a_deposit(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.buyer("x", 100).await;
+    w.worker().step().await.unwrap();
+    assert!(synced_at(&w, &x).await.is_some());
+    let unlock = w.stellar.with(|n| n.latest) + 1_000;
+    w.stellar.with(|n| {
+        n.vault_accounts.insert(
+            x.key.address(),
+            VaultEntry { cap: 0, pending: None, exit: Some((30, unlock)) },
+        );
+    });
+    let deposit = w.deposit(&x, 100, "fund-x").await;
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
+    w.settle(&w.worker()).await;
+    assert_eq!(vault_row(&w, &x).await.2, Some((30, i64::from(unlock))));
 }

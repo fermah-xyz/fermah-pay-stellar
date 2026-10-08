@@ -69,6 +69,12 @@ pub const NOTICE_LEDGERS: u32 = 18_720;
 /// Ledgers (~7 days) between proposing new code and installing it.
 pub const UPGRADE_DELAY_LEDGERS: u32 = 120_960;
 
+/// Ledgers (~3 days) after the delay in which proposed code may be
+/// installed; after that the proposal has lapsed and a new one restarts the
+/// delay. A buyer who joins after a proposal's delay ran out is therefore
+/// never exposed to it for long, and the proposal stays visible to all.
+pub const UPGRADE_WINDOW_LEDGERS: u32 = 51_840;
+
 /// Ledgers (~5 days) a buyer has after an upgrade is proposed to request an
 /// exit that unlocks before the new code can run.
 pub const EXIT_MARGIN_LEDGERS: u32 = 86_400;
@@ -138,6 +144,8 @@ pub enum Error {
     InvalidDay = 129,
     /// `exit` when nothing is left to pay; the request stays.
     NothingToExit = 130,
+    /// The proposed code was not installed within its window.
+    UpgradeLapsed = 131,
 }
 
 #[contracttype]
@@ -471,6 +479,13 @@ pub struct UpgradeProposed {
 #[contractevent(topics = ["upgrade_cancelled"], data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeCancelled {
+    pub wasm_hash: BytesN<32>,
+}
+
+/// The proposed code was installed; it runs from the next invocation.
+#[contractevent(topics = ["upgrade_installed"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeInstalled {
     pub wasm_hash: BytesN<32>,
 }
 
@@ -824,6 +839,14 @@ impl PrepaidVault {
             panic_with_error!(&env, Error::InvalidMandate);
         }
         let allowance = checked_mul(&env, amount, i128::from(cycles));
+        // While launch limits bound what a buyer may hold, they bound what a
+        // buyer's wallet lets this contract take too: code installed by an
+        // upgrade could spend the allowance, not only the deposits.
+        if let Some(launch) = env.storage().instance().get::<Key, LaunchLimits>(&Key::LaunchLimits)
+            && allowance > launch.max_balance
+        {
+            panic_with_error!(&env, Error::AboveLaunchLimit);
+        }
         let mandate = Mandate {
             mandate_id,
             amount,
@@ -1042,8 +1065,8 @@ impl PrepaidVault {
     }
 
     /// Installs exactly the proposed code, as a Wasm executable, once its
-    /// delay has passed. The host emits a system event naming the previous
-    /// and the new code.
+    /// delay has passed and before its window closes. The host also emits a
+    /// system event naming the previous and the new code.
     pub fn upgrade(env: Env) {
         config(&env).admin.require_auth();
         let pending = env
@@ -1051,11 +1074,16 @@ impl PrepaidVault {
             .instance()
             .get::<Key, PendingUpgrade>(&Key::PendingUpgrade)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NoUpgrade));
-        if env.ledger().sequence() < pending.effective_at {
+        let now = env.ledger().sequence();
+        if now < pending.effective_at {
             panic_with_error!(&env, Error::UpgradeLocked);
+        }
+        if now > pending.effective_at.saturating_add(UPGRADE_WINDOW_LEDGERS) {
+            panic_with_error!(&env, Error::UpgradeLapsed);
         }
         env.storage().instance().remove(&Key::PendingUpgrade);
         extend_instance(&env);
+        UpgradeInstalled { wasm_hash: pending.wasm_hash.clone() }.publish(&env);
         env.deployer().update_current_contract(ContractExecutable::Wasm(pending.wasm_hash));
     }
 }

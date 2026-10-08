@@ -629,11 +629,20 @@ impl Context {
         }))
     }
 
-    /// Completes `owner`'s exit on the recorded vault once its notice has
-    /// passed. Anyone may send it; it pays the destination the buyer signed.
-    pub async fn vault_exit(&self, owner: &AccountAddress) -> anyhow::Result<()> {
+    /// Completes `owner`'s exit once its notice has passed, on the recorded
+    /// vault or on `contract`, an earlier vault of the same network. Anyone
+    /// may send it; it pays the destination the buyer signed.
+    pub async fn vault_exit(
+        &self,
+        owner: &AccountAddress,
+        contract: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.rpc.verify_network(self.network).await?;
-        let (recorded, pinned) = self.vault()?;
+        let (mut recorded, mut pinned) = self.vault()?;
+        if let Some(contract) = contract {
+            pinned.contract = contract_bytes(contract)?;
+            contract.clone_into(&mut recorded.contract);
+        }
         let asset = usdc::circle_usdc(self.network);
         let before = self.vault_account_of(&pinned, owner).await?;
         let (requested, destination, unlock_at) =
