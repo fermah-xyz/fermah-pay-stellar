@@ -17,9 +17,11 @@ provision_vault() {
     if [ -f /state/vault.json ] && [ "$(jq -r .contract /state/vault.json)" = "$vault_contract" ]; then
         return 0
     fi
-    # A product of its own: a stack provisioned before the vault existed
-    # kept no product identifier.
-    vault_product=$(admin create-product --name dev-vault | jq -r .product_id)
+    # A product of its own per vault, named after it: a stack provisioned
+    # before the vault existed kept no product identifier, and product names
+    # are unique.
+    vault_product=$(admin create-product --name "dev-vault-$(printf %.8s "$vault_contract" | tr A-Z a-z)" \
+        | jq -r .product_id)
     vault_id=$(admin create-deployment --product-id "$vault_product" \
         --name testnet-vault --network stellar:testnet | jq -r .deployment_id)
     admin bind-ledger --deployment-id "$vault_id" --contract "$vault_contract" --vault \

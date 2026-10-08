@@ -1,0 +1,68 @@
+{
+  "create": {
+    "fee_charged_stroops": 391366179,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "092c767d2188bbaa9c1a1b55cade65d60b9ba071d2b484e8175c382e000699e1",
+    "ledger": 5080961,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/e95bf8fa0b19374536c83366dc4d02ef48071aa3fb25d64a882a6d040314cfa5",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 1,
+      "footprint_read_write": 1,
+      "instructions": 1254765,
+      "write_bytes": 628
+    },
+    "transaction_hash": "e95bf8fa0b19374536c83366dc4d02ef48071aa3fb25d64a882a6d040314cfa5"
+  },
+  "criterion": "vault-deployment",
+  "deployment": {
+    "admin": "GBM3GVZUVGSNJKQHGEDGCNCWURSM6B7242PR544C4CM34AY2YEDQ2YE3",
+    "contract": "CBQHH62P6OLSC22FZLC73FW4QXURYCKE5H25MIKA76X3ZIJQLH65FJJW",
+    "launch_limits": [
+      5000000000,
+      100000000000
+    ],
+    "max_charge": 10000000,
+    "min_deposit": 100000,
+    "operator": "GCPXGYYNF547BXJ2NRZKMZWDAANHSLKK7FYMBPGIHI4MW4Q234I6YSNG",
+    "seller": "GDLT7M7IAMPMGMDOQ2C6XOKTBLZ7Q7AXEZ6WFWRFKIMTGPOCPAN4EVYN",
+    "usdc": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+    "wasm_sha256": "21f2d54a75969091eba1194fed8a33be78b7e9f9a982a458c7a9f7dfa4c05eee"
+  },
+  "expected": "vault created from the recorded Wasm with its constructor pinning the roles, the network's USDC and limits, and the admin's launch limits set",
+  "launch_limits": {
+    "fee_charged_stroops": 295687,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "a78d6f884ee97fc0af990956a4b43d6a3d580e1e2d8f4d1a4cb4b59eb4c69c12",
+    "ledger": 5080962,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/43e81af7eb7cd0c7638e6e4a60b9db52f3ecd40a19f1b4593923460744e611fb",
+    "resources": {
+      "disk_read_bytes": 348,
+      "footprint_read_only": 2,
+      "footprint_read_write": 2,
+      "instructions": 1796265,
+      "write_bytes": 828
+    },
+    "transaction_hash": "43e81af7eb7cd0c7638e6e4a60b9db52f3ecd40a19f1b4593923460744e611fb"
+  },
+  "network": "stellar:testnet",
+  "recorded_at": "2026-10-08T02:59:57.716146957Z",
+  "upload": {
+    "fee_charged_stroops": 118839978,
+    "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+    "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+    "inner_transaction_hash": "858bff058a6d4b04c574c815d7cae673e2d6629e86c5d5f0560d3184901eb506",
+    "ledger": 5080960,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/de88436d66b3a2568c9b69d889cd71c752cea8469fba677c8b2cc594574f3586",
+    "resources": {
+      "disk_read_bytes": 0,
+      "footprint_read_only": 0,
+      "footprint_read_write": 1,
+      "instructions": 32814318,
+      "write_bytes": 37816
+    },
+    "transaction_hash": "de88436d66b3a2568c9b69d889cd71c752cea8469fba677c8b2cc594574f3586"
+  }
+}

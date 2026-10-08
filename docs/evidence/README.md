@@ -32,7 +32,8 @@ commit.
 |---|---|---|---|
 | [`CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI`](https://stellar.expert/explorer/testnet/contract/CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI) | the prepaid ledger with recurring charges; the deployment the workflows use | `38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e` (deployed as `fcdd05c4…`, then upgraded) | from `2026-10-01T022132-prepaid-deployment` on |
 | [`CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV`](https://stellar.expert/explorer/testnet/contract/CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV) | the prepaid ledger before recurring charges | `02e59475f67a8e9204c2aa6029051ff9ba70254ef69be76b97230d6cedfb3d95` (deployed as `02d80b2f…`, upgraded to `78e874a9…`, then to this with daily limits) | from `2026-09-29T044603-prepaid-deployment` to `2026-09-30T180500-daily-limits` |
-| [`CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF`](https://stellar.expert/explorer/testnet/contract/CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF) | the vault, which holds the buyers' USDC itself | `dc89a2995ffce1c803a6b707fc9b142436b91a905cc3dab94c1898ca0519ef2f` | from `2026-10-08T004923-vault-deployment` on |
+| [`CBQHH62P6OLSC22FZLC73FW4QXURYCKE5H25MIKA76X3ZIJQLH65FJJW`](https://stellar.expert/explorer/testnet/contract/CBQHH62P6OLSC22FZLC73FW4QXURYCKE5H25MIKA76X3ZIJQLH65FJJW) | the vault, which holds the buyers' USDC itself, with the upgrade window and mandate bound | `21f2d54a75969091eba1194fed8a33be78b7e9f9a982a458c7a9f7dfa4c05eee` | from `2026-10-08T025957-vault-deployment` on |
+| [`CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF`](https://stellar.expert/explorer/testnet/contract/CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF) | the first vault, before the upgrade window | `dc89a2995ffce1c803a6b707fc9b142436b91a905cc3dab94c1898ca0519ef2f` | from `2026-10-08T004923-vault-deployment` to `2026-10-08T005404-drill-vault-upgrade` |
 | [`CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW`](https://stellar.expert/explorer/testnet/contract/CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW) | a buyer's wallet: the example contract account (`contracts/example-account`) | `2b35859f9267d85acd0ac3c51543b5d9fda2e92b2ff9c8f5ef9993dab7111678` | `contract-account-buyer` |
 | [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) | Circle's testnet USDC (Stellar Asset Contract), not ours | | all |
 
@@ -158,6 +159,20 @@ Every figure `GetBalance` reported equals the vault's account entry: 0.06 USDC a
 The [monitoring drills](../self-hosting/monitoring-drills.md) on the vault:
 - [`drill-vault-limit`](testnet/2026-10-08T005324-drill-vault-limit.json): a buyer raised its limit on the vault directly ([`de709a69…`](https://stellar.expert/explorer/testnet/tx/de709a69c0255b3f7dd570952626bd172592c7aee7ab71a38494839180ae629d)), and `PayStellarVaultChangedOutsideGateway` was active within 60 seconds;
 - [`drill-vault-upgrade`](testnet/2026-10-08T005404-drill-vault-upgrade.json): the admin's proposal of an upgrade ([`7dc65758…`](https://stellar.expert/explorer/testnet/tx/7dc65758dba91bb272dbd820dbe9f64f27f9dc6fde1e4b47d114c623a4ad82e4)) raised `PayStellarVaultUpgradeProposed` within 39 seconds. The drill then cancelled the proposal ([`3d2345e0…`](https://stellar.expert/explorer/testnet/tx/3d2345e0277e361e0648e7c4a202ef802c68b6be7c4ee81773f48cd80873b2b7)).
+
+The same runs on the current vault, after proposals gained an installation
+window and mandates a bound by the launch limits:
+- [`vault-deployment`](testnet/2026-10-08T025957-vault-deployment.json): upload [`de88436d…`](https://stellar.expert/explorer/testnet/tx/de88436d66b3a2568c9b69d889cd71c752cea8469fba677c8b2cc594574f3586), creation [`e95bf8fa…`](https://stellar.expert/explorer/testnet/tx/e95bf8fa0b19374536c83366dc4d02ef48071aa3fb25d64a882a6d040314cfa5), launch limits [`43e81af7…`](https://stellar.expert/explorer/testnet/tx/43e81af7eb7cd0c7638e6e4a60b9db52f3ecd40a19f1b4593923460744e611fb).
+- [`vault-end-to-end`](testnet/2026-10-08T030108-vault-end-to-end.json):
+  - deposit [`93dd49bc…`](https://stellar.expert/explorer/testnet/tx/93dd49bc9f9e9b08326c611f69b90665e41e827b05d0ac6a8866c711e716fc01);
+  - charges [`82569e09…`](https://stellar.expert/explorer/testnet/tx/82569e0945b6e0dec23fbade7e13a859f2c9af34ea336133f91c0801853b8b54) and [`2c93fa62…`](https://stellar.expert/explorer/testnet/tx/2c93fa62e0728fe194404551222d6a0e30633ff8e7874fff70137881a20fce0d);
+  - withdrawal [`44d9b6e8…`](https://stellar.expert/explorer/testnet/tx/44d9b6e80872c73b257d97124ac88289d038d6166cc8cf4285a32410d0bb0f66);
+  - lower limit [`85bee8e7…`](https://stellar.expert/explorer/testnet/tx/85bee8e775f5dd8abce4c72f09f3ac09afef32d5dff30202ad46eea8a4e9ec86), in force from ledger 5099693;
+  - exit request [`04c49f08…`](https://stellar.expert/explorer/testnet/tx/04c49f08e230fe5ccdd020c69e709f8624a7c95af20dee9d0764231708cf453c), unlocking at ledger 5099695.
+
+  The same refusals and figures as above; the vault held its liabilities and revenue exactly.
+- [`drill-vault-limit`](testnet/2026-10-08T030453-drill-vault-limit.json): `PayStellarVaultChangedOutsideGateway` active within 48 seconds of the limit raised outside the gateway ([`eee26a6d…`](https://stellar.expert/explorer/testnet/tx/eee26a6df20966a2a49716f590e30cdfe4b446922d20eb873c0039c8ea2c7a88)).
+- [`drill-vault-upgrade`](testnet/2026-10-08T030534-drill-vault-upgrade.json): `PayStellarVaultUpgradeProposed` active within 40 seconds of the proposal ([`e59a5535…`](https://stellar.expert/explorer/testnet/tx/e59a553591752527377129928105f6cc1509d51f813fe47f6fe21076dd1bde3d)), which the drill then cancelled ([`2f64e1bd…`](https://stellar.expert/explorer/testnet/tx/2f64e1bd5145518ede565be161aa05bc359d326c3380e80f88c55fb99ba4265b)).
 
 ### API end to end on testnet
 

@@ -1,0 +1,44 @@
+{
+  "action": {
+    "deposit_transaction": "1f06e4261b718f37182a21cd54fe1de32e49ff1c11c0118b6389e5d700bfa930",
+    "description": "a new buyer deposited to the vault through the API with a daily limit, then raised the limit on the vault directly, as a wallet other than this gateway would",
+    "limit_raised": {
+      "fee_charged_stroops": 17049,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GCNVZIYLHVBSFCN6R34ALZIHYOJB33PIPDIWZOOBY5H2T32XAG3OGU3K",
+      "inner_transaction_hash": "07a8548f02d7b83c86635b196b564d666b8a41cc0661f283ec8d023a44ce45fa",
+      "ledger": 5081017,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/eee26a6df20966a2a49716f590e30cdfe4b446922d20eb873c0039c8ea2c7a88",
+      "resources": {
+        "disk_read_bytes": 188,
+        "footprint_read_only": 3,
+        "footprint_read_write": 2,
+        "instructions": 1390833,
+        "write_bytes": 492
+      },
+      "transaction_hash": "eee26a6df20966a2a49716f590e30cdfe4b446922d20eb873c0039c8ea2c7a88"
+    }
+  },
+  "alert": {
+    "annotations": {
+      "action": "The buyer's wallet called the vault directly; the worker has applied it to admission. Confirm with the buyer; a change nobody made means the buyer's key is exposed",
+      "summary": "A buyer's vault limit or exit was set outside this gateway"
+    },
+    "labels": {
+      "alertname": "PayStellarVaultChangedOutsideGateway",
+      "kind": "vault_changed_elsewhere",
+      "severity": "warning"
+    },
+    "name": "PayStellarVaultChangedOutsideGateway",
+    "starts_at": "2026-10-08T03:04:52.720Z",
+    "state": "active"
+  },
+  "cleanup": null,
+  "criterion": "monitoring-drill",
+  "expected": "the alert PayStellarVaultChangedOutsideGateway becomes active in Alertmanager",
+  "network": "stellar:testnet",
+  "observed_after_secs": 48,
+  "recorded_at": "2026-10-08T03:04:53.642186303Z",
+  "threat": "a buyer's vault limit changed outside the gateway",
+  "vector": "vault-limit"
+}
