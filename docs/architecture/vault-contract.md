@@ -219,9 +219,9 @@ authorization, so no other key can redirect revenue.
 `set_launch_limits(Some({max_balance, max_total}))` bounds the balance one
 buyer may hold and the total all buyers may hold; deposits past either are
 refused as `AboveLaunchLimit`. A mandate whose allowance, its amount times
-its cycles, would pass `max_balance` is refused the same way, so a buyer's
-exposure to a flaw or to new code is bounded by the limit whether the money
-is deposited or approved. They only refuse new deposits and mandates, never
+its cycles, would pass `max_balance` is refused the same way. A buyer's
+exposure to a flaw or to new code is then at most `max_balance` deposited
+plus `max_balance` approved; `max_total` bounds the deposits only. They only refuse new deposits and mandates, never
 a withdrawal or an exit, so they apply at once, and `None` removes them.
 
 ## Charges, records and recurring charges

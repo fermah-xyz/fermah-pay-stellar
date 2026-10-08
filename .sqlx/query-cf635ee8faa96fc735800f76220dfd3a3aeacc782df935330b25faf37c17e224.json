@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE pay_stellar.buyers\n            SET vault_synced_ledger = NULL, vault_entry_absent = false\n            WHERE seller_deployment_id = $1 AND wallet_address = $2\n              AND vault_entry_absent AND available >= 0\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf635ee8faa96fc735800f76220dfd3a3aeacc782df935330b25faf37c17e224"
+}

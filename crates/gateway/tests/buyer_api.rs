@@ -762,6 +762,7 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
                 "exit_amount",
                 "exit_unlock_at",
                 "vault_synced_ledger",
+                "vault_entry_absent",
             ],
         ),
         columns(
