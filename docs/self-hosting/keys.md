@@ -129,7 +129,7 @@ The available changes are:
 On a [vault](../architecture/vault-contract.md#upgrades), code changes take two proposals a timelock apart, and buyers can exit in between:
 - `propose-upgrade --wasm-hash`, after the upload; the observer reports it as a critical `upgrade_proposed` finding;
 - `cancel-upgrade`, to drop it;
-- `install-upgrade`, once the vault's delay of 120,960 ledgers (about a week) has passed; it installs exactly the proposed hash;
+- `install-upgrade`, once the vault's delay of 120,960 ledgers (about a week) has passed and within the 51,840 ledgers (about three days) after it; it installs exactly the proposed hash. Past that window the proposal lapses and has to be made again. Collect the signatures in time;
 - `set-launch-limits --max-balance --max-total`, or `--remove`, bounds what one buyer and all buyers together may hold.
 
 `sign` recomputes what it signs from the proposal's call rather than trusting the proposal's summary. `submit` refuses a proposal whose signatures do not reach the medium threshold, naming the weight that is missing.

@@ -551,6 +551,26 @@ impl<L: LatestLedger> LedgerApi<L> {
         }
     }
 
+    /// Refuses new money into a vault while proposed code may still be
+    /// installed: it would run under that code without the notice existing
+    /// buyers have to leave first.
+    pub(super) async fn refuse_while_upgrade_pending(
+        &self,
+        scope: &Scope,
+        deployment: &PrepaidDeployment,
+        latest: u32,
+    ) -> Result<(), Status> {
+        if !deployment.is_vault() {
+            return Ok(());
+        }
+        let until =
+            self.store.vault_upgrade_pending_until(scope).await.map_err(|e| internal(&e))?;
+        if until.is_some_and(|until| i64::from(latest) <= until) {
+            return Err(Refusal::UpgradePending.into());
+        }
+        Ok(())
+    }
+
     pub(crate) const fn store(&self) -> &Store {
         &self.store
     }
@@ -615,6 +635,7 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             .map_err(|e| internal(&e))?
             .ok_or(Refusal::BuyerNotFound)?;
         let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+        self.refuse_while_upgrade_pending(&scope, &deployment, latest).await?;
         let expiration_ledger = latest
             .checked_add(self.policy.authorization_validity_ledgers)
             .ok_or(Refusal::Internal)?;
@@ -712,6 +733,16 @@ impl<L: LatestLedger> LedgerService for LedgerApi<L> {
             .ok_or_else(|| corrupt("authorization entry"))?;
         if unsigned(&signed) != prepared {
             return Err(Refusal::AuthorizationMismatch.into());
+        }
+        let deployment = self
+            .store
+            .ledger_binding(&scope)
+            .await
+            .map_err(|e| internal(&e))?
+            .ok_or(Refusal::LedgerNotConfigured)?;
+        if deployment.is_vault() {
+            let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+            self.refuse_while_upgrade_pending(&scope, &deployment, latest).await?;
         }
         // The deposit's transfer moves the buyer's USDC to the treasury or
         // the vault: the buyer's entry is the only authorization it needs.

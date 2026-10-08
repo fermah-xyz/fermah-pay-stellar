@@ -417,7 +417,12 @@ fn test_admin_actions_signed_as_built() {
         run(AdminAction::InstallUpgrade).err(),
         Some(soroban_sdk::Error::from_contract_error(Error::UpgradeLocked as u32))
     );
+    // The pending proposal, as the observer reads it from the instance.
+    let state = instance_state(&w.entry(&w.deployment().instance_key()).unwrap()).unwrap();
+    assert_eq!(state.pending_upgrade, Some(([7; 32], now + UPGRADE_DELAY_LEDGERS)));
     run(AdminAction::CancelUpgrade).unwrap();
+    let state = instance_state(&w.entry(&w.deployment().instance_key()).unwrap()).unwrap();
+    assert_eq!(state.pending_upgrade, None);
     assert_eq!(w.decoded_events(), [LedgerEvent::UpgradeCancelled { wasm_hash: [7; 32] }]);
     run(AdminAction::SetLaunchLimits { limits: Some((5 * USDC, 50 * USDC)) }).unwrap();
     run(AdminAction::SetLaunchLimits { limits: None }).unwrap();
@@ -444,7 +449,12 @@ fn test_instance_decodes_without_a_treasury() {
 fn test_the_chain_module_mirrors_the_vault_constants() {
     use fermah_pay_stellar_chain::prepaid as chain;
     assert_eq!(
-        (chain::VAULT_NOTICE_LEDGERS, chain::MAX_BATCH as u32, chain::MAX_CHARGE_WINDOW),
-        (NOTICE_LEDGERS, MAX_BATCH, MAX_CHARGE_WINDOW)
+        (
+            chain::VAULT_NOTICE_LEDGERS,
+            chain::MAX_BATCH as u32,
+            chain::MAX_CHARGE_WINDOW,
+            chain::VAULT_UPGRADE_WINDOW_LEDGERS
+        ),
+        (NOTICE_LEDGERS, MAX_BATCH, MAX_CHARGE_WINDOW, UPGRADE_WINDOW_LEDGERS)
     );
 }

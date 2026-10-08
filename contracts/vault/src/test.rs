@@ -7,7 +7,7 @@ extern crate std;
 use std::vec::Vec as StdVec;
 
 use soroban_sdk::testutils::storage::{Persistent as _, Temporary as _};
-use soroban_sdk::testutils::{Address as _, Deployer as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Deployer as _, Events as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, Env, String as SorobanString, token, vec};
 
 use super::*;
@@ -487,6 +487,30 @@ fn test_past_its_delay_an_upgrade_installs_the_proposed_hash() {
     }
 }
 
+/// Proposed code may be installed only within its window after the delay;
+/// past it the proposal has lapsed, and a new one waits the delay again.
+#[test]
+fn test_an_upgrade_lapses_past_its_window() {
+    let w = world();
+    let hash = BytesN::from_array(&w.env, &[7; 32]);
+    w.client().propose_upgrade(&hash);
+    let effective_at = w.client().get_pending_upgrade().unwrap().effective_at;
+    // The last ledger of the window: the timelock lets it through, and the
+    // host refuses the Wasm that was never uploaded.
+    w.env.ledger().set_sequence_number(effective_at + UPGRADE_WINDOW_LEDGERS);
+    match w.client().try_upgrade() {
+        Err(Ok(error)) => {
+            assert!(Error::try_from(error).is_err(), "refused by the contract: {error:?}")
+        }
+        Err(Err(_)) => {}
+        Ok(_) => panic!("installed a Wasm that was never uploaded"),
+    }
+    w.env.ledger().set_sequence_number(effective_at + UPGRADE_WINDOW_LEDGERS + 1);
+    assert_eq!(refusal(w.client().try_upgrade()), Error::UpgradeLapsed);
+    w.client().propose_upgrade(&hash);
+    assert_eq!(refusal(w.client().try_upgrade()), Error::UpgradeLocked);
+}
+
 fn wasm_under_test() -> StdVec<u8> {
     let path = std::env::var("VAULT_WASM")
         .expect("set VAULT_WASM to the contract built by `stellar contract build`");
@@ -503,6 +527,13 @@ fn test_full_upgrade_after_the_delay_keeps_balances() {
     w.client().propose_upgrade(&hash);
     w.advance(UPGRADE_DELAY_LEDGERS);
     w.client().upgrade();
+    // The install is announced as an event of the vault.
+    let events = w.env.events().all();
+    let installed = events.events().iter().any(|event| {
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        matches!(body.topics.first(), Some(soroban_sdk::xdr::ScVal::Symbol(s)) if s.0.as_slice() == b"upgrade_installed")
+    });
+    assert!(installed, "no upgrade_installed event");
     assert_eq!(w.client().get_pending_upgrade(), None);
     assert_eq!(w.client().get_balance(&buyer), 10 * USDC);
 }
@@ -528,6 +559,31 @@ fn test_launch_limits_refuse_deposits_past_them() {
     w.client().deposit(&second, &(3 * USDC), &w.id(1), &None);
     w.client().set_launch_limits(&None);
     w.client().deposit(&first, &USDC, &w.id(2), &None);
+}
+
+/// While launch limits apply, a mandate may not let the vault take more from
+/// the buyer's wallet than a buyer may hold in it.
+#[test]
+fn test_launch_limits_bound_mandate_allowances() {
+    let w = world();
+    let buyer = w.buyer(10 * USDC);
+    let live_until = w.now() + 100_000;
+    w.client()
+        .set_launch_limits(&Some(LaunchLimits { max_balance: 5 * USDC, max_total: 8 * USDC }));
+    assert_eq!(
+        refusal(w.client().try_authorize_recurring(
+            &buyer,
+            &w.id(1),
+            &USDC,
+            &86_400,
+            &6,
+            &live_until
+        )),
+        Error::AboveLaunchLimit
+    );
+    w.client().authorize_recurring(&buyer, &w.id(1), &USDC, &86_400, &5, &live_until);
+    w.client().set_launch_limits(&None);
+    w.client().authorize_recurring(&buyer, &w.id(2), &USDC, &86_400, &6, &live_until);
 }
 
 // ---- recurring charges and storage lifetime ---------------------------------------

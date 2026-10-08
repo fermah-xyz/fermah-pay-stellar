@@ -2226,6 +2226,7 @@ fn test_observer_reads_config_and_totals_from_the_instance_entry() {
                 paused: false,
             },
             totals: Decoded { liabilities: 8 * USDC, revenue: 3 * USDC / 2 },
+            pending_upgrade: None,
         })
     );
     // Control: another contract's entry of the same kind is not read as it.

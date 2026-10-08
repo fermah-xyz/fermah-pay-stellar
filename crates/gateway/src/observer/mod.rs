@@ -460,6 +460,13 @@ fn describe(record: &ContractEventRecord) -> Described {
             Some(*wasm_hash),
             json!({ "wasm_hash": hex_lower(wasm_hash) }),
         ),
+        LedgerEvent::UpgradeInstalled { wasm_hash } => (
+            "upgrade_installed",
+            None,
+            None,
+            Some(*wasm_hash),
+            json!({ "wasm_hash": hex_lower(wasm_hash) }),
+        ),
     };
     Described { kind, owner, amount, reference, payload, event: Some(event) }
 }
@@ -982,7 +989,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
                 }
                 Some(
-                    LedgerEvent::LaunchLimitsChanged { .. } | LedgerEvent::UpgradeCancelled { .. },
+                    LedgerEvent::LaunchLimitsChanged { .. }
+                    | LedgerEvent::UpgradeCancelled { .. }
+                    | LedgerEvent::UpgradeInstalled { .. },
                 ) => {
                     let verdict = Verdict::Finding(Finding::new(
                         FindingKind::AdminChange,

@@ -86,6 +86,10 @@ labels! {
         ExitNotFound => "exit_not_found",
         ExitExpired => "exit_expired",
         ExitAlreadySigned => "exit_already_signed",
+        /// Vault: new code the admin proposed may still be installed; new
+        /// deposits and mandates wait until it is cancelled, installed or
+        /// lapses.
+        UpgradePending => "upgrade_pending",
         NetworkUnavailable => "network_unavailable",
         Internal => "internal",
     }
@@ -160,7 +164,8 @@ impl Refusal {
             | Self::LimitChangeExpired
             | Self::LimitChangeAlreadySigned
             | Self::ExitExpired
-            | Self::ExitAlreadySigned => Code::FailedPrecondition,
+            | Self::ExitAlreadySigned
+            | Self::UpgradePending => Code::FailedPrecondition,
             Self::NetworkUnavailable => Code::Unavailable,
             Self::Internal => Code::Internal,
         }

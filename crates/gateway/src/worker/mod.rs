@@ -1128,7 +1128,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 RETURNING buyer_id, amount
             )
             UPDATE pay_stellar.buyers b
-            SET available = b.available + confirmed.amount
+            SET available = b.available + confirmed.amount,
+                -- A vault buyer read as having no account may have had one
+                -- the node no longer served, archived with its limit and
+                -- exit; the deposit restored it, so it is read again.
+                vault_synced_ledger = CASE
+                    WHEN b.cap = 0 AND b.pending_cap IS NULL AND b.exit_amount IS NULL
+                         AND b.available >= 0
+                    THEN NULL ELSE b.vault_synced_ledger END
             FROM confirmed WHERE b.id = confirmed.buyer_id
             "#,
             id,

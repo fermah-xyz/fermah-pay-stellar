@@ -46,6 +46,16 @@ The gateway keeps an exit's amount free from every charge and withdrawal it
 admits once it knows of the request. So this happens only when the worker
 was down for longer than the exit's notice.
 
+## Upgrades
+
+While code the admin proposed may still be installed, from the proposal
+until it is cancelled, installed or its window closes, the gateway refuses
+new deposits and mandates with `upgrade_pending`. Money deposited then would
+run under the new code without the notice existing buyers have to leave
+first. The worker learns of a proposal from the vault's events, and from
+the contract instance when it starts serving a vault.
+`PayStellarVaultUpgradeProposed` stays active for that whole time.
+
 ## Lost vault events
 
 The worker reads the vault's events from the RPC node, which retains only

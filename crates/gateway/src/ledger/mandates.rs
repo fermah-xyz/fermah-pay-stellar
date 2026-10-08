@@ -340,6 +340,7 @@ impl<L: LatestLedger> LedgerApi<L> {
             .ok_or(Refusal::BuyerNotFound)?;
         let wallet = classic_wallet(wallet)?;
         let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+        self.refuse_while_upgrade_pending(&scope, &deployment, latest).await?;
         let validity = self.policy.authorization_validity_ledgers;
         let expiration_ledger = latest.checked_add(validity).ok_or(Refusal::Internal)?;
         let live_until = mandate_live_until(
@@ -431,6 +432,11 @@ impl<L: LatestLedger> LedgerApi<L> {
             return Err(Refusal::AuthorizationMismatch.into());
         }
         let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+        if let Some(deployment) =
+            self.store.ledger_binding(&scope).await.map_err(|e| internal(&e))?
+        {
+            self.refuse_while_upgrade_pending(&scope, &deployment, latest).await?;
+        }
         verify_signed_entry(
             &signed,
             &record.wallet,

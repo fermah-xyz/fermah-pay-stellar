@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT upgrade_pending_until FROM pay_stellar.vault_event_cursors\n             WHERE seller_deployment_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "upgrade_pending_until",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_event_cursors",
+            "name": "upgrade_pending_until"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "cbff88463aa7b85f33c13e1a9c66f9b91b70c75c230e77c9f92e34ca71673c20"
+}

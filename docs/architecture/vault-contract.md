@@ -41,8 +41,11 @@ plus anything sent to it directly, which is never credited.
 
 The USDC issuer remains outside the contract's control. Circle's USDC
 issuer has `AUTH_REVOCABLE` set and can freeze the vault's balance; it does
-not have clawback enabled on testnet or mainnet today. Check the issuer's
-flags before deploying.
+not have clawback enabled on testnet or mainnet today. Whether a balance can
+be clawed back is fixed when the balance is created, from the issuer's flags
+at that moment. Check the issuer's flags before deploying, and the vault's
+balance entry (`clawback`, which the observer reads) after its first
+deposit.
 
 ## Time
 
@@ -86,8 +89,11 @@ buyer signs one, with `set_cap(owner, cap)` or with the first deposit
 lower limit only when the account is next written.
 
 Because each day has its own share, a compromised operator key can take up
-to the limit for yesterday and again for today: up to twice the limit in 24
-hours, from each buyer.
+to the limit for yesterday and again for today. Around UTC midnight that
+adds up to three limits within minutes, if yesterday's share was unused:
+yesterday's and today's just before midnight, then the new day's just
+after. Size each limit knowing a buyer can lose up to three of them before
+the operator is rotated.
 
 A charge's refusals are checked in this order: a malformed batch reverts
 whole (empty, too large, a non-positive amount, a later day, a last ledger
@@ -164,11 +170,25 @@ higher one, with that outcome recorded.
 ## Upgrades
 
 `propose_upgrade(wasm_hash)` records the hash, installable
-`UPGRADE_DELAY_LEDGERS` later; proposing again restarts the delay, and
-`cancel_upgrade` drops it. `upgrade()` takes no argument: it installs
-exactly the proposed hash, as Wasm code, once the delay has passed. A buyer
-who requests an exit within `EXIT_MARGIN_LEDGERS` of a proposal can exit
-before the new code runs.
+`UPGRADE_DELAY_LEDGERS` (about a week) later; proposing again restarts the
+delay, and `cancel_upgrade` drops it. `upgrade()` takes no argument: it
+installs exactly the proposed hash, as Wasm code, once the delay has passed
+and no later than `UPGRADE_WINDOW_LEDGERS` (about three days) after that,
+and emits `upgrade_installed`. Past the window the proposal has lapsed
+(`UpgradeLapsed`) and only a new one, waiting the delay again, can install
+code. A buyer who requests an exit within `EXIT_MARGIN_LEDGERS` of a
+proposal can exit before the new code runs.
+
+The window bounds who can be caught by a proposal. Without it, code proposed
+long ago could be installed at any moment, over buyers who joined after its
+delay ran out and never had the notice. With it, exposure is limited to
+buyers who join while a proposal is open. The gateway refuses new deposits
+and mandates during that time (`upgrade_pending`), and the observer keeps
+`PayStellarVaultUpgradeProposed` active.
+
+`propose_upgrade` does not check that the hash names uploaded code. Code
+that nobody can read cannot be reviewed: buyers should treat a proposal of
+it as hostile, and exit or wait for its cancellation.
 
 Soroban also allows a contract's code to be a reference to code another
 address manages, which that address can change with no call to the
@@ -178,7 +198,8 @@ critical `code_changed` finding if its executable is anything else.
 A recurring mandate's allowance belongs to the vault's address, not to its
 code, so new code could spend what is left of it from the buyer's wallet.
 A buyer with a mandate who wants to be safe from an upgrade revokes it
-before the proposal's effective ledger, as well as exiting.
+before the proposal's effective ledger, as well as exiting. While launch
+limits apply, they bound that allowance too (below).
 
 ## Roles
 
@@ -197,8 +218,11 @@ authorization, so no other key can redirect revenue.
 
 `set_launch_limits(Some({max_balance, max_total}))` bounds the balance one
 buyer may hold and the total all buyers may hold; deposits past either are
-refused as `AboveLaunchLimit`. They only refuse deposits, so they apply at
-once, and `None` removes them.
+refused as `AboveLaunchLimit`. A mandate whose allowance, its amount times
+its cycles, would pass `max_balance` is refused the same way, so a buyer's
+exposure to a flaw or to new code is bounded by the limit whether the money
+is deposited or approved. They only refuse new deposits and mandates, never
+a withdrawal or an exit, so they apply at once, and `None` removes them.
 
 ## Charges, records and recurring charges
 
@@ -231,5 +255,5 @@ Besides those of the prepaid ledger: `cap_raised` (owner, limit),
 `cap_lowered` (owner, limit, ledger it applies from), `exit_requested`
 (owner, amount, destination, unlock ledger), `exit` (owner, destination,
 amount paid), `launch` (previous and new launch limits),
-`upgrade_proposed` (hash, ledger it is installable from) and
-`upgrade_cancelled` (hash).
+`upgrade_proposed` (hash, ledger it is installable from),
+`upgrade_cancelled` (hash) and `upgrade_installed` (hash).
