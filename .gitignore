@@ -1,2 +1,5 @@
 /target
 *.secret
+
+# Python bytecode from running the repository's scripts.
+__pycache__/
