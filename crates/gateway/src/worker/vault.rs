@@ -10,8 +10,10 @@
 //! or expired only once it has read past the ledger its authorization
 //! lapsed at, by which any use of it by someone else has been applied too.
 
-use fermah_pay_stellar_chain::prepaid::{LedgerEvent, ledger_event};
-use fermah_pay_stellar_chain::rpc::{EventCursor, EventsFrom, RpcError};
+use fermah_pay_stellar_chain::prepaid::{
+    LedgerEvent, PrepaidDeployment, ledger_event, vault_account,
+};
+use fermah_pay_stellar_chain::rpc::{EventCursor, EventPage, EventsFrom};
 use fermah_pay_stellar_chain::stellar_xdr::{
     HostFunction, Limits, ReadXdr, SorobanAuthorizationEntry,
 };
@@ -25,18 +27,18 @@ use crate::submission::{Chain, Clock, EngineError, Kind, Resolution, State};
 const PAGE: u32 = 1_000;
 
 impl<C: Chain, K: Clock> Worker<C, K> {
-    /// Applies every new limit and exit event of each vault this worker
-    /// serves to the buyers' rows, page by page: each page's effects and the
-    /// new position commit together, so no event applies twice or is
-    /// skipped. A vault never read starts at the latest ledger: its buyers
-    /// can only have acted after this worker started serving it.
+    /// Keeps each vault's buyers current with the contract: reads the
+    /// account entry of each buyer not read yet, then applies every new limit
+    /// and exit event page by page, each page's effects and the new position
+    /// committing together, so no event applies twice or is skipped. A vault
+    /// that cannot be read is reported and left behind, which refuses its
+    /// charges once it lags too far; the other vaults and the rest of the
+    /// round go on.
     pub(super) async fn ingest_vault_events(&self) -> Result<(), WorkerError> {
         let vaults = sqlx::query!(
             r#"
-            SELECT l.seller_deployment_id, l.network, l.contract_address, c.cursor AS "cursor?"
+            SELECT l.seller_deployment_id, l.network, l.contract_address, l.usdc_address
             FROM pay_stellar.ledger_contracts l
-            LEFT JOIN pay_stellar.vault_event_cursors c
-              ON c.seller_deployment_id = l.seller_deployment_id
             WHERE l.network = $1 AND l.operator_address = $2 AND l.custody = 'vault'
             ORDER BY l.seller_deployment_id
             "#,
@@ -47,78 +49,214 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .await
         .map_err(store("read vault deployments"))?;
         for vault in vaults {
-            let contract = stellar_strkey::Contract::from_string(&vault.contract_address)
-                .map_err(|_| WorkerError::Corrupt("contract address outside the CHECK constraint"))?
-                .0;
-            let Some(cursor) = vault.cursor.as_deref() else {
+            let id = vault.seller_deployment_id;
+            let label = id.to_string();
+            let served = deployment(&vault.contract_address, &vault.usdc_address, None)?;
+            let read = async {
                 let latest =
                     self.engine.chain().latest_ledger().await.map_err(WorkerError::Chain)?;
-                let start = EventCursor::end_of_ledger(latest);
-                sqlx::query!(
-                    r#"
-                    INSERT INTO pay_stellar.vault_event_cursors
-                        (seller_deployment_id, network, cursor, ledger)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (seller_deployment_id) DO NOTHING
-                    "#,
-                    vault.seller_deployment_id,
-                    vault.network,
-                    start.to_string(),
-                    i64::from(latest),
-                )
-                .execute(&self.pool)
-                .await
-                .map_err(store("start reading vault events"))?;
-                continue;
+                let position = self.vault_position(id, &vault.network, latest).await?;
+                self.sync_vault_buyers(id, &served).await?;
+                self.apply_vault_events(id, served.contract, position).await?;
+                Ok::<_, WorkerError>(latest)
             };
-            let mut position = EventCursor::parse(cursor)
-                .ok_or(WorkerError::Corrupt("vault event cursor outside the CHECK constraint"))?;
-            loop {
-                let page = self
-                    .engine
-                    .chain()
-                    .events(&contract, &EventsFrom::Cursor(position), PAGE)
+            match read.await {
+                Ok(latest) => {
+                    let through = sqlx::query_scalar!(
+                        "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
+                        id,
+                    )
+                    .fetch_one(&self.pool)
                     .await
-                    .map_err(|error: RpcError| {
-                        tracing::error!(seller_deployment_id = %vault.seller_deployment_id, error = %error, "reading the vault's events");
-                        WorkerError::Chain(error)
-                    })?;
-                if page.cursor <= position {
-                    break;
+                    .map_err(store("read the vault event position"))?;
+                    #[allow(clippy::cast_precision_loss)]
+                    metrics::gauge!("pay_stellar_vault_events_behind_ledgers", "deployment" => label)
+                        .set((i64::from(latest) - through).max(0) as f64);
                 }
-                let mut tx =
-                    self.pool.begin().await.map_err(store("begin applying vault events"))?;
-                for event in page.events.iter().filter(|event| event.in_successful_contract_call) {
-                    let Some(decoded) = ledger_event(&event.topics, &event.value) else { continue };
-                    apply(&mut tx, vault.seller_deployment_id, event.ledger, &decoded).await?;
-                }
-                let read_through = page.cursor.first_unread_ledger().saturating_sub(1);
-                let moved = sqlx::query!(
-                    r#"
-                    UPDATE pay_stellar.vault_event_cursors
-                    SET cursor = $3, ledger = $4, updated_at = now()
-                    WHERE seller_deployment_id = $1 AND cursor = $2
-                    "#,
-                    vault.seller_deployment_id,
-                    position.to_string(),
-                    page.cursor.to_string(),
-                    i64::from(read_through.max(1)),
-                )
-                .execute(&mut *tx)
-                .await
-                .map_err(store("move the vault event cursor"))?;
-                // Another worker moved it first: its effects are already in.
-                if moved.rows_affected() != 1 {
-                    break;
-                }
-                tx.commit().await.map_err(store("commit applying vault events"))?;
-                position = page.cursor;
-                if u32::try_from(page.events.len()).unwrap_or(u32::MAX) < PAGE {
-                    break;
+                Err(error) => {
+                    metrics::counter!("pay_stellar_vault_read_failures_total", "deployment" => label)
+                        .increment(1);
+                    tracing::error!(seller_deployment_id = %id, error = %error, source = ?std::error::Error::source(&error), "the vault's events were not applied; its charges are refused once the reading falls behind");
                 }
             }
         }
         Ok(())
+    }
+
+    /// Where the vault's events were applied up to; a vault never read
+    /// starts after `latest`, its buyers' earlier state being read from
+    /// their account entries instead.
+    async fn vault_position(
+        &self,
+        id: Uuid,
+        network: &str,
+        latest: u32,
+    ) -> Result<EventCursor, WorkerError> {
+        let start = EventCursor::end_of_ledger(latest);
+        sqlx::query!(
+            r#"
+            INSERT INTO pay_stellar.vault_event_cursors
+                (seller_deployment_id, network, cursor, ledger)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (seller_deployment_id) DO NOTHING
+            "#,
+            id,
+            network,
+            start.to_string(),
+            i64::from(latest),
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(store("start reading vault events"))?;
+        let cursor = sqlx::query_scalar!(
+            "SELECT cursor FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1",
+            id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(store("read the vault event position"))?;
+        EventCursor::parse(&cursor)
+            .ok_or(WorkerError::Corrupt("vault event cursor outside the CHECK constraint"))
+    }
+
+    /// Reads the limit and exit of buyers whose account entries were never
+    /// read, as of the ledger the node answers at, which is at or past every
+    /// event applied so far. Events up to that ledger are then skipped for
+    /// them: the entry already reflects them.
+    async fn sync_vault_buyers(
+        &self,
+        id: Uuid,
+        served: &PrepaidDeployment,
+    ) -> Result<(), WorkerError> {
+        let buyers = sqlx::query!(
+            r#"
+            SELECT id, wallet_address FROM pay_stellar.buyers
+            WHERE seller_deployment_id = $1 AND vault_synced_ledger IS NULL
+            ORDER BY id
+            LIMIT 64
+            "#,
+            id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(store("find vault buyers to read"))?;
+        if buyers.is_empty() {
+            return Ok(());
+        }
+        let owners = buyers
+            .iter()
+            .map(|buyer| address::<ChainAddress>(&buyer.wallet_address))
+            .collect::<Result<Vec<_>, _>>()?;
+        let keys: Vec<_> = owners.iter().map(|owner| served.account_key(owner)).collect();
+        let read = self.engine.chain().ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
+        let mut tx = self.pool.begin().await.map_err(store("begin reading vault buyers"))?;
+        // An answer from a node behind the events already applied would
+        // undo them; the next round asks again.
+        let through = sqlx::query_scalar!(
+            "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1 FOR SHARE",
+            id,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(store("read the vault event position"))?;
+        let at = i64::from(read.latest_ledger);
+        if at < through {
+            return Ok(());
+        }
+        for (buyer, key) in buyers.iter().zip(&keys) {
+            let account = read
+                .entries
+                .iter()
+                .find(|record| record.key == *key)
+                .map(|record| {
+                    vault_account(&record.data)
+                        .ok_or(WorkerError::Corrupt("a vault account entry does not decode"))
+                })
+                .transpose()?;
+            let (cap, pending, exit) = account.map_or((0, None, None), |account| {
+                (
+                    saturate(account.cap),
+                    account.pending_cap.map(|(cap, at)| (saturate(cap), i64::from(at))),
+                    account.exit.map(|(amount, _, unlock)| (saturate(amount), i64::from(unlock))),
+                )
+            });
+            sqlx::query!(
+                r#"
+                UPDATE pay_stellar.buyers
+                SET cap = $2, pending_cap = $3, pending_cap_at = $4, exit_amount = $5,
+                    exit_unlock_at = $6, vault_synced_ledger = $7
+                WHERE id = $1 AND vault_synced_ledger IS NULL
+                "#,
+                buyer.id,
+                cap,
+                pending.map(|(cap, _)| cap),
+                pending.map(|(_, at)| at),
+                exit.map(|(amount, _)| amount),
+                exit.map(|(_, unlock)| unlock),
+                at,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store("store a vault buyer's account"))?;
+        }
+        tx.commit().await.map_err(store("commit reading vault buyers"))
+    }
+
+    async fn apply_vault_events(
+        &self,
+        id: Uuid,
+        contract: [u8; 32],
+        mut position: EventCursor,
+    ) -> Result<(), WorkerError> {
+        loop {
+            let page = self
+                .engine
+                .chain()
+                .events(&contract, &EventsFrom::Cursor(position), PAGE)
+                .await
+                .map_err(WorkerError::Chain)?;
+            // Events the node no longer holds cannot be applied: reading on
+            // from its oldest ledger would skip them as if read.
+            if position.first_unread_ledger() < page.oldest_ledger {
+                return Err(WorkerError::VaultEventsLost {
+                    from: position.first_unread_ledger(),
+                    oldest: page.oldest_ledger,
+                });
+            }
+            validate(contract, position, &page)?;
+            if page.cursor <= position {
+                return Ok(());
+            }
+            let mut tx = self.pool.begin().await.map_err(store("begin applying vault events"))?;
+            for event in page.events.iter().filter(|event| event.in_successful_contract_call) {
+                let Some(decoded) = ledger_event(&event.topics, &event.value) else { continue };
+                apply(&mut tx, id, event.ledger, &decoded).await?;
+            }
+            let read_through = page.cursor.first_unread_ledger().saturating_sub(1);
+            let moved = sqlx::query!(
+                r#"
+                UPDATE pay_stellar.vault_event_cursors
+                SET cursor = $3, ledger = $4, updated_at = now()
+                WHERE seller_deployment_id = $1 AND cursor = $2
+                "#,
+                id,
+                position.to_string(),
+                page.cursor.to_string(),
+                i64::from(read_through.max(1)),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(store("move the vault event cursor"))?;
+            // Another worker moved it first: its effects are already in.
+            if moved.rows_affected() != 1 {
+                return Ok(());
+            }
+            tx.commit().await.map_err(store("commit applying vault events"))?;
+            position = page.cursor;
+            if u32::try_from(page.events.len()).unwrap_or(u32::MAX) < PAGE {
+                return Ok(());
+            }
+        }
     }
 
     /// Sends the oldest signed limit change or exit request of a vault this
@@ -341,8 +479,33 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     }
 }
 
+/// Refuses a page that does not continue from `position`, in order, with
+/// events of `contract` only.
+fn validate(
+    contract: [u8; 32],
+    position: EventCursor,
+    page: &EventPage,
+) -> Result<(), WorkerError> {
+    let mut last = position;
+    for event in &page.events {
+        if event.contract != contract {
+            return Err(WorkerError::Corrupt("the node returned another contract's event"));
+        }
+        if event.id <= last {
+            return Err(WorkerError::Corrupt("the node returned events out of order"));
+        }
+        last = event.id;
+    }
+    if page.cursor < last && page.cursor > position {
+        return Err(WorkerError::Corrupt("the node's cursor is behind its events"));
+    }
+    Ok(())
+}
+
 /// Applies one event of a vault to its buyer's row; events of other kinds,
-/// and owners that are no buyer of this deployment, change nothing.
+/// and owners that are no buyer of this deployment, change nothing. A
+/// buyer's limit and exit change only for events after the ledger its
+/// account entry was read at, which already reflects the earlier ones.
 async fn apply(
     tx: &mut sqlx::PgConnection,
     deployment: Uuid,
@@ -352,16 +515,17 @@ async fn apply(
     let ledger = i64::from(ledger);
     match event {
         LedgerEvent::CapRaised { owner, cap } => {
-            let cap = narrow(*cap)?;
             sqlx::query!(
                 r#"
                 UPDATE pay_stellar.buyers
                 SET cap = $3, pending_cap = NULL, pending_cap_at = NULL
                 WHERE seller_deployment_id = $1 AND wallet_address = $2
+                  AND (vault_synced_ledger IS NULL OR vault_synced_ledger < $4)
                 "#,
                 deployment,
                 owner.to_string(),
-                cap,
+                saturate(*cap),
+                ledger,
             )
             .execute(&mut *tx)
             .await
@@ -370,17 +534,17 @@ async fn apply(
         LedgerEvent::CapLowered { owner, cap, effective_at } => {
             // A pending lower limit that had taken effect by this event is
             // the one in force the new one is lower than.
-            let cap = narrow(*cap)?;
             sqlx::query!(
                 r#"
                 UPDATE pay_stellar.buyers
                 SET cap = CASE WHEN pending_cap_at <= $5 THEN pending_cap ELSE cap END,
                     pending_cap = $3, pending_cap_at = $4
                 WHERE seller_deployment_id = $1 AND wallet_address = $2
+                  AND (vault_synced_ledger IS NULL OR vault_synced_ledger < $5)
                 "#,
                 deployment,
                 owner.to_string(),
-                cap,
+                saturate(*cap),
                 i64::from(*effective_at),
                 ledger,
             )
@@ -393,37 +557,55 @@ async fn apply(
                 r#"
                 UPDATE pay_stellar.buyers SET exit_amount = $3, exit_unlock_at = $4
                 WHERE seller_deployment_id = $1 AND wallet_address = $2
+                  AND (vault_synced_ledger IS NULL OR vault_synced_ledger < $5)
                 "#,
                 deployment,
                 owner.to_string(),
-                narrow(*amount)?,
+                saturate(*amount),
                 i64::from(*unlock_at),
+                ledger,
             )
             .execute(&mut *tx)
             .await
             .map_err(store("apply an exit request"))?;
         }
         LedgerEvent::Exited { owner, amount, .. } => {
-            // Charges and withdrawals left the exit's amount free, so the
-            // available balance covers what it paid.
-            let paid = narrow(*amount)?;
+            // What the exit paid left the vault whenever this event is read,
+            // so it always comes off `available`. Beyond `available`, it took
+            // what the buyer's open charges and held withdrawals were held
+            // from: those can no longer settle, and their refunds bring the
+            // balance back to what the contract holds for the buyer.
+            let paid = saturate(*amount);
             let short = sqlx::query_scalar!(
                 r#"
-                UPDATE pay_stellar.buyers
-                SET available = GREATEST(available - $3, 0), exit_amount = NULL,
-                    exit_unlock_at = NULL
-                WHERE seller_deployment_id = $1 AND wallet_address = $2
-                RETURNING available = 0 AS "emptied!"
+                UPDATE pay_stellar.buyers b
+                SET available = GREATEST(b.available - $3, CASE
+                        WHEN b.vault_synced_ledger IS NULL THEN 0
+                        ELSE -((SELECT COALESCE(SUM(c.amount), 0) FROM pay_stellar.charges c
+                                WHERE c.buyer_id = b.id
+                                  AND c.state IN ('admitted', 'submitted', 'quarantined'))
+                             + (SELECT COALESCE(SUM(w.amount), 0) FROM pay_stellar.withdrawals w
+                                WHERE w.buyer_id = b.id AND w.state IN ('signed', 'submitted')))
+                    END),
+                    exit_amount = CASE
+                        WHEN b.vault_synced_ledger IS NULL OR b.vault_synced_ledger < $4 THEN NULL
+                        ELSE b.exit_amount END,
+                    exit_unlock_at = CASE
+                        WHEN b.vault_synced_ledger IS NULL OR b.vault_synced_ledger < $4 THEN NULL
+                        ELSE b.exit_unlock_at END
+                WHERE b.seller_deployment_id = $1 AND b.wallet_address = $2
+                RETURNING b.available < 0 AS "short!"
                 "#,
                 deployment,
                 owner.to_string(),
                 paid,
+                ledger,
             )
             .fetch_optional(&mut *tx)
             .await
             .map_err(store("apply an exit"))?;
             if short == Some(true) {
-                tracing::info!(seller_deployment_id = %deployment, owner = %owner, paid, "an exit emptied the buyer's available balance");
+                tracing::warn!(seller_deployment_id = %deployment, owner = %owner, paid, "an exit took balance held for open charges or withdrawals");
             }
         }
         _ => {}
@@ -431,6 +613,8 @@ async fn apply(
     Ok(())
 }
 
-fn narrow(amount: i128) -> Result<i64, WorkerError> {
-    i64::try_from(amount).map_err(|_| WorkerError::Corrupt("vault amount beyond i64"))
+/// A vault amount as stored. The contract bounds transfers to `i64`, but not
+/// a limit: one beyond it limits nothing an `i64` balance can reach.
+fn saturate(amount: i128) -> i64 {
+    i64::try_from(amount).unwrap_or(if amount < 0 { 0 } else { i64::MAX })
 }

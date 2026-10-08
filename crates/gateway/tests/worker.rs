@@ -195,6 +195,24 @@ struct Net {
     /// buyers' limit and exit calls run. Their events are the tests' to
     /// publish.
     vault: bool,
+    /// Vault accounts' limit and exit as their entries hold them, for the
+    /// tests to set: limit, pending limit and the ledger it applies from,
+    /// exit amount and its unlock ledger. Absent: a limit of 0, nothing
+    /// pending.
+    vault_accounts: HashMap<AccountAddress, VaultEntry>,
+    /// `getEvents` fails for the vault's contract, as a node that lost them
+    /// would.
+    events_fail: bool,
+    /// Asked from a position older than it retains, the node answers from
+    /// its oldest ledger instead of refusing.
+    answers_from_oldest: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct VaultEntry {
+    cap: i64,
+    pending: Option<(i64, u32)>,
+    exit: Option<(i64, u32)>,
 }
 
 #[derive(Clone)]
@@ -967,15 +985,52 @@ impl Chain for Stellar {
         let state = self.with(|n| n.state.clone());
         let mut existing: HashMap<LedgerKey, ScVal> = HashMap::new();
         let read_at = self.with(|n| n.latest - n.entries_behind);
+        let (vault, vault_accounts) = self.with(|n| (n.vault, n.vault_accounts.clone()));
         for (owner, balance) in &state.accounts {
-            let value = ScVal::Map(Some(ScMap(
-                vec![ScMapEntry {
-                    key: symbol("balance"),
-                    val: ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(*balance).unwrap() }),
-                }]
-                .try_into()
-                .unwrap(),
-            )));
+            let mut fields = vec![ScMapEntry {
+                key: symbol("balance"),
+                val: ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(*balance).unwrap() }),
+            }];
+            if vault {
+                // The vault's account layout, as the contract stores it.
+                let entry = vault_accounts.get(owner).copied().unwrap_or_default();
+                let variant = |inner: Option<ScVal>| match inner {
+                    None => ScVal::Vec(Some(ScVec(vec![symbol("None")].try_into().unwrap()))),
+                    Some(inner) => {
+                        ScVal::Vec(Some(ScVec(vec![symbol("Pending"), inner].try_into().unwrap())))
+                    }
+                };
+                let map = |entries: Vec<(&str, ScVal)>| {
+                    ScVal::Map(Some(ScMap(
+                        entries
+                            .into_iter()
+                            .map(|(key, val)| ScMapEntry { key: symbol(key), val })
+                            .collect::<Vec<_>>()
+                            .try_into()
+                            .unwrap(),
+                    )))
+                };
+                let amount =
+                    |v: i64| ScVal::I128(Int128Parts { hi: 0, lo: u64::try_from(v).unwrap() });
+                fields.push(ScMapEntry { key: symbol("cap"), val: amount(entry.cap) });
+                fields.push(ScMapEntry {
+                    key: symbol("exit"),
+                    val: variant(entry.exit.map(|(value, unlock)| {
+                        map(vec![
+                            ("amount", amount(value)),
+                            ("destination", address_val(owner)),
+                            ("unlock_at", ScVal::U32(unlock)),
+                        ])
+                    })),
+                });
+                fields.push(ScMapEntry {
+                    key: symbol("pending_cap"),
+                    val: variant(entry.pending.map(|(cap, at)| {
+                        map(vec![("cap", amount(cap)), ("effective_at", ScVal::U32(at))])
+                    })),
+                });
+            }
+            let value = ScVal::Map(Some(ScMap(fields.try_into().unwrap())));
             existing.insert(self.deployment.account_key(owner), value);
         }
         for ((owner, id), (code, live_until, since)) in &state.records {
@@ -1129,7 +1184,29 @@ impl EventLog for Stellar {
         from: &EventsFrom,
         limit: u32,
     ) -> Result<EventPage, RpcError> {
-        self.with(|n| n.events.page(contract, from, limit, n.oldest, n.latest))
+        self.with(|n| {
+            if n.events_fail {
+                return Err(RpcError::Server {
+                    method: "getEvents",
+                    code: -32600,
+                    message: "startLedger must be within the ledger range".to_owned(),
+                });
+            }
+            match from {
+                EventsFrom::Cursor(cursor)
+                    if n.answers_from_oldest && cursor.first_unread_ledger() < n.oldest =>
+                {
+                    n.events.page(
+                        contract,
+                        &EventsFrom::Ledger(n.oldest),
+                        limit,
+                        n.oldest,
+                        n.latest,
+                    )
+                }
+                _ => n.events.page(contract, from, limit, n.oldest, n.latest),
+            }
+        })
     }
 }
 
@@ -1259,6 +1336,9 @@ async fn world_of(
             events: EventStream::default(),
             oldest: 1,
             vault,
+            vault_accounts: HashMap::new(),
+            events_fail: false,
+            answers_from_oldest: false,
         })),
         deployment: PrepaidDeployment {
             contract: CONTRACT,
@@ -4847,4 +4927,197 @@ async fn test_the_vaults_usdc_is_kept_alive_with_its_instance(
     let sent = extensions_sent(&w);
     assert_eq!(sent.len(), 1);
     assert!(sent[0].contains(&w.stellar.deployment.vault_balance_key()), "{:?}", sent[0]);
+}
+
+async fn synced_at(w: &World, buyer: &TestBuyer) -> Option<i64> {
+    sqlx::query_scalar("SELECT vault_synced_ledger FROM pay_stellar.buyers WHERE id = $1::uuid")
+        .bind(&buyer.id)
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap()
+}
+
+/// A wallet may have set a limit or requested an exit on the vault before
+/// its buyer was registered here: the worker reads the account entry first,
+/// and applies only the events after the ledger it read it at.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_buyer_starts_from_its_account_entry(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let owner = x.key.address();
+    // A new ledger the worker has not read: the entry is read at it.
+    let latest = w.stellar.with(|n| {
+        n.latest += 1;
+        n.latest
+    });
+    w.stellar.with(|n| {
+        n.vault_accounts.insert(
+            owner.clone(),
+            VaultEntry {
+                cap: 70,
+                pending: Some((20, latest + 900)),
+                exit: Some((30, latest + 1_000)),
+            },
+        );
+    });
+    // As a buyer registered after its wallet acted: never read.
+    sqlx::query(
+        "UPDATE pay_stellar.buyers SET vault_synced_ledger = NULL, cap = 0 WHERE id = $1::uuid",
+    )
+    .bind(&x.id)
+    .execute(&w.h.owner)
+    .await
+    .unwrap();
+    // An event the entry already reflects, in the ledger it is read at.
+    vault_event(&w, "cap_raised", &owner, i128_val(500));
+    w.settle(&w.worker()).await;
+    assert_eq!(synced_at(&w, &x).await, Some(i64::from(latest)));
+    assert_eq!(
+        vault_row(&w, &x).await,
+        (70, Some((20, i64::from(latest) + 900)), Some((30, i64::from(latest) + 1_000)), 100)
+    );
+    // Events after it apply.
+    w.stellar.with(|n| n.latest += 1);
+    vault_event(&w, "cap_raised", &owner, i128_val(80));
+    w.settle(&w.worker()).await;
+    assert_eq!(vault_row(&w, &x).await.0, 80);
+}
+
+/// The contract bounds no limit; one beyond `i64` limits nothing a balance
+/// can reach, and must not stop the worker.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_limit_beyond_i64_is_kept_as_unlimited(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let ledger = w.stellar.with(|n| {
+        n.latest += 1;
+        n.latest
+    });
+    vault_event(&w, "cap_raised", &x.key.address(), ScVal::I128(Int128Parts { hi: 1, lo: 0 }));
+    w.worker().step().await.unwrap();
+    assert_eq!(vault_row(&w, &x).await.0, i64::MAX);
+    assert_eq!(read_through(&w).await, i64::from(ledger));
+}
+
+/// A vault whose events cannot be read is left behind, so its charges are
+/// refused once the reading lags; the round goes on for everything else.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_that_cannot_be_read_holds_back_only_its_events(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let before = read_through(&w).await;
+    w.stellar.with(|n| {
+        n.latest += 1;
+        n.events_fail = true;
+    });
+    vault_event(&w, "cap_raised", &x.key.address(), i128_val(50));
+    let worker = w.worker();
+    worker.step().await.unwrap();
+    let y = w.buyer("y", 100).await;
+    let deposit = w.deposit(&y, 100, "fund-y").await;
+    worker.step().await.unwrap();
+    w.settle(&worker).await;
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
+    assert_eq!(read_through(&w).await, before);
+    assert_ne!(vault_row(&w, &x).await.0, 50);
+    // Readable again: the event applies.
+    w.stellar.with(|n| n.events_fail = false);
+    w.settle(&worker).await;
+    assert_eq!(vault_row(&w, &x).await.0, 50);
+}
+
+/// Events the node no longer holds are not skipped as if read, whether the
+/// node refuses the old position or answers from its oldest ledger: the
+/// vault stays where it was.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_events_the_node_no_longer_holds_are_not_skipped(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let before = read_through(&w).await;
+    w.stellar.with(|n| {
+        n.latest += 10;
+        n.oldest = n.latest - 1;
+    });
+    vault_event(&w, "cap_raised", &x.key.address(), i128_val(50));
+    w.worker().step().await.unwrap();
+    assert_eq!(read_through(&w).await, before);
+    assert_ne!(vault_row(&w, &x).await.0, 50);
+    w.stellar.with(|n| n.answers_from_oldest = true);
+    w.worker().step().await.unwrap();
+    assert_eq!(read_through(&w).await, before);
+    assert_ne!(vault_row(&w, &x).await.0, 50);
+}
+
+/// An exit pays from the vault's balance, including what was held for a
+/// charge the gateway admitted: `available` goes below zero by the held
+/// amount, and the charge's refund, once the contract refuses it, brings it
+/// back to what the vault holds for the buyer.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_exit_past_available_is_made_good_by_the_refunds_of_what_it_took(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    sqlx::query("UPDATE pay_stellar.buyers SET cap = 100 WHERE id = $1::uuid")
+        .bind(&x.id)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    let owner = x.key.address();
+    let charge = w.charge(&x, 60, "c-1").await;
+    // The whole balance left through an exit before the charge settled.
+    w.stellar.with(|n| {
+        n.latest += 1;
+        n.state.accounts.insert(owner.clone(), 0);
+    });
+    vault_event(&w, "exit", &owner, vec_val(vec![address_val(&owner), i128_val(100)]));
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_charge(&charge.charge_id).await.state(), ChargeState::Refused);
+    // Not the 60 the refund alone would leave: the vault holds nothing.
+    assert_eq!(vault_row(&w, &x).await.3, 0);
+}
+
+/// A vault's withdrawal, like a charge, waits for a recent reading of the
+/// contract's events: an exit requested outside the gateway must be known
+/// before credit it needs is paid out.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_withdrawal_waits_for_a_recent_reading_of_the_events(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let latest = w.stellar.with(|n| {
+        n.latest += 5_000;
+        n.latest
+    });
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET ledger = $1")
+        .bind(i64::from(latest) - 2_881)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    let (prepared, signed) = w.prepared_withdrawal(&x, 40, "w-1").await.unwrap();
+    let status = w.submit_withdrawal(&prepared, &signed).await.unwrap_err();
+    assert_refused(&status, tonic::Code::Unavailable, "network_unavailable");
+    assert_eq!(vault_row(&w, &x).await.3, 100);
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET ledger = $1")
+        .bind(i64::from(latest) - 2_880)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.submit_withdrawal(&prepared, &signed).await.unwrap();
+    assert_eq!(vault_row(&w, &x).await.3, 60);
 }

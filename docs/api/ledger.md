@@ -207,10 +207,14 @@ applies, and in addition:
   is not resolved yet. It refuses with `exit_requested` when the charge
   would not leave free what an exit may take. It answers
   `network_unavailable` while the worker's reading of the contract's events
-  lags the network by more than `PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS`,
-  since a limit change or exit made outside the gateway reaches admission
-  only through them.
-- **`GetBalance`** also reports, as the events last showed them,
+  lags the network by more than `PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS`, or
+  before the worker has read a new buyer's account entry, since a limit
+  change or exit made outside the gateway reaches admission only through
+  them. Submitting a withdrawal is refused the same way.
+- **`GetBalance`** reports `available` as zero while an exit sent without
+  the worker took balance held for open charges or withdrawals, until
+  their refunds restore it ([serving a vault](../self-hosting/vault.md#exits-and-the-available-balance)).
+  It also reports, as the events last showed them,
   `daily_limit`, `pending_daily_limit` with the ledger it applies from, and
   `exit_amount` with the ledger it unlocks at; and what admission applies
   now: `admitted_daily_limit` and `reserved_for_exit`.

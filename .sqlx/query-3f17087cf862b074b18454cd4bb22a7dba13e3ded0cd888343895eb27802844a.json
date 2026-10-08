@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.vault_event_cursors\n                SET cursor = $3, ledger = $4, updated_at = now()\n                WHERE seller_deployment_id = $1 AND cursor = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f17087cf862b074b18454cd4bb22a7dba13e3ded0cd888343895eb27802844a"
+}

@@ -70,7 +70,8 @@ struct Buyer {
 }
 
 /// A buyer with `available` credit and a daily limit of `cap` known in
-/// force, as the worker leaves them after confirming a deposit.
+/// force, as the worker leaves them after reading the buyer's account entry
+/// and confirming a deposit.
 async fn buyer(h: &Harness, t: &Tenant, available: i64, cap: i64) -> Buyer {
     let key = SecretKey::generate().unwrap();
     let created = BuyerServiceClient::new(h.channel().await)
@@ -85,13 +86,16 @@ async fn buyer(h: &Harness, t: &Tenant, available: i64, cap: i64) -> Buyer {
         .unwrap()
         .into_inner();
     let id = created.buyer.unwrap().buyer_id;
-    sqlx::query("UPDATE pay_stellar.buyers SET available = $2, cap = $3 WHERE id = $1")
-        .bind(Uuid::parse_str(&id).unwrap())
-        .bind(available)
-        .bind(cap)
-        .execute(&h.owner)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE pay_stellar.buyers SET available = $2, cap = $3, vault_synced_ledger = 1
+         WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&id).unwrap())
+    .bind(available)
+    .bind(cap)
+    .execute(&h.owner)
+    .await
+    .unwrap();
     Buyer { id, key }
 }
 
@@ -337,6 +341,15 @@ async fn test_vault_charges_wait_for_a_recent_reading_of_the_events(
     assert_refused(&status, Code::Unavailable, "network_unavailable");
     events_read_to(&h, &t, latest - STALE_AFTER).await;
     charge(&h, &t, &b, 1, "c-1").await.unwrap();
+    // Read recently, but this buyer's account entry never: what the wallet
+    // did before the buyer was registered is unknown, so refused.
+    sqlx::query("UPDATE pay_stellar.buyers SET vault_synced_ledger = NULL WHERE id = $1")
+        .bind(Uuid::parse_str(&b.id).unwrap())
+        .execute(&h.owner)
+        .await
+        .unwrap();
+    let status = charge(&h, &t, &b, 1, "c-2").await.unwrap_err();
+    assert_refused(&status, Code::Unavailable, "network_unavailable");
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]

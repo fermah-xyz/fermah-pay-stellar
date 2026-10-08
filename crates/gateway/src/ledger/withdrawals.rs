@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::WITHDRAWAL_DESTINATIONS;
 use super::store::{
-    Insertion, NewWithdrawal, WithdrawalRecord, WithdrawalSigning, WithdrawalState,
+    Insertion, NewWithdrawal, VaultAdmission, WithdrawalRecord, WithdrawalSigning, WithdrawalState,
 };
 use super::{
     LatestLedger, LedgerApi, corrupt, decode_entry, internal, network_unavailable, parse_amount,
@@ -287,11 +287,29 @@ impl<L: LatestLedger> LedgerApi<L> {
         let signed_xdr = signed
             .to_xdr_base64(Limits::none())
             .map_err(|_| corrupt("signed authorization entry"))?;
-        match self.store.sign_withdrawal(&scope, id, &signed_xdr).await.map_err(|e| internal(&e))? {
+        // A vault's withdrawal, like a charge, waits for the worker to know
+        // of any exit the buyer requested outside the gateway.
+        let binding = self.store.ledger_binding(&scope).await.map_err(|e| internal(&e))?;
+        let vault = if binding.is_some_and(|deployment| deployment.is_vault()) {
+            let latest = self.ledger.latest_ledger().await.map_err(|e| network_unavailable(&e))?;
+            Some(VaultAdmission { latest, stale_after: self.policy.vault_events_stale_ledgers })
+        } else {
+            None
+        };
+        match self
+            .store
+            .sign_withdrawal(&scope, id, &signed_xdr, vault)
+            .await
+            .map_err(|e| internal(&e))?
+        {
             WithdrawalSigning::InsufficientBalance => {
                 return Err(Refusal::InsufficientBalance.into());
             }
             WithdrawalSigning::ExitRequested => return Err(Refusal::ExitRequested.into()),
+            WithdrawalSigning::VaultEventsStale => {
+                tracing::warn!("the worker's reading of the vault's events is behind");
+                return Err(Refusal::NetworkUnavailable.into());
+            }
             WithdrawalSigning::Held | WithdrawalSigning::NotOpen => {}
         }
         // Whether this request or a concurrent one stored the signature, the

@@ -200,6 +200,24 @@ impl Store {
         id: Uuid,
         signed_authorization_xdr: &str,
     ) -> Result<bool, StoreError> {
+        // The buyer's row first, as admission locks it: a charge admitted
+        // concurrently counts either without this request or with it, never
+        // against a limit or exit reserve this signature has just changed.
+        let mut tx = self.pool.begin().await.map_err(query("begin vault request signing"))?;
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.vault_requests r
+            JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+            WHERE r.id = $1 AND r.seller_deployment_id = $2 AND r.network = $3
+            FOR UPDATE OF b
+            "#,
+            id,
+            scope.seller_deployment_id(),
+            scope.network().caip2(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(query("lock the requesting buyer"))?;
         let updated = sqlx::query!(
             r#"
             UPDATE pay_stellar.vault_requests
@@ -212,9 +230,10 @@ impl Store {
             scope.network().caip2(),
             signed_authorization_xdr,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(query("sign vault request"))?;
+        tx.commit().await.map_err(query("commit vault request signing"))?;
         Ok(updated.rows_affected() == 1)
     }
 }

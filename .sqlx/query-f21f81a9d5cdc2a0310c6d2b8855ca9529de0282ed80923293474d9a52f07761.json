@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ledger FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = $1 FOR SHARE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ledger",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.vault_event_cursors",
+            "name": "ledger"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f21f81a9d5cdc2a0310c6d2b8855ca9529de0282ed80923293474d9a52f07761"
+}

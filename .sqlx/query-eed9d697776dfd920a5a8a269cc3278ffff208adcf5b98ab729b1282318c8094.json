@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE pay_stellar.buyers SET exit_amount = $3, exit_unlock_at = $4\n                WHERE seller_deployment_id = $1 AND wallet_address = $2\n                  AND (vault_synced_ledger IS NULL OR vault_synced_ledger < $5)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eed9d697776dfd920a5a8a269cc3278ffff208adcf5b98ab729b1282318c8094"
+}

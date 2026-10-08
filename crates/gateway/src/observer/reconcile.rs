@@ -39,7 +39,9 @@
 //! A vault's exits leave without a database row: the worker lowers the
 //! buyer's `available` as it reads each one. The exits observed up to `L`
 //! that the worker has not applied yet lower the liabilities' range, and
-//! those it applied after `L` raise it.
+//! those it applied after `L` raise it. Both compare an event's position in
+//! the stream with the worker's, which both read from the same node's
+//! stream, so an exit is counted as applied exactly when it was.
 
 use serde_json::json;
 use sqlx::PgPool;
@@ -692,10 +694,10 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
                  WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
                    AND e.kind = 'exit'
-                   AND e.ledger > COALESCE(w.ledger, 0))::text AS "unapplied_exits!",
+                   AND e.event_id > COALESCE(w.cursor, ''))::text AS "unapplied_exits!",
                 (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
                  WHERE e.seller_deployment_id = $1 AND e.ledger > $2 AND e.kind = 'exit'
-                   AND e.ledger <= COALESCE(w.ledger, 0))::text AS "applied_later_exits!",
+                   AND e.event_id <= COALESCE(w.cursor, ''))::text AS "applied_later_exits!",
                 (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
                  WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3 AND e.kind = 'deposit'
                    AND NOT EXISTS (

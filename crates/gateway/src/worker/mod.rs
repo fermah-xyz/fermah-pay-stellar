@@ -89,6 +89,10 @@ pub enum WorkerError {
     },
     #[error("stored row violates an invariant: {0}")]
     Corrupt(&'static str),
+    /// The node no longer holds a vault's events from `from` on: they cannot
+    /// be applied, and reading on would skip them.
+    #[error("vault events from ledger {from} are lost; the node's oldest ledger is {oldest}")]
+    VaultEventsLost { from: u32, oldest: u32 },
     #[error("signing the operator authorization")]
     Signing(#[source] AuthorizationError),
     #[error("operating system randomness unavailable")]

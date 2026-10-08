@@ -592,6 +592,18 @@ impl Context {
             .first()
             .and_then(|record| instance_wasm(&record.data))
             .context("the vault instance cannot be read")?;
+        // A proposal already pending, someone else's, would be replaced and
+        // then cancelled: refused. Installing it is simulated only, and with
+        // none pending the vault answers `NoUpgrade` (error 127).
+        let (source, fee_source) = (self.profile.key(SPONSOR)?, self.profile.key(FEE_SOURCE)?);
+        let install = AdminAction::InstallUpgrade.call(pinned.contract);
+        match self.submitter(&source, &fee_source).read(HostFunction::InvokeContract(install)).await
+        {
+            Err(error) if format!("{error:#}").contains("Error(Contract, #127)") => {}
+            other => {
+                bail!("the vault may have an upgrade pending ({other:?}); not proposing another")
+            }
+        }
         // The code it already runs: installing it would change nothing, and
         // the proposal is cancelled once the alert fired.
         let proposed =
