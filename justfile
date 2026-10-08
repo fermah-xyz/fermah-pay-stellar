@@ -77,3 +77,8 @@ dev-logs *args:
 # The development API key the stack provisioned.
 dev-api-key:
     docker compose -f deploy/dev/compose.yaml run --rm --no-deps --entrypoint jq provision -r .api_key /state/seller.json
+
+# The API key of the development vault deployment, provisioned when the
+# testnet profile records a vault.
+dev-vault-api-key:
+    docker compose -f deploy/dev/compose.yaml run --rm --no-deps --entrypoint jq provision -r .api_key /state/vault.json

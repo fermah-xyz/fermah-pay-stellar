@@ -98,8 +98,8 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Upload contract Wasm to the network, so an `upgrade` proposal can name
-    /// its hash. Uploading changes no contract and needs no admin signature.
+    /// Upload contract Wasm to the network, so an `upgrade` or
+    /// `propose-upgrade` proposal can name its hash. Uploading changes no contract and needs no admin signature.
     Upload {
         #[command(flatten)]
         network: NetworkArgs,
@@ -167,10 +167,32 @@ enum ActionArgs {
         #[arg(long)]
         max_charge: i128,
     },
+    /// Prepaid ledger: replace the code at once.
     Upgrade {
         /// SHA-256 of the uploaded Wasm, hex.
         #[arg(long)]
         wasm_hash: String,
+    },
+    /// Vault: propose new code, installable once the vault's delay has
+    /// passed. Buyers can exit before it installs.
+    ProposeUpgrade {
+        /// SHA-256 of the uploaded Wasm, hex.
+        #[arg(long)]
+        wasm_hash: String,
+    },
+    /// Vault: drop the proposed code.
+    CancelUpgrade,
+    /// Vault: install the proposed code once its delay has passed.
+    InstallUpgrade,
+    /// Vault: bound what one buyer and all buyers together may hold, in
+    /// USDC base units; `--remove` lifts the bounds.
+    SetLaunchLimits {
+        #[arg(long, required_unless_present = "remove", requires = "max_total")]
+        max_balance: Option<i128>,
+        #[arg(long, required_unless_present = "remove", requires = "max_balance")]
+        max_total: Option<i128>,
+        #[arg(long, conflicts_with_all = ["max_balance", "max_total"])]
+        remove: bool,
     },
     SetRole {
         #[arg(long, value_enum)]
@@ -233,6 +255,22 @@ fn action(args: ActionArgs) -> anyhow::Result<AdminAction> {
             let bytes = hex_bytes(&wasm_hash).context("the Wasm hash is not 32 bytes of hex")?;
             AdminAction::Upgrade { wasm_hash: bytes }
         }
+        ActionArgs::ProposeUpgrade { wasm_hash } => {
+            let bytes = hex_bytes(&wasm_hash).context("the Wasm hash is not 32 bytes of hex")?;
+            AdminAction::ProposeUpgrade { wasm_hash: bytes }
+        }
+        ActionArgs::CancelUpgrade => AdminAction::CancelUpgrade,
+        ActionArgs::InstallUpgrade => AdminAction::InstallUpgrade,
+        ActionArgs::SetLaunchLimits { max_balance, max_total, remove } => {
+            let limits = if remove {
+                None
+            } else {
+                let limits = max_balance.zip(max_total).context("name both launch limits")?;
+                ensure!(limits.0 > 0 && limits.1 > 0, "launch limits must be positive");
+                Some(limits)
+            };
+            AdminAction::SetLaunchLimits { limits }
+        }
         ActionArgs::SetRole { role, holder } => AdminAction::SetRole {
             role: match role {
                 RoleArg::Admin => Role::Admin,
@@ -267,10 +305,13 @@ fn contract_bytes(raw: &str) -> anyhow::Result<[u8; 32]> {
 fn describe(function: &HostFunction) -> anyhow::Result<String> {
     let HostFunction::InvokeContract(call) = function else { bail!("not a contract call") };
     let ScAddress::Contract(contract) = &call.contract_address else { bail!("not a contract") };
+    let name = String::from_utf8_lossy(call.function_name.0.as_slice());
+    let contract = stellar_strkey::Contract(contract.0.0);
+    if call.args.is_empty() {
+        return Ok(format!("call {name} on {contract}"));
+    }
     Ok(format!(
-        "call {} on {} with {}",
-        String::from_utf8_lossy(call.function_name.0.as_slice()),
-        stellar_strkey::Contract(contract.0.0),
+        "call {name} on {contract} with {}",
         call.args.iter().map(show).collect::<Vec<_>>().join(", "),
     ))
 }
@@ -288,6 +329,7 @@ fn show(value: &ScVal) -> String {
         }
         ScVal::U32(n) => n.to_string(),
         ScVal::Bool(b) => b.to_string(),
+        ScVal::Void => "none".to_owned(),
         ScVal::Bytes(bytes) => hex_lower(bytes.as_slice()),
         ScVal::Symbol(symbol) => String::from_utf8_lossy(symbol.0.as_slice()).into_owned(),
         ScVal::Map(Some(map)) => format!(

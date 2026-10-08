@@ -98,7 +98,7 @@ A key that signs for another account, or a service that answers wrongly, is ther
 
 ## An admin that needs several signatures
 
-The admin authorizes pausing, limit changes, code upgrades and role rotations. No single key should be able to do any of these. A Stellar account can list extra signers with weights, and a contract's authorization of an account needs the account's medium threshold. So an admin account whose medium threshold is 2, with three keys of weight 1, needs any two of them.
+The admin authorizes pausing, limit changes, code upgrades and role rotations, and on a vault its launch limits. No single key should be able to do any of these. A Stellar account can list extra signers with weights, and a contract's authorization of an account needs the account's medium threshold. So an admin account whose medium threshold is 2, with three keys of weight 1, needs any two of them.
 
 `fermah-pay-stellar-contract` makes an admin change in three steps. Each step may run on a different machine, and no signer needs another signer's key.
 
@@ -123,8 +123,14 @@ The available changes are:
 - `pause` and `unpause`;
 - `set-limits --min-deposit --max-charge`;
 - `set-daily-limits --per-buyer --per-seller` ([daily limits](../architecture/prepaid-contract.md#daily-limits));
-- `upgrade --wasm-hash`, after `contract upload --wasm <file>` has put the code on the network and printed its hash;
+- `upgrade --wasm-hash` on a prepaid ledger, after `contract upload --wasm <file>` has put the code on the network and printed its hash;
 - `set-role --role --holder`. The new holder must sign too: name it with `sign --account`.
+
+On a [vault](../architecture/vault-contract.md#upgrades), code changes take two proposals a timelock apart, and buyers can exit in between:
+- `propose-upgrade --wasm-hash`, after the upload; the observer reports it as a critical `upgrade_proposed` finding;
+- `cancel-upgrade`, to drop it;
+- `install-upgrade`, once the vault's delay of 120,960 ledgers (about a week) has passed; it installs exactly the proposed hash;
+- `set-launch-limits --max-balance --max-total`, or `--remove`, bounds what one buyer and all buyers together may hold.
 
 `sign` recomputes what it signs from the proposal's call rather than trusting the proposal's summary. `submit` refuses a proposal whose signatures do not reach the medium threshold, naming the weight that is missing.
 

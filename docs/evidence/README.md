@@ -32,10 +32,12 @@ commit.
 |---|---|---|---|
 | [`CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI`](https://stellar.expert/explorer/testnet/contract/CD3GESMYMJ3MNWNSKS6P7TEDHL5HYEWSGTFX7A3ENDB5MXTQ5TED7PSI) | the prepaid ledger with recurring charges; the deployment the workflows use | `38dfa7d755a3d89e1147633c0adf8f5ebdbd8354082ae21cb6ae6acdcca4d66e` (deployed as `fcdd05c4…`, then upgraded) | from `2026-10-01T022132-prepaid-deployment` on |
 | [`CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV`](https://stellar.expert/explorer/testnet/contract/CDDFMUZ7RT7RYBLL4MGC3WTR7YEFSCLCZATIJN57XGKV45QCEJE5GNPV) | the prepaid ledger before recurring charges | `02e59475f67a8e9204c2aa6029051ff9ba70254ef69be76b97230d6cedfb3d95` (deployed as `02d80b2f…`, upgraded to `78e874a9…`, then to this with daily limits) | from `2026-09-29T044603-prepaid-deployment` to `2026-09-30T180500-daily-limits` |
+| [`CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF`](https://stellar.expert/explorer/testnet/contract/CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF) | the vault, which holds the buyers' USDC itself | `dc89a2995ffce1c803a6b707fc9b142436b91a905cc3dab94c1898ca0519ef2f` | from `2026-10-08T004923-vault-deployment` on |
 | [`CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW`](https://stellar.expert/explorer/testnet/contract/CCDBGAESDWKXV6NVQT6N25YNFFVSYVAWAOIZO57UYMG7BZ4V7C36GZKW) | a buyer's wallet: the example contract account (`contracts/example-account`) | `2b35859f9267d85acd0ac3c51543b5d9fda2e92b2ff9c8f5ef9993dab7111678` | `contract-account-buyer` |
 | [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) | Circle's testnet USDC (Stellar Asset Contract), not ours | | all |
 
-Both ledger contracts share their roles:
+The ledger contracts and the vault share their roles; the vault has no
+treasury:
 
 | Role | Account |
 |---|---|
@@ -123,6 +125,39 @@ Batching settles 98 charges in one transaction instead of 98, at about 2.3
 times lower fee per charge than single charges. Most of a charge's fee pays
 for the two ledger entries it writes, the buyer's account and the charge's
 record, which a batch cannot share. A replayed charge writes nothing.
+
+### Vault on testnet
+
+Produced with the [testnet walkthrough](../quickstart/testnet.md#9-the-vault)
+against Circle testnet USDC.
+[`vault-deployment`](testnet/2026-10-08T004923-vault-deployment.json) records
+the upload ([`eb25e6b9…`](https://stellar.expert/explorer/testnet/tx/eb25e6b98935a40d039b8d2317351d7fb55e9f4ace616cec4085eb99a33d1b05)), the
+creation ([`ac8041ac…`](https://stellar.expert/explorer/testnet/tx/ac8041aca87e6bd7599c2b5bdc418e51d03a18716a52d0c9453f6241c2deb3d5)) and the
+launch limits of 500 USDC per buyer and 10,000 USDC in total, set with two
+of the admin's three keys ([`9dbda6c8…`](https://stellar.expert/explorer/testnet/tx/9dbda6c8f528090970be2c4a5f3100fcce6439557b90c38ed004525a35901a31)).
+
+[`vault-end-to-end`](testnet/2026-10-08T005044-vault-end-to-end.json) runs a
+seller's flow through the gateway's gRPC API, with the gateway and the
+settlement worker on their production database roles:
+
+| Step | Transaction |
+|---|---|
+| Deposit of 0.1 USDC with a daily limit of 0.04 USDC, under one buyer signature | [`1fd898e4…`](https://stellar.expert/explorer/testnet/tx/1fd898e4fd58e2628ed7a9cc3392d4960701baabacc076ae572b8ec3fb3a88aa) |
+| Charges of 0.01 and 0.02 USDC; a third of 0.015 USDC refused at once as `above_spending_limit` | [`08edb49c…`](https://stellar.expert/explorer/testnet/tx/08edb49cd687748003090498cc8c9f30cb2661ed5546522c61dee7c60becc8da), [`62f04a91…`](https://stellar.expert/explorer/testnet/tx/62f04a91eb245d0d458490c384e9c181afc775cf23cfcca822f434cb46b78413) |
+| Withdrawal of 0.01 USDC to the wallet, co-signed by the operator | [`505f9895…`](https://stellar.expert/explorer/testnet/tx/505f9895be0c8caefcaba63623e61ecae9b56c5ce75f858654f906edb9067f0e) |
+| Lower daily limit of 0.005 USDC, in force on the contract from ledger 5098126 | [`7dc1481a…`](https://stellar.expert/explorer/testnet/tx/7dc1481acaebecdbc1bdfe8e2de8c32121fe8e602af1882f8710cd2547957ce5) |
+| Exit request of 0.025 USDC to the wallet, unlocking at ledger 5098129 | [`12f00de6…`](https://stellar.expert/explorer/testnet/tx/12f00de61cb329fb20b49383deaf58a1285535d770f468456322c2d718a2b4da) |
+
+Observed afterwards:
+- a withdrawal into the exit's amount was refused as `exit_requested`;
+- a charge past the lower limit was refused as `above_spending_limit`;
+- completing the exit before its notice was refused by the contract as `ExitLocked` (error 125) in simulation.
+
+Every figure `GetBalance` reported equals the vault's account entry: 0.06 USDC available, the 0.04 USDC limit with 0.005 USDC pending, and the 0.025 USDC exit. The vault held 0.09 USDC, its liabilities and revenue. The buyer held 0 XLM throughout.
+
+The [monitoring drills](../self-hosting/monitoring-drills.md) on the vault:
+- [`drill-vault-limit`](testnet/2026-10-08T005324-drill-vault-limit.json): a buyer raised its limit on the vault directly ([`de709a69…`](https://stellar.expert/explorer/testnet/tx/de709a69c0255b3f7dd570952626bd172592c7aee7ab71a38494839180ae629d)), and `PayStellarVaultChangedOutsideGateway` was active within 60 seconds;
+- [`drill-vault-upgrade`](testnet/2026-10-08T005404-drill-vault-upgrade.json): the admin's proposal of an upgrade ([`7dc65758…`](https://stellar.expert/explorer/testnet/tx/7dc65758dba91bb272dbd820dbe9f64f27f9dc6fde1e4b47d114c623a4ad82e4)) raised `PayStellarVaultUpgradeProposed` within 39 seconds. The drill then cancelled the proposal ([`3d2345e0…`](https://stellar.expert/explorer/testnet/tx/3d2345e0277e361e0648e7c4a202ef802c68b6be7c4ee81773f48cd80873b2b7)).
 
 ### API end to end on testnet
 

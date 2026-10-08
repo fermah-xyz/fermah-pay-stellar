@@ -45,6 +45,7 @@ mod e2e;
 pub use drill::{Stack as DrillStack, Vector as DrillVector};
 mod load;
 mod recurring;
+mod vault;
 
 pub use load::LoadShape;
 

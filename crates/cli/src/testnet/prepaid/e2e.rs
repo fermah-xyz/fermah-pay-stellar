@@ -110,6 +110,15 @@ where
     }
 }
 
+/// The ledger contract a run binds its deployment to.
+pub(super) struct Bound {
+    pub contract: String,
+    pub operator: String,
+    /// The prepaid ledger's treasury; `None` for a vault.
+    pub treasury: Option<fermah_pay_stellar_domain::AccountAddress>,
+    pub pinned: fermah_pay_stellar_chain::prepaid::PrepaidDeployment,
+}
+
 /// The gateway, its x402 interface and the settlement worker running in
 /// this process against testnet, and what a seller needs to call them.
 pub struct Stack {
@@ -202,11 +211,7 @@ impl Context {
         evidence::write(&self.evidence_dir, "api-end-to-end", record)
     }
 
-    /// Migrates the database at `database_url`, provisions a product, a
-    /// deployment bound to the recorded contract and an API key, and starts
-    /// the gateway, its x402 interface and the settlement worker in this
-    /// process, each on its production database role. The worker sequences
-    /// transactions from `sources`, in order of preference.
+    /// [`Self::stack_on`] the recorded prepaid ledger.
     pub(super) async fn stack(
         &self,
         database_url: &str,
@@ -214,11 +219,34 @@ impl Context {
         sources: Vec<Arc<dyn Signer>>,
         quotas: Quotas,
     ) -> anyhow::Result<Stack> {
-        fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, self.network).await?;
         let (recorded, pinned) = self.deployment()?;
+        let bound = Bound {
+            contract: recorded.contract,
+            operator: recorded.operator,
+            treasury: Some(recorded.treasury.parse()?),
+            pinned,
+        };
+        self.stack_on(database_url, run, sources, quotas, bound).await
+    }
+
+    /// Migrates the database at `database_url`, provisions a product, a
+    /// deployment bound to `bound` and an API key, and starts the gateway,
+    /// its x402 interface and the settlement worker in this process, each on
+    /// its production database role. The worker sequences transactions from
+    /// `sources`, in order of preference.
+    pub(super) async fn stack_on(
+        &self,
+        database_url: &str,
+        run: &str,
+        sources: Vec<Arc<dyn Signer>>,
+        quotas: Quotas,
+        bound: Bound,
+    ) -> anyhow::Result<Stack> {
+        fermah_pay_stellar_gateway::startup::verify_rpc(&self.rpc, self.network).await?;
+        let Bound { contract, operator: bound_operator, treasury, pinned } = bound;
         let operator = self.profile.key("operator")?;
         ensure!(
-            operator.address().as_str() == recorded.operator,
+            operator.address().as_str() == bound_operator,
             "the profile's operator key is not the deployment's operator"
         );
 
@@ -240,8 +268,8 @@ impl Context {
             &issuer,
             deployment,
             &LedgerBinding {
-                contract: recorded.contract.clone(),
-                treasury: Some(recorded.treasury.parse()?),
+                contract: contract.clone(),
+                treasury: treasury.clone(),
                 operator: operator.address(),
             },
         )
@@ -302,7 +330,7 @@ impl Context {
                     fermah_pay_stellar_gateway::submission::DEFAULT_MAX_BUYER_RESOURCE_FEE,
             },
         );
-        let worker = Worker::new(
+        let mut worker = Worker::new(
             engine,
             worker_pool,
             LocalSigner::arc(operator),
@@ -317,8 +345,11 @@ impl Context {
                 ttl_extend_to_ledgers: 518_400,
                 ttl_check_every: Duration::from_secs(600),
             },
-        )
-        .with_treasury(LocalSigner::arc(self.profile.key("treasury")?));
+        );
+        // A vault's withdrawals need the operator alone.
+        if treasury.is_some() {
+            worker = worker.with_treasury(LocalSigner::arc(self.profile.key("treasury")?));
+        }
         let mut worker_stop = stopped.clone();
         let settlement = tokio::spawn(async move {
             worker
@@ -332,7 +363,7 @@ impl Context {
             x402_endpoint: format!("http://{x402_addr}"),
             token,
             records: owner,
-            contract: recorded.contract,
+            contract,
             pinned,
             stop,
             settlement,

@@ -1,0 +1,74 @@
+{
+  "buyer": "GCDFRPU2G5P4GGTVNN3MCPZ43OPCQMQDCL6SAQMXWCC252DCR7S2CLMV",
+  "charge_past_limit": {
+    "amount": 150000,
+    "refusal": "above_spending_limit"
+  },
+  "charge_past_lower_limit": "above_spending_limit",
+  "charges": [
+    {
+      "amount": 100000,
+      "ledger": 5079402,
+      "transaction_hash": "08edb49cd687748003090498cc8c9f30cb2661ed5546522c61dee7c60becc8da"
+    },
+    {
+      "amount": 200000,
+      "ledger": 5079402,
+      "transaction_hash": "62f04a91eb245d0d458490c384e9c181afc775cf23cfcca822f434cb46b78413"
+    }
+  ],
+  "contract": "CCWAL64E33LWQTXNCK4SVEN63BVM77EVPZENHVLRRCXQDZZGEVBJ5UTF",
+  "criterion": "vault-end-to-end",
+  "deposit": {
+    "amount": 1000000,
+    "daily_limit": 400000,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/1fd898e4fd58e2628ed7a9cc3392d4960701baabacc076ae572b8ec3fb3a88aa",
+    "transaction_hash": "1fd898e4fd58e2628ed7a9cc3392d4960701baabacc076ae572b8ec3fb3a88aa"
+  },
+  "exit": {
+    "amount": 250000,
+    "completion_before_notice": "refused in simulation as ExitLocked (contract error 125)",
+    "destination": "GCDFRPU2G5P4GGTVNN3MCPZ43OPCQMQDCL6SAQMXWCC252DCR7S2CLMV",
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/12f00de61cb329fb20b49383deaf58a1285535d770f468456322c2d718a2b4da",
+    "transaction_hash": "12f00de61cb329fb20b49383deaf58a1285535d770f468456322c2d718a2b4da",
+    "unlocks_at_ledger": 5098129,
+    "withdrawal_into_it": "exit_requested"
+  },
+  "expected": "through the gateway API on the vault: a new buyer with 0 XLM deposits and sets a daily limit with one signature; charges within the limit settle and one past it is refused; a withdrawal is paid with the operator's co-signature; a lower limit is admitted at once and applied by the contract after its notice; an exit request holds its amount from withdrawals and cannot be completed before its notice; the gateway's figures equal the vault's and the vault holds what it owes",
+  "funding_transaction": "d1dfa83d4a3e1c19688af67649cd6a84355238feef66f3495492cc1fabd61469",
+  "lower_limit": {
+    "applies_from_ledger": 5098126,
+    "daily_limit": 50000,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/7dc1481acaebecdbc1bdfe8e2de8c32121fe8e602af1882f8710cd2547957ce5",
+    "transaction_hash": "7dc1481acaebecdbc1bdfe8e2de8c32121fe8e602af1882f8710cd2547957ce5"
+  },
+  "network": "stellar:testnet",
+  "observed": {
+    "buyer_xlm_stroops": 0,
+    "gateway": {
+      "admitted_daily_limit": 50000,
+      "available": 600000,
+      "daily_limit": 400000,
+      "exit_amount": 250000,
+      "pending_daily_limit": 50000,
+      "reserved_for_exit": 250000
+    },
+    "solvency": {
+      "liabilities": "600000",
+      "revenue": "300000",
+      "vault_usdc": "900000"
+    },
+    "vault_account": {
+      "balance": "600000",
+      "daily_limit": "400000",
+      "exit_amount": "250000",
+      "pending_daily_limit": "50000"
+    }
+  },
+  "recorded_at": "2026-10-08T00:50:44.339815574Z",
+  "withdrawal": {
+    "amount": 100000,
+    "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/505f9895be0c8caefcaba63623e61ecae9b56c5ce75f858654f906edb9067f0e",
+    "transaction_hash": "505f9895be0c8caefcaba63623e61ecae9b56c5ce75f858654f906edb9067f0e"
+  }
+}

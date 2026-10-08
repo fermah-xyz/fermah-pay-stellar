@@ -243,6 +243,7 @@ jobs:
         run: |
           set -euo pipefail
           stellar contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir target/contract-wasm
+          stellar contract build --package fermah-pay-stellar-vault --profile contract --locked --out-dir target/contract-wasm
           SQLX_OFFLINE=true cargo build --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-testnet
       # Healthy and Friendbot come first; Soroban's settings exist only once
       # the network has upgraded to its protocol a few ledgers later, and a
@@ -287,6 +288,12 @@ jobs:
             -c 'CREATE DATABASE pay_stellar_x402'
           PAY_STELLAR_E2E_DATABASE_URL=postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_x402 \
             tool x402-conformance
+          tool deploy-vault --wasm target/contract-wasm/fermah_pay_stellar_vault.wasm \
+            --min-deposit 100000 --max-charge 10000000 --max-balance 5000000000 --max-total 100000000000
+          PGPASSWORD=ci-only psql -h 127.0.0.1 -U pay_stellar_owner -d pay_stellar \
+            -c 'CREATE DATABASE pay_stellar_vault'
+          PAY_STELLAR_E2E_DATABASE_URL=postgres://pay_stellar_owner:ci-only@127.0.0.1:5432/pay_stellar_vault \
+            tool vault-end-to-end
       - name: Node logs on failure
         if: failure()
         run: docker logs --tail 200 stellar

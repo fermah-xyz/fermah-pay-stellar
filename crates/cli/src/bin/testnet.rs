@@ -14,7 +14,7 @@ use fermah_pay_stellar_chain::sponsored::Policy;
 use fermah_pay_stellar_chain::{friendbot, usdc};
 use fermah_pay_stellar_cli::testnet::prepaid::{Context as Testnet, LoadShape};
 use fermah_pay_stellar_cli::testnet::profile::Profile;
-use fermah_pay_stellar_domain::Network;
+use fermah_pay_stellar_domain::{AccountAddress, Network};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -90,6 +90,40 @@ enum Command {
         /// Maximum single charge, USDC base units.
         #[arg(long)]
         max_charge: i128,
+    },
+    /// Upload the vault Wasm and create an instance pinned to the profile's
+    /// roles and the network's USDC; with both launch limits, the admin then
+    /// bounds each buyer's balance and the total.
+    DeployVault {
+        #[arg(long)]
+        wasm: PathBuf,
+        /// Minimum deposit, USDC base units (1 USDC = 10,000,000).
+        #[arg(long)]
+        min_deposit: i128,
+        /// Maximum single charge, USDC base units.
+        #[arg(long)]
+        max_charge: i128,
+        /// Most one buyer may hold, USDC base units.
+        #[arg(long, requires = "max_total")]
+        max_balance: Option<i128>,
+        /// Most all buyers together may hold, USDC base units.
+        #[arg(long, requires = "max_balance")]
+        max_total: Option<i128>,
+    },
+    /// Run one seller's flow on the recorded vault through the gateway API:
+    /// a new zero-XLM buyer deposits with a daily limit, is charged within
+    /// and past it, withdraws, lowers the limit and requests an exit. Writes
+    /// a `vault-end-to-end` record.
+    VaultEndToEnd {
+        /// PostgreSQL URL of the database owner; the run applies migrations.
+        #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
+        database_url: String,
+    },
+    /// Complete BUYER's exit on the recorded vault once its notice has
+    /// passed, from the submitter account. Writes a `vault-exit` record.
+    VaultExit {
+        #[arg(long)]
+        buyer: AccountAddress,
     },
     /// Create buyers 1..=COUNT with zero XLM and top each up to USDC_EACH
     /// base units from the USDC reserve.
@@ -172,6 +206,10 @@ enum Command {
         /// Its API key (`just dev-api-key`).
         #[arg(long, env = "PAY_STELLAR_DEV_API_KEY", hide_env_values = true)]
         api_key: String,
+        /// The API key of the stack's vault deployment
+        /// (`just dev-vault-api-key`), for the vault drills.
+        #[arg(long, env = "PAY_STELLAR_DEV_VAULT_API_KEY", hide_env_values = true)]
+        vault_api_key: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:9093")]
         alertmanager_url: String,
         /// Seconds to wait for each alert.
@@ -293,6 +331,16 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
             context()?.deploy_prepaid(&code, min_deposit, max_charge).await?;
         }
+        Command::DeployVault { wasm, min_deposit, max_charge, max_balance, max_total } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            let launch = max_balance.zip(max_total);
+            context()?.deploy_vault(&code, min_deposit, max_charge, launch).await?;
+        }
+        Command::VaultEndToEnd { database_url } => {
+            context()?.vault_end_to_end(&database_url).await?;
+        }
+        Command::VaultExit { buyer } => context()?.vault_exit(&buyer).await?,
         Command::OnboardBuyers { count, usdc_each } => {
             context()?.onboard_buyers(count, usdc_each).await?
         }
@@ -312,10 +360,18 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
             context()?.contract_account_buyer(&database_url, &code).await?;
         }
-        Command::Drill { vector, gateway_url, api_key, alertmanager_url, timeout_secs } => {
+        Command::Drill {
+            vector,
+            gateway_url,
+            api_key,
+            vault_api_key,
+            alertmanager_url,
+            timeout_secs,
+        } => {
             let stack = fermah_pay_stellar_cli::testnet::prepaid::DrillStack {
                 gateway: gateway_url,
                 api_key: zeroize::Zeroizing::new(api_key),
+                vault_api_key: vault_api_key.map(zeroize::Zeroizing::new),
                 alertmanager: alertmanager_url.trim_end_matches('/').to_owned(),
                 timeout: Duration::from_secs(timeout_secs),
             };

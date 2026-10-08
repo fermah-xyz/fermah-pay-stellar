@@ -25,6 +25,22 @@ pub struct Deployment {
     pub max_charge: i128,
 }
 
+/// What a vault deployment is pinned to, recorded when it is created. A
+/// vault holds its own USDC, so it names no treasury.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VaultDeployment {
+    pub contract: String,
+    pub wasm_sha256: String,
+    pub usdc: String,
+    pub admin: String,
+    pub operator: String,
+    pub seller: String,
+    pub min_deposit: i128,
+    pub max_charge: i128,
+    /// Bounds on each buyer's balance and on the total, if set.
+    pub launch_limits: Option<(i128, i128)>,
+}
+
 impl Profile {
     /// Opens the profile in `dir`, creating it readable by its owner only:
     /// it holds keys.
@@ -80,6 +96,20 @@ impl Profile {
         let path = self.dir.join("deployment.json");
         if !path.exists() {
             bail!("no deployment recorded in {}; run deploy-prepaid first", self.dir.display());
+        }
+        Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+    }
+
+    pub fn save_vault_deployment(&self, deployment: &VaultDeployment) -> anyhow::Result<()> {
+        let path = self.dir.join("vault-deployment.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(deployment)?)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn vault_deployment(&self) -> anyhow::Result<VaultDeployment> {
+        let path = self.dir.join("vault-deployment.json");
+        if !path.exists() {
+            bail!("no vault recorded in {}; run deploy-vault first", self.dir.display());
         }
         Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
     }
