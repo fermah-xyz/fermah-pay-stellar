@@ -1619,6 +1619,45 @@ pub fn account_balance(entry: &LedgerEntryData) -> Option<i128> {
     }
 }
 
+/// A balance entry of the USDC asset contract, as at
+/// [`PrepaidDeployment::vault_balance_key`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SacBalance {
+    pub amount: i128,
+    /// The issuer has not frozen it; a frozen balance can neither send nor
+    /// receive.
+    pub authorized: bool,
+    /// The issuer may claw it back.
+    pub clawback: bool,
+}
+
+/// Decodes a USDC balance entry held by a contract; `None` for any other
+/// entry.
+#[must_use]
+pub fn sac_balance(entry: &LedgerEntryData) -> Option<SacBalance> {
+    let LedgerEntryData::ContractData(ContractDataEntry { val: ScVal::Map(Some(fields)), .. }) =
+        entry
+    else {
+        return None;
+    };
+    let field = |name: &[u8]| {
+        fields
+            .iter()
+            .find(|f| matches!(&f.key, ScVal::Symbol(s) if s.0.as_slice() == name))
+            .map(|f| &f.val)
+    };
+    let (ScVal::Bool(authorized), ScVal::Bool(clawback)) =
+        (field(b"authorized")?, field(b"clawback")?)
+    else {
+        return None;
+    };
+    Some(SacBalance {
+        amount: i128_of(field(b"amount")?)?,
+        authorized: *authorized,
+        clawback: *clawback,
+    })
+}
+
 /// A vault account as the contract stores it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VaultAccount {

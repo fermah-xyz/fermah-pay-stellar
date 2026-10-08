@@ -48,6 +48,12 @@ labels! {
         /// A mandate authorized or revoked on-chain that the gateway did not
         /// prepare: the buyer's wallet acted through another client.
         MandateChangedElsewhere => "mandate_changed_elsewhere",
+        /// A vault limit or exit set on-chain that the gateway did not
+        /// prepare: the buyer's wallet acted through another client.
+        VaultChangedElsewhere => "vault_changed_elsewhere",
+        /// A vault code upgrade was proposed; it installs after the timelock
+        /// unless cancelled.
+        UpgradeProposed => "upgrade_proposed",
         RoleChanged => "role_changed",
         AdminChange => "admin_change",
         BindingOutOfDate => "binding_out_of_date",

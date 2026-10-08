@@ -260,8 +260,17 @@ fn test_deposit_with_a_limit_signed_as_built() {
         })
     );
     assert!(w.entry(&w.deployment().deposit_key(&buyer.account(), &[1; 32])).is_some());
-    // The USDC the vault holds, at the key the worker keeps alive.
-    assert!(w.entry(&w.deployment().vault_balance_key()).is_some());
+    // The USDC the vault holds, at the key the worker keeps alive and the
+    // observer reconciles.
+    let held = w.entry(&w.deployment().vault_balance_key()).unwrap();
+    assert_eq!(
+        fermah_pay_stellar_chain::prepaid::sac_balance(&held),
+        Some(fermah_pay_stellar_chain::prepaid::SacBalance {
+            amount: 10 * USDC,
+            authorized: true,
+            clawback: false,
+        })
+    );
     // A deposit signed for the transfer to another account is refused.
     let intent =
         DepositIntent { owner: buyer.chain(), amount: USDC, deposit_id: [2; 32], cap: None };

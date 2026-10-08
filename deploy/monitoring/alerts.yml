@@ -5,13 +5,13 @@ groups:
   - name: pay-stellar-money
     rules:
       - alert: PayStellarCriticalFinding
-        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="critical"}[15m])) > 0
+        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="critical", kind!="upgrade_proposed"}[15m])) > 0
         labels: { severity: critical }
         annotations:
           summary: "The observer recorded a critical {{ $labels.kind }} finding"
           action: "Read the finding in pay_stellar.reconciliation_findings and follow docs/self-hosting/observer.md"
       - alert: PayStellarWarningFinding
-        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="warning", kind!="mandate_changed_elsewhere"}[1h])) > 0
+        expr: sum by (kind) (increase(pay_stellar_findings_total{severity="warning", kind!~"mandate_changed_elsewhere|vault_changed_elsewhere"}[1h])) > 0
         labels: { severity: warning }
         annotations:
           summary: "The observer recorded a {{ $labels.kind }} finding"
@@ -29,19 +29,25 @@ groups:
         annotations:
           summary: "Deployment {{ $labels.deployment }}'s contract started running other code in the last hour"
           action: "Confirm the upgrade was planned; one nobody made means the admin keys are exposed"
+      - alert: PayStellarVaultUpgradeProposed
+        expr: sum by (kind) (increase(pay_stellar_findings_total{kind="upgrade_proposed"}[15m])) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "The admin proposed new code for a vault; it installs once the timelock passes"
+          action: "Review the proposed Wasm before the effective ledger in the finding; if nobody planned it, cancel it with the admin keys and treat them as exposed"
       - alert: PayStellarTreasuryDeauthorized
         expr: pay_stellar_treasury_authorized == 0
         for: 5m
         labels: { severity: critical }
         annotations:
-          summary: "USDC's issuer revoked the treasury's trustline authorization for deployment {{ $labels.deployment }}"
+          summary: "USDC's issuer revoked the authorization of the USDC held for deployment {{ $labels.deployment }} (treasury trustline or vault balance)"
           action: "No deposit or withdrawal can move USDC; see the treasury_deauthorized finding in docs/self-hosting/observer.md"
       - alert: PayStellarTreasuryShort
         expr: pay_stellar_treasury_usdc + pay_stellar_cold_reserve_usdc < pay_stellar_contract_liabilities + pay_stellar_contract_revenue
         for: 10m
         labels: { severity: critical }
         annotations:
-          summary: "The treasury and its cold reserve hold less USDC than deployment {{ $labels.deployment }} owes"
+          summary: "The treasury and its cold reserve, or the vault, hold less USDC than deployment {{ $labels.deployment }} owes"
           action: "Stop admitting deposits and charges, and find where the USDC went"
       - alert: PayStellarChargeQuarantined
         expr: increase(pay_stellar_charges_settled_total{result="quarantined"}[15m]) > 0
@@ -81,6 +87,12 @@ groups:
         annotations:
           summary: "A buyer's mandate or USDC approval changed outside this gateway"
           action: "The buyer's wallet changed the approval in the USDC contract directly. Confirm with the buyer; a change nobody made means the buyer's key is exposed"
+      - alert: PayStellarVaultChangedOutsideGateway
+        expr: sum by (kind) (increase(pay_stellar_findings_total{kind="vault_changed_elsewhere"}[1h])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "A buyer's vault limit or exit was set outside this gateway"
+          action: "The buyer's wallet called the vault directly; the worker has applied it to admission. Confirm with the buyer; a change nobody made means the buyer's key is exposed"
       - alert: PayStellarDeploymentQuotaReached
         expr: sum by (reason) (increase(pay_stellar_api_refusals_total{reason=~"deployment_.*_quota_exceeded|buyer_quota_exceeded"}[1h])) > 0
         labels: { severity: warning }

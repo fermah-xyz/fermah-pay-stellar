@@ -948,16 +948,47 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 // Recorded for reconciliation; the gateway keeps no record of
                 // the seller's revenue withdrawals to match them against.
                 Some(LedgerEvent::RevenueWithdrawn { .. }) => {}
-                // Vault events: no prepaid ledger emits them.
+                // A limit or exit moves nothing by itself, but one the
+                // gateway did not prepare means the buyer's wallet acted
+                // through another client.
                 Some(
-                    LedgerEvent::CapRaised { .. }
-                    | LedgerEvent::CapLowered { .. }
-                    | LedgerEvent::ExitRequested { .. }
-                    | LedgerEvent::Exited { .. }
-                    | LedgerEvent::LaunchLimitsChanged { .. }
-                    | LedgerEvent::UpgradeProposed { .. }
-                    | LedgerEvent::UpgradeCancelled { .. },
-                ) => {}
+                    LedgerEvent::CapRaised { owner, cap }
+                    | LedgerEvent::CapLowered { owner, cap, .. },
+                ) => {
+                    let known = prepared_cap(&mut tx, deployment.id, owner, *cap, ledger).await?;
+                    let verdict = vault_changed_elsewhere(known, &described.payload);
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
+                Some(LedgerEvent::ExitRequested { owner, amount, destination, .. }) => {
+                    let known =
+                        prepared_exit(&mut tx, deployment.id, owner, *amount, destination, ledger)
+                            .await?;
+                    let verdict = vault_changed_elsewhere(known, &described.payload);
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
+                // Anyone may complete an exit once it unlocks, and it pays
+                // the destination the buyer signed; reconciliation counts it.
+                Some(LedgerEvent::Exited { .. }) => {}
+                // New code installs once the timelock passes unless the admin
+                // cancels it: the window in which to look at it.
+                Some(LedgerEvent::UpgradeProposed { .. }) => {
+                    let verdict = Verdict::Finding(Finding::new(
+                        FindingKind::UpgradeProposed,
+                        Severity::Critical,
+                        described.payload.clone(),
+                    ));
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
+                Some(
+                    LedgerEvent::LaunchLimitsChanged { .. } | LedgerEvent::UpgradeCancelled { .. },
+                ) => {
+                    let verdict = Verdict::Finding(Finding::new(
+                        FindingKind::AdminChange,
+                        Severity::Warning,
+                        described.payload.clone(),
+                    ));
+                    conclude(&mut tx, stored, 0, verdict, |f| at(0, f), &mut recorded).await?;
+                }
             }
         }
         tx.commit().await.map_err(store("commit page"))?;
@@ -1434,6 +1465,87 @@ fn changed_elsewhere(known: bool, payload: &serde_json::Value) -> Verdict {
             payload.clone(),
         ))
     }
+}
+
+fn vault_changed_elsewhere(known: bool, payload: &serde_json::Value) -> Verdict {
+    if known {
+        Verdict::Matched
+    } else {
+        Verdict::Finding(Finding::new(
+            FindingKind::VaultChangedElsewhere,
+            Severity::Warning,
+            payload.clone(),
+        ))
+    }
+}
+
+/// Whether a limit the gateway prepared for `owner` can be the one included
+/// at `ledger`: a limit request or a deposit carrying a limit, signed for
+/// exactly `cap`, whose signature was still valid then.
+async fn prepared_cap(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    cap: i128,
+    ledger: i64,
+) -> Result<bool, ObserverError> {
+    // A limit beyond the column range cannot be one the gateway signed.
+    let Ok(cap) = i64::try_from(cap) else { return Ok(false) };
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pay_stellar.vault_requests r
+            JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+            WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2 AND r.kind = 'set_cap'
+              AND r.cap = $3 AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $4
+            UNION ALL
+            SELECT 1 FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            WHERE d.seller_deployment_id = $1 AND b.wallet_address = $2
+              AND d.cap = $3 AND d.signed_at IS NOT NULL AND d.expiration_ledger >= $4
+        ) AS "known!"
+        "#,
+        deployment,
+        owner.to_string(),
+        cap,
+        ledger,
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(store("read limit request"))
+}
+
+/// Whether an exit the gateway prepared for `owner` can be the one included
+/// at `ledger`: signed for exactly this amount and destination, with the
+/// signature still valid then.
+async fn prepared_exit(
+    conn: &mut PgConnection,
+    deployment: Uuid,
+    owner: &ChainAddress,
+    amount: i128,
+    destination: &ChainAddress,
+    ledger: i64,
+) -> Result<bool, ObserverError> {
+    let Ok(amount) = i64::try_from(amount) else { return Ok(false) };
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pay_stellar.vault_requests r
+            JOIN pay_stellar.buyers b ON b.id = r.buyer_id
+            WHERE r.seller_deployment_id = $1 AND b.wallet_address = $2
+              AND r.kind = 'request_exit' AND r.amount = $3 AND r.destination = $4
+              AND r.signed_at IS NOT NULL AND r.expiration_ledger >= $5
+        ) AS "known!"
+        "#,
+        deployment,
+        owner.to_string(),
+        amount,
+        destination.to_string(),
+        ledger,
+    )
+    .fetch_one(conn)
+    .await
+    .map_err(store("read exit request"))
 }
 
 /// Whether the gateway prepared `owner`'s mandate `mandate_id`: the buyer's

@@ -8,15 +8,19 @@ heading below.
 ## Contract balances against the gateway and the treasury
 
 The [chain observer](observer.md) reads every event of each contract and,
-at each reconciliation, the contract's totals and the treasury's (and cold
-reserve's) USDC in one read, from one ledger.
+at each reconciliation, the contract's totals and the USDC that backs them
+in one read, from one ledger: the treasury's (and cold reserve's) trustline
+for a prepaid ledger, the vault's own balance entry for a vault.
 
 | Check | Finding or alert |
 |---|---|
-| The treasury and its cold reserve hold at least what the contract owes buyers and the seller | `treasury_deficit` (critical), `PayStellarTreasuryShort` |
-| The contract's totals equal the sums of its events since the last baseline | `event_totals_mismatch` |
+| The treasury and its cold reserve, or the vault, hold at least what the contract owes buyers and the seller | `treasury_deficit` (critical), `PayStellarTreasuryShort` |
+| The USDC issuer has not frozen the treasury's trustline or the vault's balance | `treasury_deauthorized` (critical), `PayStellarTreasuryDeauthorized` |
+| The contract's totals equal the sums of its events, exits included, since the last baseline | `event_totals_mismatch` |
 | The contract's totals lie within what the gateway's database allows, counting work in flight | `ledger_totals_mismatch` |
 | Every settled charge, deposit, withdrawal and recurring charge matches a gateway record | the per-event findings in [the observer guide](observer.md#findings) |
+| A vault's buyer limits and exits were set through this gateway | `vault_changed_elsewhere`, `PayStellarVaultChangedOutsideGateway` |
+| No vault upgrade is pending that nobody reviewed | `upgrade_proposed` (critical), `PayStellarVaultUpgradeProposed` |
 | The contract runs the code the operator expects | `code_changed` (critical) and `PayStellarContractCodeUnexpected` for as long as it does; `PayStellarContractCodeChanged` for any change, expected code or not |
 | The observer itself is reading the chain | `PayStellarObserverStalled`, `PayStellarNodeStalled`, `PayStellarObserverFailing` |
 

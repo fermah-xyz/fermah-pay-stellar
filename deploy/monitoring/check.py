@@ -4,6 +4,8 @@
 - Every `pay_stellar_*` metric the rules or the dashboard name is one the
   gateway, worker or observer emits (a renamed metric would otherwise leave
   an alert that can never fire).
+- Every finding kind the rules or the dashboard name is one the observer
+  records.
 - The dashboard is well formed: unique panel ids, every target has a query.
 - With PROMETHEUS_URL, every dashboard query parses on that Prometheus.
 - With GRAFANA_URL, Grafana has loaded the provisioned dashboard.
@@ -21,6 +23,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MONITORING = ROOT / "deploy" / "monitoring"
 DASHBOARD = MONITORING / "grafana" / "dashboards" / "pay-stellar.json"
 METRIC = re.compile(r"\bpay_stellar_[a-z_]+\b")
+KIND_MATCHER = re.compile(r'\bkind(?:=~|!~|!=|=)\\?"([a-z_|]+)\\?"')
+FINDING_KINDS = ROOT / "crates" / "gateway" / "src" / "observer" / "matching.rs"
 
 
 def emitted() -> set:
@@ -28,6 +32,13 @@ def emitted() -> set:
     for source in (ROOT / "crates" / "gateway" / "src").rglob("*.rs"):
         names.update(re.findall(r'"(pay_stellar_[a-z_]+)"', source.read_text()))
     return names
+
+
+def finding_kinds() -> set:
+    source = FINDING_KINDS.read_text()
+    block = source[source.index("pub enum FindingKind"):]
+    block = block[: block.index("\n    }")]
+    return set(re.findall(r'=> "([a-z_]+)"', block))
 
 
 def queries(dashboard: dict) -> list:
@@ -52,6 +63,13 @@ def main() -> int:
         name for _, expr in queries(dashboard) for name in METRIC.findall(expr)
     }
     errors += [f"metric {name} is not emitted by the code" for name in sorted(used - known)]
+    named = {
+        kind
+        for text in [rules] + [expr for _, expr in queries(dashboard)]
+        for alternatives in KIND_MATCHER.findall(text)
+        for kind in alternatives.split("|")
+    }
+    errors += [f"finding kind {kind} is not recorded by the observer" for kind in sorted(named - finding_kinds())]
     ids = [panel["id"] for panel in dashboard["panels"]]
     if len(ids) != len(set(ids)):
         errors.append("panel ids are not unique")
