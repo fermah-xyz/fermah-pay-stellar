@@ -168,8 +168,8 @@ before the new code runs.
 
 Soroban also allows a contract's code to be a reference to code another
 address manages, which that address can change with no call to the
-contract. The vault only ever installs Wasm, and monitoring should alert if
-its executable is anything else.
+contract. The vault only ever installs Wasm, and the observer records a
+critical `code_changed` finding if its executable is anything else.
 
 A recurring mandate's allowance belongs to the vault's address, not to its
 code, so new code could spend what is left of it from the buyer's wallet.

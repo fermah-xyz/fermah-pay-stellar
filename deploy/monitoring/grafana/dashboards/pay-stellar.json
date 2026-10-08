@@ -1144,7 +1144,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (kind) (increase(pay_stellar_findings_total{kind=~\"role_changed|admin_change|binding_out_of_date|code_changed\"}[1d]))",
+          "expr": "sum by (kind) (increase(pay_stellar_findings_total{kind=~\"role_changed|admin_change|binding_out_of_date|code_changed|upgrade_proposed\"}[1d]))",
           "legendFormat": "{{kind}}",
           "refId": "A"
         }

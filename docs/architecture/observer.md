@@ -50,7 +50,10 @@ in `pay_stellar.chain_charge_entries`. The event layouts are those of the
 current contract, pinned by the contract's tests against the Soroban host;
 an event of this contract that does not decode, for example after an
 upgrade, is stored with its raw XDR and reported as `unrecognized_event`.
-Pauses, unpauses and limit changes are reported as `admin_change`.
+Pauses, unpauses and limit changes are reported as `admin_change`, as are a
+vault's launch-limit changes and cancelled upgrades. A proposed vault upgrade
+is a critical `upgrade_proposed` finding: the timelock is the window in
+which to review the code.
 
 ## Matching events against the records
 
@@ -62,6 +65,9 @@ Pauses, unpauses and limit changes are reported as `admin_change`.
 | `role` (admin, seller) | nothing: the binding does not name them | always reported |
 | `withdraw` | the withdrawal with the same account and withdrawal ID | same amount and destination, and held (`signed`, `submitted` or `confirmed`); the row exists before the worker ever signs for it, so there is nothing to wait for |
 | `revenue` | nothing: the gateway keeps no revenue withdrawals | recorded for reconciliation |
+| `cap_raised`, `cap_lowered` (vault) | a limit request, or a deposit carrying a limit, of the same account | same limit, signed, and the signature still valid at the event's ledger; otherwise `vault_changed_elsewhere` |
+| `exit_requested` (vault) | an exit request of the same account | same amount and destination, signed, and the signature still valid at the event's ledger; otherwise `vault_changed_elsewhere` |
+| `exit` (vault) | nothing: anyone may complete an unlocked exit, and it pays the destination the buyer signed | recorded for reconciliation |
 
 A charge entry's outcome agrees with the charge when both debited
 (`Charged` and `charged`) or both did not (a refusal and `refused` with the

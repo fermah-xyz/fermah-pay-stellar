@@ -62,8 +62,8 @@ receivers:
 | `pay_stellar_observer_unobserved_bindings` | observer | ledger bindings naming another USDC contract than this network's, which no observer follows |
 | `pay_stellar_contract_wasm{deployment,wasm}` | observer | 1 for the code each contract runs, 0 for code it ran before during this process's life |
 | `pay_stellar_contract_code_expected{deployment}` | observer | 1 while the contract runs the code `PAY_STELLAR_EXPECTED_WASM` names, 0 otherwise; absent without it |
-| `pay_stellar_treasury_authorized{deployment}` | observer | 1 while USDC's issuer authorizes the treasury's trustline, 0 once revoked |
-| `pay_stellar_treasury_usdc{deployment}` | observer | the treasury's USDC, in base units |
+| `pay_stellar_treasury_authorized{deployment}` | observer | 1 while USDC's issuer authorizes the treasury's trustline or the vault's balance, 0 once revoked |
+| `pay_stellar_treasury_usdc{deployment}` | observer | the treasury's USDC, or a vault's own, in base units |
 | `pay_stellar_cold_reserve_usdc{deployment}` | observer | the USDC of the treasury's cold reserve, 0 without one |
 | `pay_stellar_contract_liabilities{deployment}`, `pay_stellar_contract_revenue{deployment}` | observer | what the contract owes buyers and the seller |
 | `pay_stellar_api_refusals_total{reason}` | gateway | gRPC requests refused, by reason |
@@ -84,14 +84,16 @@ Counters count each event once: a transition is counted only by the call that ma
 | `PayStellarWarningFinding` | warning | The observer recorded a warning finding, such as `admin_change`, `role_changed`, `event_gap` or `unknown_withdrawal`. Read it and act as [the observer guide](observer.md) says for its kind; an admin change nobody planned means the admin keys are exposed |
 | `PayStellarContractCodeUnexpected` | critical | The contract runs other code than `PAY_STELLAR_EXPECTED_WASM` names, for as long as it does. If nobody planned the upgrade, pause the contract and treat the admin keys as exposed |
 | `PayStellarContractCodeChanged` | warning | The contract started running other code in the last hour, whether or not any code is expected. Confirm the upgrade was planned |
-| `PayStellarTreasuryDeauthorized` | critical | USDC's issuer revoked the treasury's trustline authorization: no deposit or withdrawal can move USDC until it is restored or the treasury is rotated |
-| `PayStellarTreasuryShort` | critical | The treasury and its cold reserve hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
+| `PayStellarVaultUpgradeProposed` | critical | The admin proposed new code for a vault (`upgrade_proposed`). Review it before the effective ledger in the finding; if nobody planned it, cancel it and treat the admin keys as exposed |
+| `PayStellarTreasuryDeauthorized` | critical | USDC's issuer revoked the treasury's trustline authorization or froze the vault's balance: no deposit, withdrawal or exit can move USDC until it is restored, or, for a treasury, it is rotated |
+| `PayStellarTreasuryShort` | critical | The treasury and its cold reserve, or the vault, hold less than the contract owes. Stop admitting deposits and charges, and find where the USDC went |
 | `PayStellarChargeQuarantined` | critical | A charge's amount is held from its buyer until resolved; see [quarantine](quarantine.md) |
 | `PayStellarRecurringChargeQuarantined` | critical | A recurring charge's period stays taken until resolved; see [quarantine](quarantine.md#recurring-charges) |
 | `PayStellarChargeVolumeUnusual` | warning | A deployment admitted more than three times its usual hourly charge amount. Confirm with the seller; if unexpected, revoke its API key and lower its daily limits ([limits](limits.md)) |
 | `PayStellarWithdrawalsToOtherAccounts` | warning | A withdrawal to an account other than the buyer's wallet was prepared; confirm it was intended |
 | `PayStellarDeploymentQuotaReached` | warning | A deployment reached a daily quota; check its traffic before raising the quota ([limits](limits.md)) |
 | `PayStellarMandateChangedOutsideGateway` | warning | The buyer's mandate or approval changed through another client: the observer saw a mandate or revocation the gateway did not prepare (`mandate_changed_elsewhere`), or a recurring charge found the approval lowered (`allowance_short`) or the mandate gone (`no_mandate`). Confirm with the buyer; a change nobody made means the buyer's key is exposed |
+| `PayStellarVaultChangedOutsideGateway` | warning | A buyer's vault limit or exit request was set through another client (`vault_changed_elsewhere`); the worker has applied it to admission. Confirm with the buyer; a change nobody made means the buyer's key is exposed |
 | `PayStellarFeeBurnHigh` | warning | The worker paid more than 50 XLM of fees in an hour. See fees by kind on the dashboard: a burst of small deposits or mandates, or bids far above the network's, burns the fee account ([limits](limits.md)) |
 | `PayStellarSourceSequenceTaken` | critical | A transaction the worker did not send used a source account's sequence: its key is exposed. Rotate it ([limits](limits.md#source-accounts)) |
 | `PayStellarSigningFailing` | critical | A key could not sign, or signed for another account. Check the key reference and the key service; nothing was sent with a bad signature |

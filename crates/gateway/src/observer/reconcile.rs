@@ -1,8 +1,9 @@
-//! Reconciliation of the treasury's USDC, the contract's totals, the
-//! observed event stream and the database.
+//! Reconciliation of the USDC held for a deployment, the contract's totals,
+//! the observed event stream and the database.
 //!
-//! The contract's configuration and totals live in its instance entry, and
-//! the treasury's USDC in its trustline entry. Both are read in one
+//! The contract's configuration and totals live in its instance entry. A
+//! prepaid ledger's USDC sits in its treasury's trustline entry; a vault's in
+//! the asset contract's balance entry for the vault. Both are read in one
 //! `getLedgerEntries` call, which the RPC answers from a single ledger, so
 //! the chain side of every comparison describes one ledger `L`. The event
 //! sums are taken over events up to and including `L`, once every event of
@@ -34,13 +35,19 @@
 //!   recurring charges no row explains. A recurring charge moves USDC from
 //!   the buyer's wallet straight to revenue, so it never touches the
 //!   liabilities.
+//!
+//! A vault's exits leave without a database row: the worker lowers the
+//! buyer's `available` as it reads each one. The exits observed up to `L`
+//! that the worker has not applied yet lower the liabilities' range, and
+//! those it applied after `L` raise it.
 
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use fermah_pay_stellar_chain::prepaid::{
-    Custody, InstanceState, PrepaidDeployment, instance_state, instance_wasm,
+    Custody, InstanceState, PrepaidDeployment, SacBalance, instance_state, instance_wasm,
+    sac_balance,
 };
 use fermah_pay_stellar_chain::stellar_xdr::{LedgerEntryData, LedgerKey, TrustLineFlags};
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, trustline_key};
@@ -52,16 +59,26 @@ use super::{
 };
 use crate::submission::Clock;
 
+/// Where a deployment's USDC is, as read at one ledger.
+enum Held {
+    Treasury {
+        account: AccountAddress,
+        /// Balance and flags of the treasury's USDC trustline; `None` when it
+        /// has none, which holds nothing and can receive nothing.
+        trustline: Option<(i64, u32)>,
+        /// The treasury's cold reserve, if one is configured, and its USDC
+        /// balance, read at the same ledger; `None` without a trustline.
+        reserve: Option<(AccountAddress, Option<i64>)>,
+    },
+    /// The vault's balance entry; `None` before it first receives USDC, or
+    /// once the entry is archived.
+    Vault(Option<SacBalance>),
+}
+
 /// The chain side of one check, read at one ledger.
 struct Reading {
     ledger: u32,
-    treasury: AccountAddress,
-    /// Balance and flags of the treasury's USDC trustline; `None` when it has
-    /// none, which holds nothing and can receive nothing.
-    trustline: Option<(i64, u32)>,
-    /// The treasury's cold reserve, if one is configured, and its USDC
-    /// balance, read at the same ledger; `None` without a trustline.
-    reserve: Option<(AccountAddress, Option<i64>)>,
+    held: Held,
     state: InstanceState,
     /// The hash of the Wasm the contract runs.
     wasm: Option<[u8; 32]>,
@@ -99,6 +116,11 @@ struct Books {
     recurring_on_chain: i128,
     withdrawn: i128,
     revenue_withdrawn: i128,
+    exited: i128,
+    /// Exits observed up to the reading's ledger that the worker has not
+    /// applied to `available`, and exits after it that it has.
+    unapplied_exits: i128,
+    applied_later_exits: i128,
     outside_deposits: i128,
     outside_charges: i128,
     outside_recurring: i128,
@@ -142,6 +164,27 @@ async fn quiet_books(pool: &PgPool, deployment: Uuid) -> Result<(i128, i128), Ob
     Ok((amount(&row.available)?, amount(&row.charged)?))
 }
 
+/// Whether the worker has applied every vault event up to `ledger`.
+async fn exits_applied_through(
+    pool: &PgPool,
+    deployment: Uuid,
+    ledger: u32,
+) -> Result<bool, ObserverError> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pay_stellar.vault_event_cursors
+            WHERE seller_deployment_id = $1 AND ledger >= $2
+        ) AS "applied!"
+        "#,
+        deployment,
+        i64::from(ledger),
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(store("read the worker's vault cursor"))
+}
+
 fn amount(text: &str) -> Result<i128, ObserverError> {
     text.parse().map_err(|_| ObserverError::Corrupt("sum outside i128"))
 }
@@ -164,12 +207,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
     }
 
     async fn reconcile_one(&self, deployment: &Deployment) -> Result<Vec<Recorded>, ObserverError> {
-        // A vault holds its own USDC; this reconciles a treasury's.
-        let Some(treasury) = &deployment.treasury else {
-            tracing::debug!(seller_deployment_id = %deployment.id, "vault not reconciled");
-            return Ok(Vec::new());
-        };
-        let reading = self.read_chain(deployment, treasury).await?;
+        let reading = self.read_chain(deployment).await?;
         // Events up to the reading's ledger must all be stored before the
         // event sums can describe that ledger.
         self.catch_up(deployment).await?;
@@ -179,8 +217,13 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
 
         let totals = reading.state.totals;
         let owed = totals.liabilities + totals.revenue;
-        let hot = i128::from(reading.trustline.map_or(0, |(balance, _)| balance));
-        let cold = i128::from(reading.reserve.as_ref().and_then(|(_, b)| *b).unwrap_or(0));
+        let (hot, cold) = match &reading.held {
+            Held::Treasury { trustline, reserve, .. } => (
+                i128::from(trustline.map_or(0, |(balance, _)| balance)),
+                i128::from(reserve.as_ref().and_then(|(_, b)| *b).unwrap_or(0)),
+            ),
+            Held::Vault(balance) => (balance.map_or(0, |b| b.amount), 0),
+        };
         let held = hot + cold;
         // Base units as floats: exact below 2^53, far above any balance here.
         #[allow(clippy::cast_precision_loss)]
@@ -195,19 +238,30 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             metrics::gauge!("pay_stellar_contract_revenue", "deployment" => id)
                 .set(totals.revenue as f64);
         }
-        let solvency = json!({
+        let mut solvency = match &reading.held {
+            Held::Treasury { account, trustline, reserve } => json!({
+                "treasury": account.as_str(),
+                "treasury_usdc": hot.to_string(),
+                "trustline": trustline.is_some(),
+                "reserve": reserve.as_ref().map(|(account, _)| account.as_str()),
+                "reserve_usdc": cold.to_string(),
+            }),
+            Held::Vault(balance) => json!({
+                "vault_usdc": hot.to_string(),
+                "balance_entry": balance.is_some(),
+            }),
+        };
+        let figures = json!({
             "ledger": reading.ledger,
-            "treasury": reading.treasury.as_str(),
-            "treasury_usdc": hot.to_string(),
-            "trustline": reading.trustline.is_some(),
-            "reserve": reading.reserve.as_ref().map(|(account, _)| account.as_str()),
-            "reserve_usdc": cold.to_string(),
             "held": held.to_string(),
             "liabilities": totals.liabilities.to_string(),
             "revenue": totals.revenue.to_string(),
             "owed": owed.to_string(),
             "difference": (held - owed).to_string(),
         });
+        if let (Some(into), Some(from)) = (solvency.as_object_mut(), figures.as_object()) {
+            into.extend(from.clone());
+        }
         checks.push((
             FindingKind::TreasuryDeficit,
             (held < owed).then(|| {
@@ -260,14 +314,35 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                     )
                 }),
             ));
+        } else {
+            // Without an expected hash, code that is not Wasm is still
+            // reported: the contract only ever installs Wasm, and any other
+            // executable is managed by an address the contract never calls.
+            checks.push((
+                FindingKind::CodeChanged,
+                reading.wasm.is_none().then(|| {
+                    Finding::new(
+                        FindingKind::CodeChanged,
+                        Severity::Critical,
+                        json!({
+                            "ledger": reading.ledger,
+                            "expected_wasm": null,
+                            "running_wasm": null,
+                        }),
+                    )
+                }),
+            ));
         }
-        // USDC's issuer can revoke a trustline's authorization. The balance
-        // then still covers what is owed, but the asset contract refuses
-        // every transfer into or out of the treasury: no deposit or
-        // withdrawal can succeed.
-        let authorized = reading
-            .trustline
-            .is_some_and(|(_, flags)| flags & TrustLineFlags::AuthorizedFlag as u32 != 0);
+        // USDC's issuer can revoke a trustline's or a contract balance's
+        // authorization. The balance then still covers what is owed, but the
+        // asset contract refuses every transfer into or out of it: no
+        // deposit, withdrawal or exit can succeed. A vault with no balance
+        // entry yet receives its first USDC as authorized.
+        let authorized = match &reading.held {
+            Held::Treasury { trustline, .. } => trustline
+                .is_some_and(|(_, flags)| flags & TrustLineFlags::AuthorizedFlag as u32 != 0),
+            Held::Vault(balance) => balance.is_none_or(|b| b.authorized),
+        };
         // A standing condition: alerted on while it lasts, not only when its
         // finding is recorded.
         metrics::gauge!("pay_stellar_treasury_authorized", "deployment" => deployment.id.to_string())
@@ -278,12 +353,18 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                 Finding::new(
                     FindingKind::TreasuryDeauthorized,
                     Severity::Critical,
-                    json!({
-                        "ledger": reading.ledger,
-                        "treasury": reading.treasury.as_str(),
-                        "trustline": reading.trustline.is_some(),
-                        "flags": reading.trustline.map(|(_, flags)| flags),
-                    }),
+                    match &reading.held {
+                        Held::Treasury { account, trustline, .. } => json!({
+                            "ledger": reading.ledger,
+                            "treasury": account.as_str(),
+                            "trustline": trustline.is_some(),
+                            "flags": trustline.map(|(_, flags)| flags),
+                        }),
+                        Held::Vault(_) => json!({
+                            "ledger": reading.ledger,
+                            "vault": stellar_strkey::Contract(deployment.contract).to_string().as_str(),
+                        }),
+                    },
                 )
             }),
         ));
@@ -300,7 +381,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             let base = books.baseline;
             let expected_liabilities = base.map_or(0, |b| b.liabilities) + books.deposited_on_chain
                 - books.charged_on_chain
-                - books.withdrawn;
+                - books.withdrawn
+                - books.exited;
             let expected_revenue =
                 base.map_or(0, |b| b.revenue) + books.charged_on_chain + books.recurring_on_chain
                     - books.revenue_withdrawn;
@@ -322,6 +404,7 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                                         "charged": books.charged_on_chain.to_string(),
                                         "recurring_charged": books.recurring_on_chain.to_string(),
                                         "withdrawn": books.withdrawn.to_string(),
+                                        "exited": books.exited.to_string(),
                                         "revenue_withdrawn": books.revenue_withdrawn.to_string() },
                             "coverage": coverage,
                         }),
@@ -332,11 +415,13 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             let liabilities_low =
                 books.available + base.map_or(0, |b| b.liabilities_offset) + books.outside_deposits
                     - books.outside_charges
-                    - books.outside_withdrawals;
+                    - books.outside_withdrawals
+                    - books.unapplied_exits;
             let liabilities_high = liabilities_low
                 + books.pending_charges
                 + books.pending_deposits
-                + books.pending_withdrawals;
+                + books.pending_withdrawals
+                + books.applied_later_exits;
             let revenue_low = books.charged
                 + books.recurring_charged
                 + base.map_or(0, |b| b.revenue_offset)
@@ -368,7 +453,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                                     "outside_deposits": books.outside_deposits.to_string(),
                                     "outside_charges": books.outside_charges.to_string(),
                                     "outside_recurring": books.outside_recurring.to_string(),
-                                    "outside_withdrawals": books.outside_withdrawals.to_string() },
+                                    "outside_withdrawals": books.outside_withdrawals.to_string(),
+                                    "unapplied_exits": books.unapplied_exits.to_string(),
+                                    "applied_later_exits": books.applied_later_exits.to_string() },
                         "coverage": coverage,
                     }),
                 ))));
@@ -397,11 +484,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             .into_iter()
             .find(|d| d.id == deployment)
             .ok_or(ObserverError::UnknownDeployment(deployment))?;
-        let treasury = bound.treasury.clone().ok_or(ObserverError::UnreadableContract)?;
         let before = quiet_books(operator, deployment).await?;
-        let reading = self.read_chain(&bound, &treasury).await?;
+        let reading = self.read_chain(&bound).await?;
         let after = quiet_books(operator, deployment).await?;
         if before != after {
+            return Err(ObserverError::NotQuiet);
+        }
+        // A vault's exits reach `available` only as the worker reads them.
+        if matches!(reading.held, Held::Vault(_))
+            && !exits_applied_through(operator, deployment, reading.ledger).await?
+        {
             return Err(ObserverError::NotQuiet);
         }
         let (available, charged) = after;
@@ -434,68 +526,73 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
         Ok(reading.ledger)
     }
 
-    /// Reads the instance entry and the treasury's trustline in one call.
-    /// The trustline read is the treasury the same read names; after a
-    /// rotation the binding's may be stale, so it is read again.
-    async fn read_chain(
-        &self,
-        deployment: &Deployment,
-        bound: &AccountAddress,
-    ) -> Result<Reading, ObserverError> {
+    /// Reads the instance entry and where the USDC is held in one call.
+    /// For a prepaid ledger, the trustline read is the treasury the same
+    /// read names; after a rotation the binding's may be stale, so it is
+    /// read again.
+    async fn read_chain(&self, deployment: &Deployment) -> Result<Reading, ObserverError> {
         let usdc = circle_usdc(self.network);
         let probe = PrepaidDeployment {
             contract: deployment.contract,
             usdc: asset_contract_id(&usdc, self.network),
-            custody: Custody::Treasury(bound.clone()),
+            custody: deployment.treasury.clone().map_or(Custody::Vault, Custody::Treasury),
         };
-        let mut treasury = bound.clone();
+        let mut treasury = deployment.treasury.clone();
         for _ in 0..3 {
-            let line = trustline_key(&treasury, &usdc);
-            let reserve = self.reserves.get(&treasury).cloned();
+            let line = treasury.as_ref().map(|t| trustline_key(t, &usdc));
+            let reserve = treasury.as_ref().and_then(|t| self.reserves.get(t)).cloned();
             let reserve_line = reserve.as_ref().map(|cold| trustline_key(cold, &usdc));
-            let mut keys = vec![probe.instance_key(), line.clone()];
+            let mut keys = vec![probe.instance_key()];
+            match &line {
+                Some(line) => keys.push(line.clone()),
+                None => keys.push(probe.vault_balance_key()),
+            }
             keys.extend(reserve_line.clone());
             let read = self.chain.ledger_entries(&keys).await.map_err(ObserverError::Chain)?;
-            let instance = read
-                .entries
-                .iter()
-                .find(|record| record.key == probe.instance_key())
-                .ok_or(ObserverError::UnreadableContract)?;
-            let state = instance_state(&instance.data).ok_or(ObserverError::UnreadableContract)?;
-            let wasm = instance_wasm(&instance.data);
+            let entry = |key: &LedgerKey| {
+                read.entries.iter().find(|record| record.key == *key).map(|record| &record.data)
+            };
+            let instance = entry(&probe.instance_key()).ok_or(ObserverError::UnreadableContract)?;
+            let state = instance_state(instance).ok_or(ObserverError::UnreadableContract)?;
+            let wasm = instance_wasm(instance);
             if state.config.usdc != probe.usdc {
                 return Err(ObserverError::UnreadableContract);
             }
-            match &state.config.treasury {
-                Some(current) if *current != treasury => {
-                    treasury = current.clone();
+            let held = match (&state.config.treasury, &treasury, &line) {
+                (Some(current), Some(read_for), Some(_)) if current != read_for => {
+                    treasury = Some(current.clone());
                     continue;
                 }
-                Some(_) => {}
-                // A vault holds its own USDC: not a prepaid ledger's layout.
-                None => return Err(ObserverError::UnreadableContract),
-            }
-            let trustline_of = |key: &LedgerKey| {
-                read.entries.iter().find(|record| record.key == *key).and_then(|record| {
-                    match &record.data {
-                        LedgerEntryData::Trustline(entry) => Some((entry.balance, entry.flags)),
+                (Some(current), Some(_), Some(line)) => {
+                    let trustline_of = |key: &LedgerKey| match entry(key) {
+                        Some(LedgerEntryData::Trustline(entry)) => {
+                            Some((entry.balance, entry.flags))
+                        }
                         _ => None,
+                    };
+                    let reserve = reserve.map(|cold| {
+                        let balance = reserve_line.as_ref().and_then(trustline_of).map(|(b, _)| b);
+                        (cold, balance)
+                    });
+                    Held::Treasury {
+                        account: current.clone(),
+                        trustline: trustline_of(line),
+                        reserve,
                     }
-                })
+                }
+                (None, None, None) => {
+                    let balance = match entry(&probe.vault_balance_key()) {
+                        None => None,
+                        Some(data) => Some(sac_balance(data).ok_or(ObserverError::Corrupt(
+                            "the vault's balance entry is not an asset balance",
+                        ))?),
+                    };
+                    Held::Vault(balance)
+                }
+                // The contract's layout is not the custody it was bound as.
+                _ => return Err(ObserverError::UnreadableContract),
             };
-            let trustline = trustline_of(&line);
-            let reserve = reserve.map(|cold| {
-                let balance = reserve_line.as_ref().and_then(trustline_of).map(|(b, _)| b);
-                (cold, balance)
-            });
-            return Ok(Reading {
-                ledger: read.latest_ledger,
-                treasury,
-                trustline,
-                reserve,
-                state,
-                wasm,
-            });
+            return Ok(Reading { ledger: read.latest_ledger, held, state, wasm });
         }
         Err(ObserverError::Corrupt("the treasury changed on every read"))
     }
@@ -589,6 +686,16 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                  JOIN pay_stellar.chain_events e ON e.id = ce.chain_event_id
                  WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
                    AND ce.outcome = 'charged')::text AS "charged_on_chain!",
+                (SELECT COALESCE(sum(amount), 0) FROM pay_stellar.chain_events
+                 WHERE seller_deployment_id = $1 AND ledger <= $2 AND ledger > $3 AND kind = 'exit')::text
+                    AS "exited!",
+                (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
+                 WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3
+                   AND e.kind = 'exit'
+                   AND e.ledger > COALESCE(w.ledger, 0))::text AS "unapplied_exits!",
+                (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
+                 WHERE e.seller_deployment_id = $1 AND e.ledger > $2 AND e.kind = 'exit'
+                   AND e.ledger <= COALESCE(w.ledger, 0))::text AS "applied_later_exits!",
                 (SELECT COALESCE(sum(e.amount), 0) FROM pay_stellar.chain_events e
                  WHERE e.seller_deployment_id = $1 AND e.ledger <= $2 AND e.ledger > $3 AND e.kind = 'deposit'
                    AND NOT EXISTS (
@@ -618,6 +725,8 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
                          AND b.wallet_address = e.owner AND w.withdrawal_id = e.reference))::text
                     AS "outside_withdrawals!"
             FROM pay_stellar.observer_cursors o
+            LEFT JOIN pay_stellar.vault_event_cursors w
+                ON w.seller_deployment_id = o.seller_deployment_id
             WHERE o.seller_deployment_id = $1
             "#,
             deployment,
@@ -669,6 +778,9 @@ impl<R: ChainReader, K: Clock> Observer<R, K> {
             recurring_on_chain: amount(&row.recurring_on_chain)?,
             withdrawn: amount(&row.withdrawn)?,
             revenue_withdrawn: amount(&row.revenue_withdrawn)?,
+            exited: amount(&row.exited)?,
+            unapplied_exits: amount(&row.unapplied_exits)?,
+            applied_later_exits: amount(&row.applied_later_exits)?,
             outside_deposits: amount(&row.outside_deposits)?,
             outside_charges: amount(&row.outside_charges)?,
             outside_recurring: amount(&row.outside_recurring)?,

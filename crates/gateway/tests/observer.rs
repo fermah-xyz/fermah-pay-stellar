@@ -167,6 +167,12 @@ struct Net {
     wasm: [u8; 32],
     /// Whether the node answers health checks.
     unreachable: bool,
+    /// The contract's executable is the asset contract's built-in code, not
+    /// Wasm.
+    built_in: bool,
+    /// A vault instead of a treasury: its USDC balance entry, as amount and
+    /// authorization, or `None` before it holds any.
+    vault: Option<Option<(i128, bool)>>,
 }
 
 #[derive(Clone)]
@@ -198,6 +204,20 @@ impl Chain {
             ("treasury", address(&net.config_treasury)),
             ("usdc", ScVal::Address(ScAddress::Contract(ContractId(Hash(usdc_id()))))),
         ]);
+        let config = if net.vault.is_some() {
+            let ScVal::Map(Some(ScMap(fields))) = config else { unreachable!() };
+            ScVal::Map(Some(ScMap(
+                fields
+                    .iter()
+                    .filter(|f| f.key != symbol("treasury"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )))
+        } else {
+            config
+        };
         let totals = map(vec![
             ("liabilities", i128_val(net.liabilities)),
             ("revenue", i128_val(net.revenue)),
@@ -208,7 +228,11 @@ impl Chain {
             key: ScVal::LedgerKeyContractInstance,
             durability: ContractDataDurability::Persistent,
             val: ScVal::ContractInstance(ScContractInstance {
-                executable: ContractExecutable::Wasm(Hash(net.wasm)),
+                executable: if net.built_in {
+                    ContractExecutable::StellarAsset
+                } else {
+                    ContractExecutable::Wasm(Hash(net.wasm))
+                },
                 storage: Some(ScMap(
                     vec![
                         ScMapEntry { key: vector(vec![symbol("Config")]), val: config },
@@ -220,6 +244,31 @@ impl Chain {
             }),
         })
     }
+}
+
+/// The USDC asset contract's balance entry for the vault.
+fn vault_balance_key() -> LedgerKey {
+    fermah_pay_stellar_chain::prepaid::PrepaidDeployment {
+        contract: CONTRACT,
+        usdc: usdc_id(),
+        custody: fermah_pay_stellar_chain::prepaid::Custody::Vault,
+    }
+    .vault_balance_key()
+}
+
+fn vault_balance(amount: i128, authorized: bool) -> LedgerEntryData {
+    let LedgerKey::ContractData(key) = vault_balance_key() else { unreachable!() };
+    LedgerEntryData::ContractData(ContractDataEntry {
+        ext: ExtensionPoint::V0,
+        contract: key.contract,
+        key: key.key,
+        durability: key.durability,
+        val: map(vec![
+            ("amount", i128_val(amount)),
+            ("authorized", ScVal::Bool(authorized)),
+            ("clawback", ScVal::Bool(false)),
+        ]),
+    })
 }
 
 fn instance_key() -> LedgerKey {
@@ -261,6 +310,12 @@ impl ChainReader for Chain {
             for key in keys {
                 let data = if *key == instance_key() {
                     Some(Self::instance(net))
+                } else if *key == vault_balance_key() {
+                    net.vault
+                        .flatten()
+                        .map(|(amount, authorized)| vault_balance(amount, authorized))
+                } else if net.vault.is_some() {
+                    None
                 } else if *key == line {
                     net.trustline.map(|(balance, flags)| {
                         LedgerEntryData::Trustline(TrustLineEntry {
@@ -346,6 +401,15 @@ struct World {
 }
 
 async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
+    world_of(opts, connect, false).await
+}
+
+/// A deployment bound to a vault holding nothing yet.
+async fn vault_world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
+    world_of(opts, connect, true).await
+}
+
+async fn world_of(opts: PgPoolOptions, connect: PgConnectOptions, vault: bool) -> World {
     let owner = opts.max_connections(2).connect_with(connect.clone()).await.unwrap();
     let issuer = pool_as(&connect, "SET ROLE pay_stellar_issuer", 1).await;
     let observer_pool = pool_as(&connect, "SET ROLE pay_stellar_observer", 2).await;
@@ -355,7 +419,7 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         .unwrap();
     let binding = LedgerBinding {
         contract: stellar_strkey::Contract(CONTRACT).to_string().to_string(),
-        treasury: Some(treasury()),
+        treasury: (!vault).then(treasury),
         operator: operator(),
     };
     issuance::bind_ledger_contract(&issuer, deployment, &binding).await.unwrap();
@@ -372,6 +436,8 @@ async fn world(opts: PgPoolOptions, connect: PgConnectOptions) -> World {
         base_time,
         wasm: [9; 32],
         unreachable: false,
+        built_in: false,
+        vault: vault.then_some(None),
     })));
     let submission = Uuid::now_v7();
     sqlx::query(
@@ -1977,4 +2043,288 @@ async fn test_the_code_a_contract_runs_and_its_treasurys_authorization_are_expor
     // `PayStellarContractCodeChanged` rule sees two series within the hour.
     assert_eq!((wasm([9; 32]), wasm([7; 32])), (Some(0.0), Some(1.0)));
     assert_eq!(metric(&gauges, "pay_stellar_treasury_authorized"), Some(0.0));
+}
+
+// ---- vaults -----------------------------------------------------------------
+
+fn cap_raised_event(owner: &AccountAddress, cap: i128) -> Event {
+    (vec![symbol("cap_raised"), address(owner)], i128_val(cap))
+}
+
+fn cap_lowered_event(owner: &AccountAddress, cap: i128, effective_at: u32) -> Event {
+    (
+        vec![symbol("cap_lowered"), address(owner)],
+        vector(vec![i128_val(cap), ScVal::U32(effective_at)]),
+    )
+}
+
+fn exit_requested_event(
+    owner: &AccountAddress,
+    amount: i128,
+    destination: &AccountAddress,
+) -> Event {
+    (
+        vec![symbol("exit_requested"), address(owner)],
+        vector(vec![i128_val(amount), address(destination), ScVal::U32(30_000)]),
+    )
+}
+
+fn exit_event(owner: &AccountAddress, destination: &AccountAddress, amount: i128) -> Event {
+    (vec![symbol("exit"), address(owner)], vector(vec![address(destination), i128_val(amount)]))
+}
+
+impl World {
+    /// A limit (`cap`) or exit (`exit`) request of `buyer` in `state`, its
+    /// signature valid through `expiration_ledger`.
+    async fn vault_request(
+        &self,
+        buyer: Uuid,
+        state: &str,
+        cap: Option<i64>,
+        exit: Option<(i64, &AccountAddress)>,
+        expiration_ledger: i64,
+    ) {
+        let id = Uuid::now_v7();
+        let signed = state != "awaiting_signature";
+        sqlx::query(
+            "INSERT INTO pay_stellar.vault_requests
+                (id, buyer_id, seller_deployment_id, network, idempotency_key, kind, cap, amount,
+                 destination, state, authorization_xdr, signed_authorization_xdr, signed_at,
+                 expiration_ledger, resolved_at)
+             VALUES ($1, $2, $3, 'stellar:testnet', $4,
+                     CASE WHEN $5::bigint IS NULL THEN 'request_exit' ELSE 'set_cap' END,
+                     $5, $6, $7, $8, 'AAAA', CASE WHEN $9 THEN 'BBBB' END,
+                     CASE WHEN $9 THEN now() END, $10,
+                     CASE WHEN $8 IN ('confirmed', 'failed', 'expired') THEN now() END)",
+        )
+        .bind(id)
+        .bind(buyer)
+        .bind(self.deployment)
+        .bind(format!("vault-{id}"))
+        .bind(cap)
+        .bind(exit.map(|(amount, _)| amount))
+        .bind(exit.map(|(_, destination)| destination.as_str()))
+        .bind(state)
+        .bind(signed)
+        .bind(expiration_ledger)
+        .execute(&self.owner)
+        .await
+        .unwrap();
+    }
+
+    /// Where the worker has applied the vault's events through.
+    async fn vault_cursor(&self, ledger: i64) {
+        sqlx::query(
+            "INSERT INTO pay_stellar.vault_event_cursors
+                (seller_deployment_id, network, cursor, ledger)
+             VALUES ($1, 'stellar:testnet', '0000000000000000001-0000000001', $2)
+             ON CONFLICT (seller_deployment_id) DO UPDATE SET ledger = EXCLUDED.ledger",
+        )
+        .bind(self.deployment)
+        .bind(ledger)
+        .execute(&self.owner)
+        .await
+        .unwrap();
+    }
+
+    async fn set_available(&self, buyer: Uuid, available: i64) {
+        sqlx::query("UPDATE pay_stellar.buyers SET available = $1 WHERE id = $2")
+            .bind(available)
+            .bind(buyer)
+            .execute(&self.owner)
+            .await
+            .unwrap();
+    }
+}
+
+/// The agreeing books of `agreeing`, held by a vault instead of a treasury.
+async fn vault_agreeing(w: &World) -> Uuid {
+    let alice = agreeing(w).await;
+    w.chain.with(|n| n.vault = Some(Some((90, true))));
+    alice
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_limits_and_exits_the_gateway_prepared_are_matched_and_others_reported(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let alice = w.buyer(1, 0).await;
+    let (wallet, elsewhere) = (account(5), account(6));
+    w.vault_request(alice, "confirmed", Some(100), None, 1500).await;
+    // A deposit that sets the limit with the same signature.
+    let deposit = w.deposit(alice, [1; 32], 50, "signed").await;
+    sqlx::query("UPDATE pay_stellar.deposits SET cap = 300 WHERE id = $1")
+        .bind(deposit)
+        .execute(&w.owner)
+        .await
+        .unwrap();
+    w.vault_request(alice, "signed", None, Some((40, &wallet)), 1500).await;
+    // Signed, but its signature lapsed at 1020.
+    w.vault_request(alice, "expired", Some(70), None, 1020).await;
+    // Prepared, never signed.
+    w.vault_request(alice, "awaiting_signature", Some(200), None, 1500).await;
+
+    w.chain.emit(1010, cap_raised_event(&account(1), 100));
+    w.chain.emit(1011, cap_lowered_event(&account(1), 300, 20_000));
+    w.chain.emit(1012, exit_requested_event(&account(1), 40, &wallet));
+    w.chain.emit(1013, exit_event(&account(1), &wallet, 40));
+    w.chain.emit(1030, cap_lowered_event(&account(1), 70, 20_000));
+    w.chain.emit(1031, cap_raised_event(&account(1), 200));
+    w.chain.emit(1032, exit_requested_event(&account(1), 40, &elsewhere));
+    w.chain.emit(1033, exit_requested_event(&account(1), 41, &wallet));
+    w.chain.emit(1034, cap_raised_event(&account(2), 100));
+    w.observer().observe().await.unwrap();
+
+    assert_eq!(w.findings().await, vec![pair("vault_changed_elsewhere", "warning"); 5]);
+    let ledgers: Vec<i64> = sqlx::query_scalar(
+        "SELECT (detail->>'ledger')::bigint FROM pay_stellar.reconciliation_findings
+         ORDER BY 1",
+    )
+    .fetch_all(&w.owner)
+    .await
+    .unwrap();
+    assert_eq!(ledgers, [1030, 1031, 1032, 1033, 1034]);
+    let matched: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pay_stellar.chain_event_checks WHERE verdict = 'matched'",
+    )
+    .fetch_one(&w.owner)
+    .await
+    .unwrap();
+    // The limit, the deposit's limit and the exit request; a completed exit
+    // has nothing to match.
+    assert_eq!(matched, 3);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_upgrade_proposals_are_critical_and_admin_changes_reported(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    w.chain.emit(
+        1010,
+        (vec![symbol("upgrade_proposed")], vector(vec![bytes(&[3; 32]), ScVal::U32(130_000)])),
+    );
+    w.chain.emit(1020, (vec![symbol("upgrade_cancelled")], bytes(&[3; 32])));
+    let limits = map(vec![("max_balance", i128_val(500)), ("max_total", i128_val(10_000))]);
+    w.chain.emit(1030, (vec![symbol("launch")], vector(vec![ScVal::Void, limits])));
+    w.observer().observe().await.unwrap();
+    let mut findings = w.findings().await;
+    findings.sort();
+    assert_eq!(
+        findings,
+        [
+            pair("admin_change", "warning"),
+            pair("admin_change", "warning"),
+            pair("upgrade_proposed", "critical")
+        ]
+    );
+    let detail = w.finding_detail("upgrade_proposed").await;
+    assert_eq!(
+        (detail["wasm_hash"].as_str(), detail["effective_at"].as_u64()),
+        (Some(hex(&[3; 32]).as_str()), Some(130_000))
+    );
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_is_reconciled_against_its_own_balance_entry(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    vault_agreeing(&w).await;
+    // The treasury fields of the fake are not read for a vault.
+    w.chain.with(|n| n.trustline = None);
+    let observer = w.observer();
+    reconcile_times(&observer, CONFIRMATIONS + 1).await;
+    assert_eq!(w.findings().await, []);
+
+    w.chain.with(|n| n.vault = Some(Some((89, true))));
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("treasury_deficit", "critical")]);
+    let detail = w.finding_detail("treasury_deficit").await;
+    assert_eq!(
+        (detail["vault_usdc"].as_str(), detail["owed"].as_str(), detail["difference"].as_str()),
+        (Some("89"), Some("90"), Some("-1"))
+    );
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_frozen_vault_balance_is_critical_and_an_empty_vault_is_not(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    // Nothing deposited yet: no balance entry, nothing owed.
+    let observer = w.observer();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+
+    w.chain.with(|n| n.vault = Some(Some((0, false))));
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("treasury_deauthorized", "critical")]);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_an_exit_is_within_the_expected_totals_before_and_after_the_worker_applies_it(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let alice = vault_agreeing(&w).await;
+    // 25 of alice's 70 left the vault; the worker has not read it yet.
+    w.chain.emit(1040, exit_event(&account(1), &account(5), 25));
+    w.chain.with(|n| {
+        n.liabilities = 45;
+        n.vault = Some(Some((65, true)));
+    });
+    w.vault_cursor(1039).await;
+    let observer = w.observer();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+
+    // Applied by the worker.
+    w.set_available(alice, 45).await;
+    w.vault_cursor(1100).await;
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+
+    // The worker claims to have applied it, but `available` never fell.
+    w.set_available(alice, 70).await;
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("ledger_totals_mismatch", "warning")]);
+    let detail = w.finding_detail("ledger_totals_mismatch").await;
+    assert_eq!(detail["expected"]["liabilities"], serde_json::json!(["70", "70"]));
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_baseline_waits_for_the_worker_to_apply_its_exits(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let operator = pool_as(&connect, "SET ROLE pay_stellar_operator", 1).await;
+    let w = vault_world(opts, connect).await;
+    vault_agreeing(&w).await;
+    w.vault_cursor(1099).await;
+    let refused = w.observer().record_baseline(&operator, w.deployment, "now").await;
+    assert!(matches!(refused, Err(ObserverError::NotQuiet)), "{refused:?}");
+    w.vault_cursor(1100).await;
+    let ledger = w.observer().record_baseline(&operator, w.deployment, "now").await.unwrap();
+    assert_eq!(ledger, 1100);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_code_that_is_not_wasm_is_critical_without_an_expected_hash(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let observer = w.observer();
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
+    w.chain.with(|n| n.built_in = true);
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, [pair("code_changed", "critical")]);
 }
