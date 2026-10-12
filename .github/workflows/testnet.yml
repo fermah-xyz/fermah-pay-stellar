@@ -45,7 +45,7 @@ jobs:
           cargo run -q --locked -p fermah-pay-stellar-cli --bin fermah-pay-stellar-testnet -- \
             onboard-buyer --buyer-secret-out "$RUNNER_TEMP/buyer.secret" \
             > evidence/buyer-onboarding.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: testnet-onboarding-evidence
           path: evidence/
@@ -228,7 +228,7 @@ jobs:
               "| Vault solvency | holds \(.observed.solvency.vault_usdc), owes \(.observed.solvency.liabilities) + \(.observed.solvency.revenue) |"
             ' "$record"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: testnet-end-to-end-evidence
