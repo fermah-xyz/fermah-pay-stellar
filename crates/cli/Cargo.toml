@@ -27,6 +27,10 @@ name = "fermah-pay-stellar-contract"
 path = "src/bin/contract.rs"
 
 [[bin]]
+name = "fermah-pay-stellar-try"
+path = "src/bin/try.rs"
+
+[[bin]]
 name = "fermah-pay-stellar-x402-conformance"
 path = "src/bin/x402_conformance.rs"
 
@@ -51,6 +55,6 @@ sqlx.workspace = true
 stellar-strkey.workspace = true
 time.workspace = true
 tokio.workspace = true
-tonic.workspace = true
+tonic = { workspace = true, features = ["tls-ring", "tls-webpki-roots"] }
 uuid.workspace = true
 zeroize.workspace = true
