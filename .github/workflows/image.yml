@@ -3,6 +3,7 @@ name: Image
 # Publishes the released image (deploy/image/Dockerfile) for every change on
 # main that can alter it, tagged with the commit, so a deployment names the
 # exact code it runs. A pull request builds the image without publishing it.
+# Plain docker commands: the repository allows no third-party actions here.
 on:
   push:
     branches: [main]
@@ -34,38 +35,42 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: github.event_name != 'pull_request'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=sha,format=long,prefix=
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: deploy/image/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Record the vault Wasm hash
-        if: github.event_name != 'pull_request'
+      - name: Log in to the registry
+        if: env.PUBLISH == 'true'
         env:
-          IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build, and publish from main
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
         run: |
-          hash=$(docker run --rm --entrypoint sha256sum "$IMAGE" \
+          set -euo pipefail
+          docker buildx create --use --driver docker-container >/dev/null
+          tags=(--tag "$IMAGE:$SHA")
+          [[ "$REF" == refs/heads/main ]] && tags+=(--tag "$IMAGE:main")
+          if [[ "$PUBLISH" == true ]]; then
+            output=(--push --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max")
+          else
+            output=(--load)
+          fi
+          docker buildx build --file deploy/image/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=$SHA" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache" \
+            "${tags[@]}" "${output[@]}" .
+      - name: Record the vault Wasm hash
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          hash=$(docker run --rm --entrypoint sha256sum "$IMAGE:$SHA" \
             /usr/local/share/fermah-pay-stellar/fermah_pay_stellar_vault.wasm | cut -d' ' -f1)
-          echo "Image \`$IMAGE\`, vault Wasm sha256 \`$hash\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image \`$IMAGE:$SHA\`, vault Wasm sha256 \`$hash\`" >> "$GITHUB_STEP_SUMMARY"
