@@ -1,0 +1,76 @@
+name: Image
+
+# Publishes the released image (deploy/image/Dockerfile) for every change on
+# main that can alter it, tagged with the commit, so a deployment names the
+# exact code it runs. A pull request builds the image without publishing it.
+# Plain docker commands: the repository allows no third-party actions here.
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - contracts/**
+      - proto/**
+      - db/**
+      - .sqlx/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - deploy/image/**
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - deploy/image/**
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to the registry
+        if: env.PUBLISH == 'true'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Build, and publish from main
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          docker buildx create --use --driver docker-container >/dev/null
+          tags=(--tag "$IMAGE:$SHA")
+          [[ "$REF" == refs/heads/main ]] && tags+=(--tag "$IMAGE:main")
+          if [[ "$PUBLISH" == true ]]; then
+            output=(--push --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max")
+          else
+            output=(--load)
+          fi
+          docker buildx build --file deploy/image/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=$SHA" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache" \
+            "${tags[@]}" "${output[@]}" .
+      - name: Record the vault Wasm hash
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          hash=$(docker run --rm --entrypoint sha256sum "$IMAGE:$SHA" \
+            /usr/local/share/fermah-pay-stellar/fermah_pay_stellar_vault.wasm | cut -d' ' -f1)
+          echo "Image \`$IMAGE:$SHA\`, vault Wasm sha256 \`$hash\`" >> "$GITHUB_STEP_SUMMARY"
