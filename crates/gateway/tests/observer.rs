@@ -979,9 +979,15 @@ async fn test_rotation_the_binding_does_not_follow_is_a_finding_after_the_grace(
     assert_eq!(w.findings().await, [], "the binding may follow later");
 
     // The binding follows the operator rotation only.
-    issuance::sync_ledger_binding(&w.issuer, w.deployment, &new_operator, &treasury(), "test")
-        .await
-        .unwrap();
+    issuance::sync_ledger_binding(
+        &w.issuer,
+        w.deployment,
+        &new_operator,
+        Some(&treasury()),
+        "test",
+    )
+    .await
+    .unwrap();
     w.clock.set(closed(&w, 1011) + GRACE);
     observer.recheck().await.unwrap();
     assert_eq!(w.findings().await, [pair("binding_out_of_date", "warning")]);
@@ -2289,14 +2295,9 @@ async fn test_an_exit_is_within_the_expected_totals_before_and_after_the_worker_
     reconcile_times(&observer, CONFIRMATIONS).await;
     assert_eq!(w.findings().await, []);
 
-    // Applied by the worker.
-    w.set_available(alice, 45).await;
-    w.vault_cursor(1100).await;
-    reconcile_times(&observer, CONFIRMATIONS).await;
-    assert_eq!(w.findings().await, []);
-
     // Applied by a worker whose last page ended at the exit itself: its
     // ledger is not complete yet, but the exit is in.
+    w.set_available(alice, 45).await;
     let exit_id: String =
         sqlx::query_scalar("SELECT event_id FROM pay_stellar.chain_events WHERE kind = 'exit'")
             .fetch_one(&w.owner)
@@ -2309,7 +2310,11 @@ async fn test_an_exit_is_within_the_expected_totals_before_and_after_the_worker_
         .unwrap();
     reconcile_times(&observer, CONFIRMATIONS).await;
     assert_eq!(w.findings().await, []);
+
+    // Applied by the worker, which has read on past it.
     w.vault_cursor(1100).await;
+    reconcile_times(&observer, CONFIRMATIONS).await;
+    assert_eq!(w.findings().await, []);
 
     // The worker claims to have applied it, but `available` never fell.
     w.set_available(alice, 70).await;

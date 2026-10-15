@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT b.id FROM pay_stellar.buyers b\n            WHERE b.id IN (SELECT buyer_id FROM pay_stellar.charges WHERE id = ANY($1))\n            ORDER BY b.id\n            FOR UPDATE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "12070eb6ba6d1fe0bf7821cd044ceb6558192be38b02aadcb1b4c3305869b42d"
+}

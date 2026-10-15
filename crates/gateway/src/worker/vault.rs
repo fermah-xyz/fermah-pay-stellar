@@ -264,6 +264,24 @@ impl<C: Chain, K: Clock> Worker<C, K> {
                 return Ok(());
             }
             let mut tx = self.pool.begin().await.map_err(store("begin applying vault events"))?;
+            // The cursor before the buyers, as reading buyers' accounts takes
+            // them: the other order deadlocks with it.
+            let held = sqlx::query_scalar!(
+                r#"
+                SELECT seller_deployment_id FROM pay_stellar.vault_event_cursors
+                WHERE seller_deployment_id = $1 AND cursor = $2
+                FOR UPDATE
+                "#,
+                id,
+                position.to_string(),
+            )
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(store("lock the vault event cursor"))?;
+            // Another worker moved it first: its effects are already in.
+            if held.is_none() {
+                return Ok(());
+            }
             for event in page.events.iter().filter(|event| event.in_successful_contract_call) {
                 let Some(decoded) = ledger_event(&event.topics, &event.value) else { continue };
                 apply(&mut tx, id, event.ledger, &decoded).await?;
@@ -472,6 +490,15 @@ impl<C: Chain, K: Clock> Worker<C, K> {
               ON l.seller_deployment_id = b.seller_deployment_id AND l.network = b.network
             WHERE b.network = $1 AND l.operator_address = $2 AND l.custody = 'vault'
               AND b.exit_unlock_at <= $3 AND b.id <> ALL($4)
+              -- Not again while the last one may land, or landed and its
+              -- event is not applied yet.
+              AND NOT EXISTS (
+                  SELECT 1 FROM pay_stellar.submissions s
+                  LEFT JOIN pay_stellar.vault_event_cursors c
+                    ON c.seller_deployment_id = b.seller_deployment_id
+                  WHERE s.id = b.exit_submission_id
+                    AND (s.state = 'installed'
+                         OR (s.state = 'succeeded' AND (c.ledger IS NULL OR c.ledger < s.ledger))))
             ORDER BY b.exit_unlock_at
             LIMIT 1
             "#,
@@ -486,7 +513,9 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         else {
             return Ok(None);
         };
-        // Not sent again before its event has been applied.
+        // Not sent again by this worker before its event has been applied,
+        // nor if it cannot be sent now; the linked submission keeps any
+        // other worker from sending it again while this one may land.
         self.set_aside(row.id);
         let deployment = deployment(&row.contract_address, &row.usdc_address, None)?;
         let owner: ChainAddress = address(&row.wallet_address)?;
@@ -509,6 +538,14 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             Err(EngineError::SourceBusy { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
+        sqlx::query!(
+            "UPDATE pay_stellar.buyers SET exit_submission_id = $2 WHERE id = $1",
+            row.id,
+            prepared.id,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(store("link the exit submission"))?;
         tx.commit().await.map_err(store("commit exit submission"))?;
         tracing::Span::current().record("submission_id", tracing::field::display(prepared.id));
         Ok(Some(prepared.id))

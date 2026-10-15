@@ -968,7 +968,7 @@ async fn test_binding_follows_a_rotation_only_through_the_audited_sync(
         &h.issuer,
         t.deployment_id,
         &operator,
-        &treasury,
+        Some(&treasury),
         "get_config",
     )
     .await
@@ -977,7 +977,7 @@ async fn test_binding_follows_a_rotation_only_through_the_audited_sync(
         &h.issuer,
         t.deployment_id,
         &operator,
-        &treasury,
+        Some(&treasury),
         "get_config",
     )
     .await

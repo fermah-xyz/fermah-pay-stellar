@@ -79,12 +79,17 @@ first missing ledger and the node's oldest, and charges stay refused.
      BEGIN;
      DELETE FROM pay_stellar.vault_event_cursors WHERE seller_deployment_id = '<deployment>';
      UPDATE pay_stellar.buyers SET vault_synced_ledger = NULL
-     WHERE seller_deployment_id = '<deployment>';
+     WHERE seller_deployment_id = '<deployment>' AND available >= 0;
      COMMIT;
      ```
 
    The worker then starts at the latest ledger and reads every buyer's
    account entry again before their charges are admitted.
+   - A buyer whose `available` is negative is left out: an exit took credit
+     that its open charges still held, and only a buyer the worker has read
+     from the vault may be below zero. No charge is admitted for it meanwhile.
+     Once those charges are refunded and `available` is zero or more, run the
+     same `UPDATE` again for it.
 
 ## Settings
 

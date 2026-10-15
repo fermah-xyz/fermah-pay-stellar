@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT LEAST(b.cap, b.pending_cap,\n                     (SELECT MIN(r.cap) FROM pay_stellar.vault_requests r\n                      WHERE r.buyer_id = b.id AND r.kind = 'set_cap'\n                        AND r.state IN ('signed', 'submitted')),\n                     (SELECT MIN(d.cap) FROM pay_stellar.deposits d\n                      WHERE d.buyer_id = b.id AND d.cap IS NOT NULL\n                        AND (d.state IN ('signed', 'submitted')\n                             OR (d.state = 'confirmed' AND NOT EXISTS (\n                                 SELECT 1 FROM pay_stellar.vault_event_cursors c\n                                 WHERE c.seller_deployment_id = d.seller_deployment_id\n                                   AND c.ledger >= d.expiration_ledger))))) AS \"cap!\",\n               GREATEST(COALESCE(b.exit_amount, 0),\n                        COALESCE((SELECT MAX(r.amount) FROM pay_stellar.vault_requests r\n                                  WHERE r.buyer_id = b.id AND r.kind = 'request_exit'\n                                    AND r.state IN ('signed', 'submitted')), 0)) AS \"exit!\"\n        FROM pay_stellar.buyers b WHERE b.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cap!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "exit!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "e10eb72167eb0fbb027161779033effba3559ca2babd07e72913044d5a19e748"
+}

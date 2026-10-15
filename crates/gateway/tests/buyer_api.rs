@@ -761,6 +761,7 @@ async fn test_runtime_roles_write_exactly_the_documented_columns(
                 "pending_cap_at",
                 "exit_amount",
                 "exit_unlock_at",
+                "exit_submission_id",
                 "vault_synced_ledger",
                 "vault_entry_absent",
             ],

@@ -372,12 +372,19 @@ impl<C: Chain, K: Clock> Worker<C, K> {
               ON l.seller_deployment_id = m.seller_deployment_id AND l.network = m.network
             WHERE m.network = $1 AND l.operator_address = $2 AND m.state = 'signed'
               AND m.id <> ALL($3)
+              -- A mandate approves the vault to spend the buyer's wallet, so
+              -- it waits like a deposit while proposed code may be installed.
+              AND NOT EXISTS (
+                  SELECT 1 FROM pay_stellar.vault_event_cursors c
+                  WHERE c.seller_deployment_id = m.seller_deployment_id
+                    AND c.upgrade_pending_until >= $4)
             ORDER BY m.created_at
             LIMIT 1
             "#,
             self.network().caip2(),
             self.operator_address.as_str(),
             &self.set_aside_ids(),
+            i64::from(self.latest_ledger().await?),
         )
         .fetch_optional(&self.pool)
         .await

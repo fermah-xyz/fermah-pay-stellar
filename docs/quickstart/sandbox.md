@@ -22,23 +22,34 @@ docker run --rm -e FERMAH_PAY_ENDPOINT -e FERMAH_PAY_API_KEY -e FERMAH_PAY_BUYER
   ghcr.io/fermah-xyz/fermah-pay-stellar:main
 ```
 
-It takes about a minute. Each step prints what it sent, what came back, and
-the transaction on the Stellar explorer:
+It takes about a minute. Each step prints the call it makes, the
+identifiers and amounts that come back, and the transaction on the Stellar
+explorer:
 
 1. **`CreateBuyer`** registers the buyer with your deployment. The same
    reference and wallet return the same buyer, so you can run it again.
 2. **`PrepareDeposit`** returns an authorization entry for the exact deposit,
    which carries the buyer's daily spending limit.
-3. **The buyer signs the entry.** In your product, the buyer's wallet does
-   this; you never hold the buyer's key. The buyer needs no XLM.
+3. **The buyer signs the entry**, after checking it is the deposit asked for:
+   the amount, the limit, and Circle's USDC moving from the buyer into your
+   vault. In your product, the buyer's wallet does this; you never hold the
+   buyer's key. The buyer needs no XLM.
 4. **`SubmitDeposit`** hands the signed entry back. The gateway sends the
    transaction and pays its fee; `GetDeposit` reports it confirmed.
 5. **`CreateCharge`** is admitted at once against the balance and settles
    on-chain in a batch shortly after; `GetCharge` reports it charged.
 6. **`GetBalance`** shows the available balance and the limit.
 
+Each run deposits 0.1 USDC and charges 0.01 USDC against a daily limit of
+0.05 USDC, which the buyer signs with the deposit. The test buyer starts with
+2 USDC. The sixth run on the same UTC day is refused as
+`above_spending_limit`: the limit is doing its job. Run again the next day, or
+with a smaller `--charge`.
+
 Without Docker, the same walkthrough runs from a clone of this repository:
-`cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-try`.
+`cargo run -q -p fermah-pay-stellar-cli --bin fermah-pay-stellar-try`. It
+reads the API key and the buyer's secret from the environment only, and
+refuses a plain `http://` endpoint other than one on your own machine.
 
 ## 2. Make the same calls from your code
 
@@ -75,8 +86,8 @@ returns the original, so a retry can never charge twice.
 ## 3. x402
 
 The same host serves the [x402 facilitator interface](../api/x402.md) over
-HTTPS: `GET /supported`, `POST /verify`, `POST /settle` and
-`GET /settlements/{commitment}`, with the same API key.
+HTTPS: `GET /supported`, which needs no key, and `POST /verify`,
+`POST /settle` and `GET /settlements/{commitment}`, with the same API key.
 
 ```bash
 curl https://pay-sandbox.fermah.xyz/supported
@@ -87,7 +98,8 @@ curl https://pay-sandbox.fermah.xyz/supported
 - **Testnet only.** USDC is Circle's testnet USDC; more is available from
   [faucet.circle.com](https://faucet.circle.com).
 - **Quotas apply** per buyer and per deployment, as in production
-  ([limits](../self-hosting/limits.md)); a refusal names the quota reached.
+  ([limits](../self-hosting/limits.md)), alongside each buyer's own daily
+  limit; a refusal names the quota or limit reached.
 - **Your deployment is yours.** Your API key reaches only your buyers and
   your vault; other sellers' data is reported exactly like data that does
   not exist.

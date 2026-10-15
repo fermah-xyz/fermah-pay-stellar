@@ -48,13 +48,15 @@ async fn bind(h: &Harness, t: &Tenant, vault: bool) {
 }
 
 /// Records that the worker has read the deployment's events up to `ledger`.
+/// The cursor only moves forward; an older reading lowers only the ledger.
 async fn events_read_to(h: &Harness, t: &Tenant, ledger: u32) {
     let cursor = fermah_pay_stellar_chain::rpc::EventCursor::end_of_ledger(ledger).to_string();
     sqlx::query(
         "INSERT INTO pay_stellar.vault_event_cursors (seller_deployment_id, network, cursor, ledger)
          VALUES ($1, 'stellar:testnet', $3, $2)
          ON CONFLICT (seller_deployment_id)
-         DO UPDATE SET ledger = EXCLUDED.ledger, cursor = EXCLUDED.cursor",
+         DO UPDATE SET ledger = EXCLUDED.ledger,
+                       cursor = GREATEST(vault_event_cursors.cursor, EXCLUDED.cursor)",
     )
     .bind(t.deployment_id)
     .bind(i64::from(ledger))
@@ -322,6 +324,22 @@ async fn test_charges_fit_the_limit_of_the_day_they_are_admitted_in(
     assert_eq!(days, [today - 1, today]);
 }
 
+/// For a buyer the worker has read from the vault, the database allows a
+/// negative balance (an exit can take credit that charges held), so only
+/// admission keeps charges within it.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_vault_charges_never_overdraw(opts: PgPoolOptions, connect: PgConnectOptions) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let t = vault(&h).await;
+    let b = buyer(&h, &t, 50, 1_000).await;
+    let status = charge(&h, &t, &b, 51, "c-1").await.unwrap_err();
+    assert_refused(&status, Code::FailedPrecondition, "insufficient_balance");
+    charge(&h, &t, &b, 50, "c-2").await.unwrap();
+    let status = charge(&h, &t, &b, 1, "c-3").await.unwrap_err();
+    assert_refused(&status, Code::FailedPrecondition, "insufficient_balance");
+    assert_eq!(balance(&h, &t, &b).await.available, 0);
+}
+
 #[sqlx::test(migrations = "../../db/migrations")]
 async fn test_vault_charges_wait_for_a_recent_reading_of_the_events(
     opts: PgPoolOptions,
@@ -503,6 +521,47 @@ async fn test_vault_requests_are_idempotent_and_signed_by_the_buyer_only(
     assert_eq!(balance(&h, &t, &b).await.admitted_daily_limit, 30);
 }
 
+/// A deposit is confirmed from its transaction, possibly before the worker
+/// has read the events that carry its limit into the buyer's row; the limit
+/// it signed counts until the events are read past the last ledger it could
+/// have been included in.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_confirmed_deposits_limit_counts_until_its_events_are_read(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let t = vault(&h).await;
+    let b = buyer(&h, &t, 100, 30).await;
+    let request = PrepareDepositRequest {
+        buyer_id: b.id.clone(),
+        amount: 10_000_000,
+        idempotency_key: "dep".into(),
+        daily_limit: Some(10),
+    };
+    let deposit = ledger(&h)
+        .await
+        .prepare_deposit(authed(request, &t.token))
+        .await
+        .unwrap()
+        .into_inner()
+        .deposit
+        .unwrap();
+    sqlx::query(
+        "UPDATE pay_stellar.deposits SET state = 'confirmed', resolved_at = now()
+         WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&deposit.deposit_id).unwrap())
+    .execute(&h.owner)
+    .await
+    .unwrap();
+    let status = charge(&h, &t, &b, 20, "c-1").await.unwrap_err();
+    assert_refused(&status, Code::FailedPrecondition, "above_spending_limit");
+    charge(&h, &t, &b, 10, "c-2").await.unwrap();
+    events_read_to(&h, &t, deposit.expiration_ledger).await;
+    charge(&h, &t, &b, 20, "c-3").await.unwrap();
+}
+
 /// While proposed code may still be installed, new money waits: a deposit or
 /// mandate made now would run under it without the notice existing buyers
 /// have to leave first.
@@ -552,4 +611,43 @@ async fn test_deposits_and_mandates_wait_while_an_upgrade_may_be_installed(
     events_read_to(&h, &t, h.ledger.get()).await;
     ledger(&h).await.prepare_deposit(authed(deposit("d-1"), &t.token)).await.unwrap();
     ledger(&h).await.prepare_mandate(authed(mandate("m-1"), &t.token)).await.unwrap();
+}
+
+/// A vault's operator rotates like a prepaid ledger's, through the audited
+/// sync. The vault names no treasury: syncing the same accounts again
+/// records nothing, and a treasury, which describes another kind of
+/// contract, is refused.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_vault_binding_follows_an_operator_rotation(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let h = start(opts, connect, Network::Testnet).await;
+    let t = vault(&h).await;
+    let operator = AccountAddress::from_public_key([21; 32]);
+    let sync = || issuance::sync_ledger_binding(&h.issuer, t.deployment_id, &operator, None, "x");
+    let (changed, again) = (sync().await.unwrap(), sync().await.unwrap());
+    assert!(changed && !again);
+    let bound = issuance::ledger_binding(&h.issuer, t.deployment_id).await.unwrap();
+    assert_eq!((bound.operator, bound.treasury), (operator.clone(), None));
+    let audit: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT previous_operator, current_operator, previous_treasury, current_treasury
+         FROM pay_stellar.ledger_binding_changes",
+    )
+    .fetch_all(&h.owner)
+    .await
+    .unwrap();
+    let previous = AccountAddress::from_public_key([12; 32]).as_str().to_owned();
+    assert_eq!(audit, [(previous, operator.as_str().to_owned(), None, None)]);
+
+    let error = sqlx::query("SELECT pay_stellar.sync_ledger_binding($1, $2, $3, 'x')")
+        .bind(t.deployment_id)
+        .bind(operator.as_str())
+        .bind(AccountAddress::from_public_key([22; 32]).as_str())
+        .execute(&h.issuer)
+        .await
+        .unwrap_err();
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().unwrap(), "23514", "{error}");
+    assert!(error.message().contains("is bound to a vault contract"), "{error}");
 }
