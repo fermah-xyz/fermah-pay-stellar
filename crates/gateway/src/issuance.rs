@@ -210,19 +210,19 @@ pub async fn ledger_binding(
 /// Moves the binding to the operator and treasury the contract now names,
 /// through the database function that records every change. Returns whether
 /// anything changed. The caller reads `operator` and `treasury` from the
-/// contract; they are never typed in.
+/// contract; they are never typed in. A vault names no treasury.
 pub async fn sync_ledger_binding(
     pool: &PgPool,
     seller_deployment_id: Uuid,
     operator: &AccountAddress,
-    treasury: &AccountAddress,
+    treasury: Option<&AccountAddress>,
     evidence: &str,
 ) -> Result<bool, IssuanceError> {
     sqlx::query_scalar!(
         r#"SELECT pay_stellar.sync_ledger_binding($1, $2, $3, $4) AS "changed!""#,
         seller_deployment_id,
         operator.as_str(),
-        treasury.as_str(),
+        treasury.map(AccountAddress::as_str),
         evidence,
     )
     .fetch_one(pool)

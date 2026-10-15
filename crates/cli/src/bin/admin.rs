@@ -226,18 +226,24 @@ async fn main() -> anyhow::Result<()> {
             if config.usdc != usdc {
                 bail!("the contract's USDC is not the bound one");
             }
-            let treasury = config
-                .treasury
-                .context("the contract has no treasury: it is not a prepaid ledger")?;
+            match (&bound.treasury, &config.treasury) {
+                (Some(_), None) => {
+                    bail!("the contract has no treasury: it is not a prepaid ledger")
+                }
+                (None, Some(_)) => bail!("the contract names a treasury: it is not a vault"),
+                _ => {}
+            }
+            let treasury = config.treasury.as_ref();
+            let shown = treasury.map_or_else(|| "none (vault)".to_owned(), ToString::to_string);
             let evidence = format!(
-                "get_config of {}: operator {}, treasury {}",
-                bound.contract, config.operator, treasury
+                "get_config of {}: operator {}, treasury {shown}",
+                bound.contract, config.operator
             );
             let changed = issuance::sync_ledger_binding(
                 &pool,
                 deployment_id,
                 &config.operator,
-                &treasury,
+                treasury,
                 &evidence,
             )
             .await?;
@@ -245,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
                 "deployment_id": deployment_id.to_string(),
                 "changed": changed,
                 "operator": config.operator.to_string(),
-                "treasury": treasury.to_string(),
+                "treasury": treasury.map(ToString::to_string),
             })
         }
         Command::QuarantinedCharges => {

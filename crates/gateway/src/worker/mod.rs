@@ -910,6 +910,28 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// they are refused as expired and their amount returned.
     async fn expire_charges(&self) -> Result<(), WorkerError> {
         let latest = self.latest_ledger().await?;
+        let mut tx = self.pool.begin().await.map_err(store("begin charge expiry"))?;
+        // Buyers in id order, as settlement locks them: two rounds of
+        // different workers in a lease handover must not deadlock.
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.buyers b
+            WHERE b.id IN (
+                SELECT c.buyer_id FROM pay_stellar.charges c
+                JOIN pay_stellar.ledger_contracts l
+                  ON l.seller_deployment_id = c.seller_deployment_id AND l.network = c.network
+                WHERE c.state = 'admitted' AND c.last_ledger < $1 AND c.network = $2
+                  AND l.operator_address = $3)
+            ORDER BY b.id
+            FOR UPDATE
+            "#,
+            latest,
+            self.network().caip2(),
+            self.operator_address.as_str(),
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store("lock buyers of expiring charges"))?;
         sqlx::query!(
             r#"
             WITH expired AS (
@@ -933,10 +955,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             self.network().caip2(),
             self.operator_address.as_str(),
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(store("expire charges"))?;
-        Ok(())
+        tx.commit().await.map_err(store("commit charge expiry"))
     }
 
     async fn apply_charge_decisions(
@@ -944,6 +966,21 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         decisions: &[(Uuid, ChargeDecision)],
     ) -> Result<(), WorkerError> {
         let mut tx = self.pool.begin().await.map_err(store("begin charge settlement"))?;
+        // Buyers in id order before any charge: refunds reach them in batch
+        // order otherwise, and expiry locks them in id order.
+        let ids: Vec<Uuid> = decisions.iter().map(|(id, _)| *id).collect();
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.buyers b
+            WHERE b.id IN (SELECT buyer_id FROM pay_stellar.charges WHERE id = ANY($1))
+            ORDER BY b.id
+            FOR UPDATE
+            "#,
+            &ids,
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(store("lock buyers of settled charges"))?;
         // What this call changed, counted once the transaction commits.
         let mut applied: Vec<&'static str> = Vec::new();
         for (id, decision) in decisions {
@@ -1119,6 +1156,22 @@ impl<C: Chain, K: Clock> Worker<C, K> {
     /// Credits the deposit in the statement that moves it to `confirmed`, so
     /// the credit happens exactly once.
     async fn confirm(&self, id: Uuid) -> Result<(), WorkerError> {
+        // The buyer's row first, as the API locks it before storing a
+        // deposit's signature: taking the deposit first would deadlock with
+        // a late signature for the same deposit.
+        let mut tx = self.pool.begin().await.map_err(store("begin deposit confirmation"))?;
+        sqlx::query!(
+            r#"
+            SELECT b.id FROM pay_stellar.deposits d
+            JOIN pay_stellar.buyers b ON b.id = d.buyer_id
+            WHERE d.id = $1
+            FOR UPDATE OF b
+            "#,
+            id,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(store("lock the depositing buyer"))?;
         let confirmed = sqlx::query!(
             r#"
             WITH confirmed AS (
@@ -1140,9 +1193,10 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             "#,
             id,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(store("confirm deposit"))?;
+        tx.commit().await.map_err(store("commit deposit confirmation"))?;
         deposit_closed("confirmed", confirmed.rows_affected());
         Ok(())
     }

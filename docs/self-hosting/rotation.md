@@ -26,6 +26,10 @@ The tool reads the contract's current operator and treasury from
 the previous and new accounts in `pay_stellar.ledger_binding_changes`, which
 no role can update or delete. The accounts are never typed in.
 
+A [vault](vault.md) holds its USDC itself and names no treasury: for a vault
+deployment the tool moves only the operator, which the vault's admin can
+change at once, and refuses if the contract names a treasury.
+
 For an operator rotation, restart the worker with the new key in
 `PAY_STELLAR_OPERATOR_KEY_FILE`. The contract checks the operator when a
 batch is applied: a batch the previous operator authorized that lands before

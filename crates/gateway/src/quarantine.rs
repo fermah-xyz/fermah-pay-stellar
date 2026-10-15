@@ -214,22 +214,19 @@ pub async fn prove_from_transaction<C: Chain>(
             expected: charge.amount,
         });
     }
-    match entry.outcome {
-        Outcome::Charged
-        | Outcome::InsufficientBalance
-        | Outcome::AboveLimit
-        | Outcome::AboveDailyLimit => Ok((
-            Resolution::Settled(entry.outcome),
+    match verdict(entry.outcome) {
+        Some(outcome) => Ok((
+            Resolution::Settled(outcome),
             format!(
                 "transaction {shown} (ledger {}) settled charge {shown_charge} as {}",
                 tx.ledger,
-                entry.outcome.token()
+                outcome.token()
             ),
         )),
-        other => Err(QuarantineError::NotSettled {
+        None => Err(QuarantineError::NotSettled {
             hash: shown,
             charge: shown_charge,
-            outcome: other.token(),
+            outcome: entry.outcome.token(),
         }),
     }
 }
@@ -260,15 +257,12 @@ pub async fn prove_from_record<C: Chain>(
         Some(record) => {
             let outcome = charge_record(&record.data)
                 .ok_or(QuarantineError::Corrupt("charge record does not decode"))?;
-            match outcome {
-                Outcome::Charged
-                | Outcome::InsufficientBalance
-                | Outcome::AboveLimit
-                | Outcome::AboveDailyLimit => Resolution::Settled(outcome),
-                other => {
+            match verdict(outcome) {
+                Some(outcome) => Resolution::Settled(outcome),
+                None => {
                     return Err(QuarantineError::RecordUnresolvable {
                         charge: shown_charge,
-                        outcome: other.token(),
+                        outcome: outcome.token(),
                     });
                 }
             }
@@ -384,22 +378,39 @@ pub async fn prove_from_events<L: EventLog>(
             expected: charge.amount,
         });
     }
-    match found.entry.outcome {
-        Outcome::Charged
-        | Outcome::InsufficientBalance
-        | Outcome::AboveLimit
-        | Outcome::AboveDailyLimit => Ok((
-            Resolution::Settled(found.entry.outcome),
+    match verdict(found.entry.outcome) {
+        Some(outcome) => Ok((
+            Resolution::Settled(outcome),
             format!(
                 "{searched}: event {} of transaction {hash} (ledger {}) settled charge {shown_charge} as {}",
                 found.event,
                 found.ledger,
-                found.entry.outcome.token()
+                outcome.token()
             ),
         )),
-        other => {
-            Err(QuarantineError::NotSettled { hash, charge: shown_charge, outcome: other.token() })
-        }
+        None => Err(QuarantineError::NotSettled {
+            hash,
+            charge: shown_charge,
+            outcome: found.entry.outcome.token(),
+        }),
+    }
+}
+
+/// The outcome a charge was settled with, if `outcome` is one: the contract
+/// decided the charge and kept a record of it. Every proof above resolves
+/// through this one match, which names every outcome, so one the contract
+/// gains cannot fall into a catch-all and leave its charges unresolvable.
+const fn verdict(outcome: Outcome) -> Option<Outcome> {
+    match outcome {
+        Outcome::Charged
+        | Outcome::InsufficientBalance
+        | Outcome::AboveLimit
+        | Outcome::AboveDailyLimit
+        | Outcome::AboveCap => Some(outcome),
+        // Nothing debited and nothing recorded: not this charge's decision.
+        Outcome::Duplicate | Outcome::Expired => None,
+        // The gateway charges only buyers a confirmed deposit created.
+        Outcome::UnknownAccount => None,
     }
 }
 

@@ -228,6 +228,12 @@ testnet vault-end-to-end \
   --database-url postgres://pay_stellar_owner:local-development-only@127.0.0.1:55433/pay_stellar_vault
 ```
 
+The released image `ghcr.io/fermah-xyz/fermah-pay-stellar:<commit>` carries
+the same Wasm, built from that commit, at
+`/usr/local/share/fermah-pay-stellar/fermah_pay_stellar_vault.wasm`; the
+Image workflow's summary for the commit records its SHA-256, so it can be
+deployed without building it locally.
+
 `--max-balance` and `--max-total` are the launch limits: the admin bounds
 what one buyer and all buyers together may hold (500 and 10,000 USDC here).
 The end-to-end run binds a new deployment to the vault and, through the gRPC

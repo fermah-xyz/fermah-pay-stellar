@@ -274,6 +274,10 @@ pub struct VaultBuyer {
 /// API and not resolved yet: a lower limit or an exit counts from the moment
 /// the buyer signs it, before the contract has seen it, and stops counting
 /// only once the request is resolved and its effect, if any, is in the row.
+/// A deposit is confirmed from its transaction, which the node may serve
+/// before the events that carry its limit into the row; its limit keeps
+/// counting until the events are read past the last ledger it could have
+/// been included in.
 pub(crate) async fn reservations(
     tx: &mut sqlx::PgConnection,
     buyer_id: Uuid,
@@ -286,7 +290,11 @@ pub(crate) async fn reservations(
                         AND r.state IN ('signed', 'submitted')),
                      (SELECT MIN(d.cap) FROM pay_stellar.deposits d
                       WHERE d.buyer_id = b.id AND d.cap IS NOT NULL
-                        AND d.state IN ('signed', 'submitted'))) AS "cap!",
+                        AND (d.state IN ('signed', 'submitted')
+                             OR (d.state = 'confirmed' AND NOT EXISTS (
+                                 SELECT 1 FROM pay_stellar.vault_event_cursors c
+                                 WHERE c.seller_deployment_id = d.seller_deployment_id
+                                   AND c.ledger >= d.expiration_ledger))))) AS "cap!",
                GREATEST(COALESCE(b.exit_amount, 0),
                         COALESCE((SELECT MAX(r.amount) FROM pay_stellar.vault_requests r
                                   WHERE r.buyer_id = b.id AND r.kind = 'request_exit'

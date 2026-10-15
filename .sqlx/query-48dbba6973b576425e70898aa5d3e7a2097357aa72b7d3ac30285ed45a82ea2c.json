@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT b.id FROM pay_stellar.deposits d\n            JOIN pay_stellar.buyers b ON b.id = d.buyer_id\n            WHERE d.id = $1\n            FOR UPDATE OF b\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pay_stellar.buyers",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "48dbba6973b576425e70898aa5d3e7a2097357aa72b7d3ac30285ed45a82ea2c"
+}

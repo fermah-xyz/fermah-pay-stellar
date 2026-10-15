@@ -3,8 +3,10 @@
 # (admin, contract, testnet), the seller's walkthrough (try), and the vault's
 # Wasm, built from the same commit so a deployment can verify the code it
 # installs. Runs as an unprivileged user; secrets arrive as mounted files.
+# Base images are pinned by digest, so a rebuild of the same commit starts
+# from the same layers.
 
-FROM rust:1.96-bookworm AS build
+FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS build
 WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake clang libdbus-1-3 \
@@ -35,7 +37,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && for bin in gateway worker observer admin contract testnet try; do \
         cp "target/release/fermah-pay-stellar-$bin" /out/bin/; done
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*

@@ -2991,6 +2991,47 @@ async fn test_record_evidence_readmits_expires_or_refuses(
     assert_eq!(w.balance(&x).await, (90, 0));
 }
 
+/// A vault refuses a charge above what the buyer's signed limit leaves for
+/// its day as `above_cap`; a quarantined charge with that record is refunded
+/// like any other refusal.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_quarantined_vault_charge_refused_above_its_cap_is_resolved_and_refunded(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    sqlx::query("UPDATE pay_stellar.buyers SET cap = 100 WHERE id = $1::uuid")
+        .bind(&x.id)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    let charge = w.charge(&x, 10, "c-1").await;
+    quarantine_unsent(&w, &charge.charge_id).await;
+    assert_eq!(w.balance(&x).await, (90, 0));
+    let (owner, id): (String, Vec<u8>) = sqlx::query_as(
+        "SELECT b.wallet_address, c.charge_id FROM pay_stellar.charges c
+         JOIN pay_stellar.buyers b ON b.id = c.buyer_id WHERE c.id = $1::uuid",
+    )
+    .bind(&charge.charge_id)
+    .fetch_one(&w.h.owner)
+    .await
+    .unwrap();
+    let key = (owner.parse::<AccountAddress>().unwrap(), <[u8; 32]>::try_from(id).unwrap());
+    w.stellar.with(|n| {
+        let at = n.latest;
+        n.state.records.insert(key, (7, charge.last_ledger + CHARGE_RECORD_GRACE, at));
+    });
+
+    let q = quarantined(&w, &charge.charge_id).await;
+    let (resolution, evidence) = quarantine::prove_from_record(&w.stellar, &q).await.unwrap();
+    assert_eq!(resolution, Resolution::Settled(Outcome::AboveCap));
+    quarantine::resolve(&w.operator_pool, q.id, resolution, &evidence).await.unwrap();
+    let refused = w.get_charge(&charge.charge_id).await;
+    assert_eq!((refused.state(), refused.outcome.as_str()), (ChargeState::Refused, "above_cap"));
+    assert_eq!(w.balance(&x).await, (100, 0));
+}
+
 #[sqlx::test(migrations = "../../db/migrations")]
 async fn test_record_evidence_needs_a_read_past_the_batch_authorization(
     opts: PgPoolOptions,
@@ -3729,6 +3770,52 @@ async fn test_closing_a_withdrawal_locks_the_buyer_before_the_withdrawal(
     api.execute("ROLLBACK").await.unwrap();
     closing.await.unwrap().unwrap();
     assert_eq!(w.get_withdrawal(&unsigned.withdrawal_id).await.state(), WithdrawalState::Expired);
+}
+
+/// The API stores a deposit's signature with the buyer row locked first and
+/// the deposit row second; confirming a deposit must take them in the same
+/// order, or a late signature and the confirmation deadlock.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_confirming_a_deposit_locks_the_buyer_before_the_deposit(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    use sqlx::{Connection as _, Executor as _};
+
+    let w = world(opts, connect.clone()).await;
+    let x = w.buyer("x", 100).await;
+    let deposit = w.deposit(&x, 100, "fund-x").await;
+    let worker = w.worker();
+
+    // As the API storing a signature: the buyer row is locked.
+    let mut api = sqlx::PgConnection::connect_with(&connect).await.unwrap();
+    api.execute("BEGIN").await.unwrap();
+    sqlx::query("SELECT id FROM pay_stellar.buyers WHERE id = $1::uuid FOR UPDATE")
+        .bind(&x.id)
+        .execute(&mut api)
+        .await
+        .unwrap();
+    let confirming = tokio::spawn(async move { worker.step().await });
+    eventually("the worker waiting on a lock", || async {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&w.h.owner)
+        .await
+        .unwrap();
+        waiting >= 1
+    })
+    .await;
+    // The API then reaches the deposit row: the worker must not hold it.
+    sqlx::query("SELECT id FROM pay_stellar.deposits WHERE id = $1::uuid FOR UPDATE NOWAIT")
+        .bind(&deposit.deposit_id)
+        .execute(&mut api)
+        .await
+        .expect("the worker holds the deposit row while it waits for the buyer");
+    api.execute("ROLLBACK").await.unwrap();
+    confirming.await.unwrap().unwrap();
+    assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -4893,6 +4980,35 @@ async fn test_a_vault_withdrawal_is_cosigned_by_the_operator(
     assert!(signers.contains(&operator), "{signers:?}");
 }
 
+/// The worker returns a withdrawal's hold by whether it was signed; a signed
+/// withdrawal moved back to unsigned under the API's role would keep the
+/// amount held forever, so a stored signature is final.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_signed_withdrawal_cannot_be_unsigned(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.funded("x", 100).await;
+    let (prepared, signed) = w.prepared_withdrawal(&x, 40, "w-1").await.unwrap();
+    let held = w.submit_withdrawal(&prepared, &signed).await.unwrap();
+    assert_eq!(held.state(), WithdrawalState::Signed);
+    let error = sqlx::query(
+        "UPDATE pay_stellar.withdrawals
+         SET state = 'awaiting_signature', signed_authorization_xdr = NULL, signed_at = NULL
+         WHERE id = $1::uuid",
+    )
+    .bind(&held.withdrawal_id)
+    .execute(&w.h.api)
+    .await
+    .unwrap_err();
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().unwrap(), "23514", "{error}");
+    assert!(error.message().contains("withdrawals") && error.message().contains("already signed"));
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_withdrawal(&held.withdrawal_id).await.state(), WithdrawalState::Confirmed);
+}
+
 #[sqlx::test(migrations = "../../db/migrations")]
 async fn test_an_unlocked_exit_is_sent_for_the_buyer(
     opts: PgPoolOptions,
@@ -4917,9 +5033,25 @@ async fn test_an_unlocked_exit_is_sent_for_the_buyer(
     };
     w.settle(&w.worker()).await;
     assert_eq!(exits(&w), 0);
-    w.stellar.with(|n| n.latest += 1);
-    w.settle(&w.worker()).await;
+    // Sent, and still in flight through both rounds below.
+    w.stellar.with(|n| {
+        n.latest += 1;
+        n.drop_sends = 10;
+    });
+    w.worker().step().await.unwrap();
     assert_eq!(exits(&w), 1);
+    // A worker started afresh while it may still land does not prepare
+    // another, even with a source free to send it; rebroadcasting the same
+    // envelope is not a second exit.
+    let primary = SecretKey::from_strkey(&w.source_seed).unwrap();
+    w.worker_with_sources(vec![primary, extra_source(&w)], 100).step().await.unwrap();
+    let submissions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pay_stellar.submissions WHERE kind = 'exit'")
+            .fetch_one(&w.h.owner)
+            .await
+            .unwrap();
+    assert_eq!(submissions, 1);
+    w.stellar.with(|n| n.drop_sends = 0);
     let sent = w.stellar.with(|n| n.sent.clone());
     let exit = sent
         .iter()
@@ -4927,6 +5059,43 @@ async fn test_an_unlocked_exit_is_sent_for_the_buyer(
         .find(|(c, _, _)| c.function_name.0.as_slice() == b"exit")
         .unwrap();
     assert_eq!((exit.0.args.to_vec(), exit.1.len()), (vec![address_val(&x.key.address())], 0));
+}
+
+/// Every event up to a vault's cursor has been applied once, an exit's debit
+/// among them; a cursor moved back would apply them again, so it only moves
+/// forward, whatever writes it.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_vault_event_cursor_only_moves_forward(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let start = "0000000000000000000-0000000000";
+    let (cursor, ledger): (String, i64) =
+        sqlx::query_as("SELECT cursor, ledger FROM pay_stellar.vault_event_cursors")
+            .fetch_one(&w.h.owner)
+            .await
+            .unwrap();
+    assert!(cursor.as_str() > start && ledger > 1, "{cursor} at {ledger}");
+    let error = sqlx::query("UPDATE pay_stellar.vault_event_cursors SET cursor = $1")
+        .bind(start)
+        .execute(&w.worker_pool)
+        .await
+        .unwrap_err();
+    let error = error.as_database_error().unwrap();
+    assert_eq!(error.code().unwrap(), "23514", "{error}");
+    assert!(error.message().contains("cannot move back"), "{error}");
+    // The same row moves forward under the same role.
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET cursor = $1, ledger = ledger + 1")
+        .bind(
+            fermah_pay_stellar_chain::rpc::EventCursor::end_of_ledger(
+                u32::try_from(ledger + 1).unwrap(),
+            )
+            .to_string(),
+        )
+        .execute(&w.worker_pool)
+        .await
+        .unwrap();
 }
 
 #[sqlx::test(migrations = "../../db/migrations")]
@@ -5298,6 +5467,34 @@ async fn test_a_signed_vault_deposit_waits_while_an_upgrade_may_be_installed(
         .unwrap();
     w.settle(&w.worker()).await;
     assert_eq!(w.get_deposit(&deposit.deposit_id).await.state(), DepositState::Confirmed);
+}
+
+/// A signed mandate approves the vault to spend the buyer's wallet, so it
+/// waits like a deposit while proposed code may be installed.
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_signed_vault_mandate_waits_while_an_upgrade_may_be_installed(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = vault_world(opts, connect).await;
+    let x = w.buyer("x", 100).await;
+    let mandate = w.mandate(&x, 10, 3, "m-x").await;
+    assert_eq!(mandate.state(), MandateState::Signed);
+    let latest = w.stellar.with(|n| n.latest);
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = $1")
+        .bind(i64::from(latest) + 100)
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Signed);
+    assert!(!w.stellar.with(|n| n.state.allowances.contains_key(&x.key.address())));
+    sqlx::query("UPDATE pay_stellar.vault_event_cursors SET upgrade_pending_until = NULL")
+        .execute(&w.h.owner)
+        .await
+        .unwrap();
+    w.settle(&w.worker()).await;
+    assert_eq!(w.get_mandate(&mandate.mandate_id).await.state(), MandateState::Active);
 }
 
 /// A vault starts being read only once the node serves its instance as of
