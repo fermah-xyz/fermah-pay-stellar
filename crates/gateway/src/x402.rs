@@ -3,7 +3,8 @@
 //! Implements the `batch-settlement` scheme of x402 v2 on Stellar networks
 //! with a capital-backed commitment: a buyer's prepaid balance on the
 //! seller's ledger contract backs each per-request commitment the buyer signs
-//! with its Stellar key (SEP-53). `/verify` checks a commitment, `/settle`
+//! with its Stellar key (SEP-53) or, for a contract account, authorizes
+//! through its own `__check_auth`. `/verify` checks a commitment, `/settle`
 //! turns it into a charge (debited at once, settled on-chain in the next
 //! batch) and `/settlements/{commitment}` reports the charge and, once it has
 //! landed, its transaction. The layout of the commitment is specified in
@@ -20,16 +21,23 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use fermah_pay_stellar_chain::authorization::{
+    decode_buyer_entry, nonce_key, verify_contract_entry_call,
+};
+use fermah_pay_stellar_chain::prepaid::x402_commitment_authorization;
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::sep53;
-use fermah_pay_stellar_domain::{AccountAddress, IdempotencyKey, Network};
+use fermah_pay_stellar_chain::stellar_xdr::{
+    InvokeContractArgs, LedgerKey, SorobanAuthorizationEntry, SorobanAuthorizedFunction,
+};
+use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey, Network};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::auth::authenticate;
 use crate::ledger::store::ChargeRecord;
-use crate::ledger::{LatestLedger, LedgerApi};
+use crate::ledger::{BuyerCall, LatestLedger, LedgerApi, SimulationFailure};
 use crate::refusal::Refusal;
 use crate::scope::Scope;
 
@@ -51,6 +59,10 @@ pub mod reason {
     pub const USED: &str = "invalid_batch_settlement_stellar_commitment_used";
     pub const CONFLICT: &str = "invalid_batch_settlement_stellar_commitment_conflict";
     pub const NOT_CONFIGURED: &str = "invalid_batch_settlement_stellar_ledger_not_configured";
+    pub const ABOVE_SPENDING_LIMIT: &str = "invalid_batch_settlement_stellar_above_spending_limit";
+    pub const EXIT_REQUESTED: &str = "invalid_batch_settlement_stellar_exit_requested";
+    pub const CONTRACT_PAYER_UNSUPPORTED: &str =
+        "invalid_batch_settlement_stellar_contract_payer_unsupported";
     pub const NETWORK_UNAVAILABLE: &str = "unexpected_network_unavailable";
     pub const UNEXPECTED_VERIFY: &str = "unexpected_verify_error";
     pub const UNEXPECTED_SETTLE: &str = "unexpected_settle_error";
@@ -79,14 +91,22 @@ pub struct PaymentPayload {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitmentPayload {
-    /// The buyer's Stellar account (`G...`).
+    /// The buyer's wallet: a classic account (`G...`) or a contract account
+    /// (`C...`).
     pub payer: String,
     /// 32 random bytes, lowercase hex, unique per payment.
     pub commitment: String,
     /// Unix seconds after which the commitment may not be settled.
     pub valid_until: String,
-    /// Base64 of the 64-byte SEP-53 signature over [`commitment_message`].
-    pub signature: String,
+    /// A classic account's proof: base64 of the 64-byte SEP-53 signature over
+    /// [`commitment_message`].
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// A contract account's proof: base64 XDR of its signed authorization
+    /// entry for the commitment verifier's `commit(payer, text)`, where `text`
+    /// is [`commitment_message`].
+    #[serde(default)]
+    pub authorization_entry: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,27 +144,77 @@ pub fn commitment_message(
 /// A commitment that passed every check that does not depend on the
 /// buyer's balance or on earlier settlements.
 struct Checked {
-    payer: AccountAddress,
+    payer: ChainAddress,
     buyer_id: uuid::Uuid,
     amount: i64,
     key: IdempotencyKey,
     valid_until: i64,
+    proof: Proof,
+}
+
+/// How far the payer's proof of the commitment has been established.
+enum Proof {
+    /// A classic account's signature, verified here in full.
+    Signed,
+    /// A contract account's entry, checked here for everything but whether
+    /// the account accepts it, which only the network can say by running the
+    /// account's `__check_auth`: see [`X402::confirm`].
+    Unconfirmed(Box<(InvokeContractArgs, SorobanAuthorizationEntry)>),
+}
+
+/// What admission takes. Only [`X402::confirm`], which establishes the
+/// payer's proof, and [`Checked::retry_of`], for a commitment that already
+/// settled, make one, so no settlement reaches admission without either.
+struct Admissible {
+    buyer_id: uuid::Uuid,
+    amount: i64,
+    key: IdempotencyKey,
+}
+
+impl Checked {
+    /// A retry of a commitment that already settled as `_earlier`. It needs
+    /// no proof again: admission answers its key with that charge, or
+    /// refuses it under other terms, and never debits twice.
+    fn retry_of(self, _earlier: &ChargeRecord) -> Admissible {
+        Admissible { buyer_id: self.buyer_id, amount: self.amount, key: self.key }
+    }
 }
 
 /// Unix seconds now; commitments' windows are judged against it.
 pub type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
+/// What serving contract-account payers takes.
+pub struct ContractPayers<L> {
+    /// The commitment verifier they authorize against.
+    pub verifier: [u8; 32],
+    /// A second network node, run by someone other than the first, that must
+    /// also accept each payer's authorization. Without it, a node that lies
+    /// about a simulation could stand in for a payer's consent; with it, both
+    /// would have to.
+    pub witness: Option<L>,
+}
+
 pub struct X402<L> {
     ledger: LedgerApi<L>,
+    /// Without it, contract-account payers are refused.
+    contract_payers: Option<ContractPayers<L>>,
     clock: Clock,
 }
 
-pub fn router<L: LatestLedger + 'static>(ledger: LedgerApi<L>) -> axum::Router {
-    router_with_clock(ledger, Arc::new(|| OffsetDateTime::now_utc().unix_timestamp()))
+pub fn router<L: LatestLedger + 'static>(
+    ledger: LedgerApi<L>,
+    contract_payers: Option<ContractPayers<L>>,
+) -> axum::Router {
+    router_with_clock(
+        ledger,
+        contract_payers,
+        Arc::new(|| OffsetDateTime::now_utc().unix_timestamp()),
+    )
 }
 
 pub fn router_with_clock<L: LatestLedger + 'static>(
     ledger: LedgerApi<L>,
+    contract_payers: Option<ContractPayers<L>>,
     clock: Clock,
 ) -> axum::Router {
     axum::Router::new()
@@ -152,7 +222,7 @@ pub fn router_with_clock<L: LatestLedger + 'static>(
         .route("/verify", post(verify::<L>))
         .route("/settle", post(settle::<L>))
         .route("/settlements/{commitment}", get(settlement::<L>))
-        .with_state(Arc::new(X402 { ledger, clock }))
+        .with_state(Arc::new(X402 { ledger, contract_payers, clock }))
 }
 
 type Reply = (StatusCode, Json<Value>);
@@ -177,18 +247,17 @@ fn parse(body: &Value) -> Result<FacilitatorRequest, &'static str> {
 }
 
 async fn supported<L: LatestLedger>(State(x402): State<Arc<X402<L>>>) -> Reply {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "kinds": [{
-                "x402Version": X402_VERSION,
-                "scheme": SCHEME,
-                "network": x402.ledger.network().caip2(),
-            }],
-            "extensions": [],
-            "signers": {},
-        })),
-    )
+    let mut kind = json!({
+        "x402Version": X402_VERSION,
+        "scheme": SCHEME,
+        "network": x402.ledger.network().caip2(),
+    });
+    // Contract-account payers need the verifier's address to build what
+    // they sign.
+    if let Some(ContractPayers { verifier, .. }) = &x402.contract_payers {
+        kind["extra"] = json!({ "commitmentVerifier": stellar_strkey::Contract(*verifier).to_string().as_str() });
+    }
+    (StatusCode::OK, Json(json!({ "kinds": [kind], "extensions": [], "signers": {} })))
 }
 
 impl<L: LatestLedger> X402<L> {
@@ -239,19 +308,13 @@ impl<L: LatestLedger> X402<L> {
             .ok_or(reason::INVALID_REQUIREMENTS)?;
 
         let commitment = &payload.payload;
-        let payer: AccountAddress =
-            commitment.payer.parse().map_err(|_| reason::INVALID_PAYLOAD)?;
+        let payer: ChainAddress = commitment.payer.parse().map_err(|_| reason::INVALID_PAYLOAD)?;
         let id = decode_commitment(&commitment.commitment).ok_or(reason::INVALID_PAYLOAD)?;
         let valid_until = commitment
             .valid_until
             .parse::<i64>()
             .ok()
             .filter(|at| commitment.valid_until == at.to_string())
-            .ok_or(reason::INVALID_PAYLOAD)?;
-        let signature: [u8; 64] = STANDARD
-            .decode(&commitment.signature)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
             .ok_or(reason::INVALID_PAYLOAD)?;
         let message = commitment_message(
             network,
@@ -262,13 +325,41 @@ impl<L: LatestLedger> X402<L> {
             &commitment.commitment,
             &commitment.valid_until,
         );
-        if !sep53::verify(&payer, message.as_bytes(), &signature) {
-            return Err(reason::SIGNATURE);
-        }
+        let proof = match (&payer, &commitment.signature, &commitment.authorization_entry) {
+            (ChainAddress::Account(account), Some(signature), None) => {
+                let signature: [u8; 64] = STANDARD
+                    .decode(signature)
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(reason::INVALID_PAYLOAD)?;
+                if !sep53::verify(account, message.as_bytes(), &signature) {
+                    return Err(reason::SIGNATURE);
+                }
+                Proof::Signed
+            }
+            (ChainAddress::Contract(wallet), None, Some(entry)) => {
+                let verifier = self
+                    .contract_payers
+                    .as_ref()
+                    .map(|payers| payers.verifier)
+                    .ok_or(reason::CONTRACT_PAYER_UNSUPPORTED)?;
+                let entry = decode_buyer_entry(entry).map_err(|_| reason::INVALID_PAYLOAD)?;
+                let invocation = x402_commitment_authorization(verifier, &payer, &message);
+                verify_contract_entry_call(&entry, wallet, &invocation)
+                    .map_err(|_| reason::SIGNATURE)?;
+                let SorobanAuthorizedFunction::ContractFn(call) = invocation.function else {
+                    unreachable!("x402_commitment_authorization authorizes a contract call")
+                };
+                Proof::Unconfirmed(Box::new((call, entry)))
+            }
+            // A classic account proves with a signature and a contract account
+            // with an entry, and never both.
+            _ => return Err(reason::INVALID_PAYLOAD),
+        };
         let buyer_id = self
             .ledger
             .store()
-            .buyer_by_wallet(scope, &payer.clone().into())
+            .buyer_by_wallet(scope, &payer)
             .await
             .map_err(|error| {
                 tracing::error!(error = %error, "finding the payer");
@@ -277,7 +368,74 @@ impl<L: LatestLedger> X402<L> {
             .ok_or(reason::UNKNOWN_PAYER)?;
         let key =
             format!("x402:{}", hex_lower(&id)).parse().map_err(|_| reason::INVALID_PAYLOAD)?;
-        Ok(Checked { payer, buyer_id, amount, key, valid_until })
+        Ok(Checked { payer, buyer_id, amount, key, valid_until, proof })
+    }
+
+    /// Establishes the payer's proof and makes the commitment admissible. A
+    /// classic account's signature was verified in full by [`Self::check`].
+    /// A contract account's entry is simulated with the verifier call, so
+    /// the network runs the account's `__check_auth`, on the gateway's node
+    /// and on the witness if one is configured; each must accept it.
+    /// `unexpected` names any answer that says nothing about the account,
+    /// such as a missing verifier, so it is refused rather than taken as
+    /// consent.
+    async fn confirm(
+        &self,
+        scope: &Scope,
+        checked: Checked,
+        unexpected: &'static str,
+    ) -> Result<Admissible, &'static str> {
+        let Checked { buyer_id, amount, key, proof, .. } = checked;
+        if let Proof::Unconfirmed(unconfirmed) = proof {
+            let (call, entry) = *unconfirmed;
+            let payers = self.contract_payers.as_ref().ok_or(reason::CONTRACT_PAYER_UNSUPPORTED)?;
+            let nonce = nonce_key(&entry).ok_or(reason::INVALID_PAYLOAD)?;
+            self.consent(scope, None, &call, &entry, &nonce, unexpected).await?;
+            if let Some(witness) = &payers.witness {
+                self.consent(scope, Some(witness), &call, &entry, &nonce, unexpected).await?;
+            }
+        }
+        Ok(Admissible { buyer_id, amount, key })
+    }
+
+    /// Whether `node` (the gateway's own when `None`) accepts the payer's
+    /// `entry` for `call`. Acceptance counts only if the call consumed the
+    /// entry, writing its `nonce`: the network does so only once the call
+    /// required the payer's authorization and the account accepted it, so a
+    /// verifier that does not require it cannot stand in for consent.
+    async fn consent(
+        &self,
+        scope: &Scope,
+        node: Option<&L>,
+        call: &InvokeContractArgs,
+        entry: &SorobanAuthorizationEntry,
+        nonce: &LedgerKey,
+        unexpected: &'static str,
+    ) -> Result<(), &'static str> {
+        match self.ledger.simulate_contract_entry(scope, call.clone(), entry.clone(), node).await {
+            Ok(BuyerCall::Accepted { written, .. }) if written.contains(nonce) => Ok(()),
+            Ok(BuyerCall::Accepted { .. }) => {
+                tracing::error!(
+                    "the commitment verifier ran without requiring the payer's authorization; \
+                     check PAY_STELLAR_X402_VERIFIER_CONTRACT"
+                );
+                Err(unexpected)
+            }
+            Ok(refused) if refused.refused_authorization() => Err(reason::SIGNATURE),
+            Ok(answer) => {
+                tracing::error!(?answer, "the commitment verifier call did not run");
+                Err(unexpected)
+            }
+            Err(SimulationFailure::NotConfigured) => Err(reason::NOT_CONFIGURED),
+            Err(SimulationFailure::Store(error)) => {
+                tracing::error!(error = %error, "reading the simulation's source");
+                Err(unexpected)
+            }
+            Err(SimulationFailure::Network(error)) => {
+                tracing::warn!(error = %error, "simulating a contract account's commitment");
+                Err(reason::NETWORK_UNAVAILABLE)
+            }
+        }
     }
 }
 
@@ -352,11 +510,16 @@ async fn verify<L: LatestLedger>(
     {
         return invalid(reason, Some(&payer));
     }
-    match store.balance(&scope, checked.buyer_id).await {
-        Ok(Some(balance)) if balance.available >= checked.amount => {
+    let wallet = checked.payer.to_string();
+    let admissible = match x402.confirm(&scope, checked, reason::UNEXPECTED_VERIFY).await {
+        Ok(admissible) => admissible,
+        Err(reason) => return invalid(reason, Some(&payer)),
+    };
+    match store.balance(&scope, admissible.buyer_id).await {
+        Ok(Some(balance)) if balance.available >= admissible.amount => {
             metrics::counter!("pay_stellar_x402_total", "call" => "verify", "result" => "valid")
                 .increment(1);
-            (StatusCode::OK, Json(json!({ "isValid": true, "payer": checked.payer.as_str() })))
+            (StatusCode::OK, Json(json!({ "isValid": true, "payer": wallet })))
         }
         Ok(_) => invalid(reason::INSUFFICIENT_FUNDS, Some(&payer)),
         Err(error) => {
@@ -420,7 +583,9 @@ async fn settle<L: LatestLedger>(
         Err(reason) => return settle_failed(reason, &payer, network),
     };
     // A retried settlement is answered from the charge it created, even once
-    // the commitment's window has closed; only a new one must be in time.
+    // the commitment's window has closed or a contract account's entry has
+    // expired; only a new one must be in time and proven.
+    let wallet = checked.payer.to_string();
     let earlier = match x402.ledger.store().charge_with_key(&scope, &checked.key).await {
         Ok(earlier) => earlier,
         Err(error) => {
@@ -428,26 +593,40 @@ async fn settle<L: LatestLedger>(
             return settle_failed(reason::UNEXPECTED_SETTLE, &payer, network);
         }
     };
-    if earlier.is_none()
-        && let Err(reason) =
-            window((x402.clock)(), checked.valid_until, &request.payment_requirements)
-    {
-        return settle_failed(reason, &payer, network);
-    }
-    let (record, created) =
-        match x402.ledger.admit(&scope, checked.buyer_id, checked.amount, &checked.key).await {
-            Ok(admitted) => admitted,
-            Err(Refusal::InsufficientBalance) => {
-                return settle_failed(reason::INSUFFICIENT_FUNDS, &payer, network);
+    let admissible = match earlier {
+        Some(earlier) => checked.retry_of(&earlier),
+        None => {
+            if let Err(reason) =
+                window((x402.clock)(), checked.valid_until, &request.payment_requirements)
+            {
+                return settle_failed(reason, &payer, network);
             }
-            Err(Refusal::IdempotencyConflict) => {
-                return settle_failed(reason::CONFLICT, &payer, network);
+            match x402.confirm(&scope, checked, reason::UNEXPECTED_SETTLE).await {
+                Ok(admissible) => admissible,
+                Err(reason) => return settle_failed(reason, &payer, network),
             }
-            Err(Refusal::NetworkUnavailable) => {
-                return settle_failed(reason::NETWORK_UNAVAILABLE, &payer, network);
-            }
-            Err(_) => return settle_failed(reason::UNEXPECTED_SETTLE, &payer, network),
-        };
+        }
+    };
+    let Admissible { buyer_id, amount, key } = admissible;
+    let (record, created) = match x402.ledger.admit(&scope, buyer_id, amount, &key).await {
+        Ok(admitted) => admitted,
+        Err(Refusal::InsufficientBalance) => {
+            return settle_failed(reason::INSUFFICIENT_FUNDS, &payer, network);
+        }
+        Err(Refusal::IdempotencyConflict) => {
+            return settle_failed(reason::CONFLICT, &payer, network);
+        }
+        Err(Refusal::AboveSpendingLimit) => {
+            return settle_failed(reason::ABOVE_SPENDING_LIMIT, &payer, network);
+        }
+        Err(Refusal::ExitRequested) => {
+            return settle_failed(reason::EXIT_REQUESTED, &payer, network);
+        }
+        Err(Refusal::NetworkUnavailable) => {
+            return settle_failed(reason::NETWORK_UNAVAILABLE, &payer, network);
+        }
+        Err(_) => return settle_failed(reason::UNEXPECTED_SETTLE, &payer, network),
+    };
     let result = if created { "settled" } else { "replayed" };
     metrics::counter!("pay_stellar_x402_total", "call" => "settle", "result" => result)
         .increment(1);
@@ -455,7 +634,7 @@ async fn settle<L: LatestLedger>(
         StatusCode::OK,
         Json(json!({
             "success": true,
-            "payer": checked.payer.as_str(),
+            "payer": wallet,
             "transaction": request.payment_payload.payload.commitment,
             "network": network.caip2(),
             "amount": record.amount.to_string(),

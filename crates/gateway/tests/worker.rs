@@ -21,6 +21,7 @@ use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, Custody, MAX_CHARGE_WINDOW, Outcome, PrepaidDeployment,
+    contract_instance_key,
 };
 use fermah_pay_stellar_chain::rpc::{
     EventPage, EventsFrom, FeeDistribution, FeePercentile, FeeStats, Health, IncludedTransaction,
@@ -164,6 +165,9 @@ struct Net {
     /// leaves them unreadable, as for a contract this network does not hold.
     instance_live_until: Option<u32>,
     code_live_until: u32,
+    /// Last ledger the x402 commitment verifier's instance and code live
+    /// through; `None` leaves it unreadable.
+    verifier_live_until: Option<u32>,
     /// The next included transactions fail without effect.
     fail_inclusions: usize,
     /// `charge_batch` returns one outcome fewer than it settled.
@@ -264,6 +268,10 @@ fn extension(envelope: &TransactionEnvelope) -> Option<u32> {
 
 /// The contract's code hash in these tests.
 const WASM: [u8; 32] = [42; 32];
+
+/// The x402 commitment verifier and its code hash in these tests.
+const VERIFIER: [u8; 32] = [77; 32];
+const VERIFIER_WASM: [u8; 32] = [78; 32];
 
 /// The contract call and authorization entries of an envelope.
 fn invocation(
@@ -859,8 +867,13 @@ impl Chain for Stellar {
                 TransactionStatus::Failed(included(envelope, n.latest, false, None))
             } else if let Some(extend_to) = extension(envelope) {
                 let until = n.latest + extend_to;
-                n.instance_live_until = n.instance_live_until.map(|now| now.max(until));
-                n.code_live_until = n.code_live_until.max(until);
+                let TransactionExt::V1(data) = &inner(envelope).ext else { panic!("unassembled") };
+                if data.resources.footprint.read_only.contains(&contract_instance_key(VERIFIER)) {
+                    n.verifier_live_until = n.verifier_live_until.map(|now| now.max(until));
+                } else {
+                    n.instance_live_until = n.instance_live_until.map(|now| now.max(until));
+                    n.code_live_until = n.code_live_until.max(until);
+                }
                 TransactionStatus::Success(included(envelope, n.latest, true, None))
             } else if is_restore(envelope) {
                 let tx = inner(envelope);
@@ -1195,6 +1208,38 @@ impl Chain for Stellar {
                 live_until_ledger: None,
             })
         };
+        let verifier_until = self.with(|n| n.verifier_live_until);
+        let verifier_instance = contract_instance_key(VERIFIER);
+        let verifier_code =
+            LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(VERIFIER_WASM) });
+        let verifier_entry = |key: &LedgerKey| {
+            let until = verifier_until?;
+            if *key == verifier_instance {
+                let mut record = contract_data(
+                    key,
+                    ScVal::ContractInstance(ScContractInstance {
+                        executable: ContractExecutable::Wasm(Hash(VERIFIER_WASM)),
+                        storage: None,
+                    }),
+                );
+                record.live_until_ledger = Some(until);
+                Some(record)
+            } else if *key == verifier_code {
+                Some(LedgerEntryRecord {
+                    key: key.clone(),
+                    data: LedgerEntryData::ContractCode(ContractCodeEntry {
+                        ext: ContractCodeEntryExt::V0,
+                        hash: Hash(VERIFIER_WASM),
+                        code: BytesM::default(),
+                    }),
+                    ext: LedgerEntryExt::V0,
+                    last_modified_ledger: 1,
+                    live_until_ledger: Some(until),
+                })
+            } else {
+                None
+            }
+        };
         Ok(LedgerEntries {
             entries: keys
                 .iter()
@@ -1202,6 +1247,7 @@ impl Chain for Stellar {
                     account(key)
                         .or_else(|| trustline(key))
                         .or_else(|| contract_entry(key))
+                        .or_else(|| verifier_entry(key))
                         .or_else(|| existing.get(key).map(|val| contract_data(key, val.clone())))
                 })
                 .collect(),
@@ -1368,6 +1414,7 @@ async fn world_of(
             fee_balance: 100_000_000_000,
             instance_live_until: None,
             code_live_until: 0,
+            verifier_live_until: None,
             fail_inclusions: 0,
             truncate_outcomes: false,
             skip_records: false,
@@ -2667,6 +2714,41 @@ async fn test_an_idle_contract_is_extended_before_it_could_be_archived(
     // Extended, it is left alone at the next check.
     w.clock.advance(TTL_CHECK_EVERY);
     worker.step().await.unwrap();
+    assert_eq!(extensions_sent(&w).len(), 1);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_the_x402_verifier_is_extended_before_it_could_be_archived(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    let worker = w.worker().with_x402_verifier(Some(VERIFIER));
+    let latest = w.stellar.with(|n| n.latest);
+    // The served contract has plenty of life left: only the verifier counts.
+    w.stellar.with(|n| {
+        n.instance_live_until = Some(latest + TTL_EXTEND_TO);
+        n.code_live_until = latest + TTL_EXTEND_TO;
+    });
+
+    // The positive control: exactly at the threshold, nothing is sent.
+    w.stellar.with(|n| n.verifier_live_until = Some(latest + TTL_THRESHOLD));
+    worker.step().await.unwrap();
+    assert!(extensions_sent(&w).is_empty());
+
+    w.stellar.with(|n| n.verifier_live_until = Some(latest + TTL_THRESHOLD - 1));
+    w.clock.advance(TTL_CHECK_EVERY);
+    worker.step().await.unwrap();
+    let sent = extensions_sent(&w);
+    assert_eq!(sent.len(), 1);
+    let code = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(VERIFIER_WASM) });
+    assert!(sent[0].contains(&contract_instance_key(VERIFIER)) && sent[0].contains(&code));
+    assert_eq!(w.stellar.with(|n| n.verifier_live_until), Some(latest + TTL_EXTEND_TO));
+
+    // A worker not configured with the verifier leaves it alone.
+    w.stellar.with(|n| n.verifier_live_until = Some(latest + 1));
+    w.clock.advance(TTL_CHECK_EVERY);
+    w.worker().step().await.unwrap();
     assert_eq!(extensions_sent(&w).len(), 1);
 }
 

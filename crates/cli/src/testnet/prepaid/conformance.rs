@@ -21,7 +21,7 @@ use tonic::transport::Channel;
 use super::e2e::{FundedBuyer, Stack, authed, until};
 use super::{CHANNEL, Context, unix_now};
 use crate::testnet::evidence;
-use crate::x402_conformance::{Target, run};
+use crate::x402_conformance::{Buyer, Target, run};
 
 /// The buyer's deposit: 0.1 USDC, the contract's minimum on testnet, enough
 /// for the few payments of 0.005 USDC the harness makes.
@@ -116,7 +116,7 @@ impl Context {
             asset: usdc::contract_strkey(stack.pinned.usdc),
             settlement_timeout: std::time::Duration::from_secs(300),
         };
-        let mut record = run(&target, &buyer, &self.rpc).await?;
+        let mut record = run(&target, &Buyer::Account(buyer), &self.rpc).await?;
         // The interface ran on this machine for the run; the address it
         // listened on says nothing about the deployment.
         record["endpoint"] = serde_json::json!("in-process gateway");

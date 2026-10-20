@@ -5,6 +5,7 @@ use fermah_pay_stellar_gateway::config::Config;
 use fermah_pay_stellar_gateway::ledger::{LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve, serve_x402};
 use fermah_pay_stellar_gateway::store::{Quotas, Store};
+use fermah_pay_stellar_gateway::x402::ContractPayers;
 use fermah_pay_stellar_gateway::{shutdown, startup, telemetry};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -23,6 +24,21 @@ async fn main() -> anyhow::Result<()> {
     let rpc =
         RpcClient::new(&config.rpc_url, config.rpc_timeout()).context("building RPC client")?;
     startup::verify_rpc(&rpc, config.network).await.context("checking the RPC network")?;
+    let witness = match &config.x402_witness_rpc_url {
+        Some(url) => {
+            anyhow::ensure!(
+                *url != config.rpc_url,
+                "PAY_STELLAR_X402_WITNESS_RPC_URL must be another node than PAY_STELLAR_RPC_URL"
+            );
+            let witness = RpcClient::new(url, config.rpc_timeout())
+                .context("building the witness RPC client")?;
+            startup::verify_rpc(&witness, config.network)
+                .await
+                .context("checking the witness RPC network")?;
+            Some(witness)
+        }
+        None => None,
+    };
     let store = Store::new(pool).with_quotas(Quotas {
         buyers_per_deployment: config.max_new_buyers_per_day,
         deposits_per_buyer: config.max_deposits_per_buyer_per_day,
@@ -83,8 +99,13 @@ async fn main() -> anyhow::Result<()> {
                 TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
             tracing::info!(x402_listen_addr = %addr, "x402 interface serving");
             let ledger = ledger.clone();
+            let contract_payers = config
+                .x402_verifier_contract
+                .map(|verifier| ContractPayers { verifier, witness: witness.clone() });
             let stopped = until_stopped(stopped.clone());
-            Some(tokio::spawn(async move { serve_x402(listener, ledger, limits, stopped).await }))
+            Some(tokio::spawn(async move {
+                serve_x402(listener, ledger, contract_payers, limits, stopped).await
+            }))
         }
         None => None,
     };

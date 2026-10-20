@@ -46,6 +46,7 @@ pub use drill::{Stack as DrillStack, Vector as DrillVector};
 mod load;
 mod recurring;
 mod vault;
+mod x402_verifier;
 
 pub use load::LoadShape;
 

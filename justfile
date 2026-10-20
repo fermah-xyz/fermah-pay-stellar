@@ -46,6 +46,11 @@ contract-build:
     {{stellar_cli}} contract build --package fermah-pay-stellar-prepaid --profile contract --locked --out-dir {{contract_out}}
     {{stellar_cli}} contract build --package fermah-pay-stellar-vault --profile contract --locked --out-dir {{contract_out}}
 
+# Build the x402 commitment verifier's Wasm, which contract-account buyers
+# authorize x402 commitments against.
+x402-verifier-build:
+    {{stellar_cli}} contract build --package fermah-pay-stellar-x402-verifier --profile contract --locked --out-dir {{contract_out}}
+
 # Build the example contract account's Wasm, a stand-in smart wallet.
 example-account-build:
     {{stellar_cli}} contract build --package fermah-pay-stellar-example-account --profile contract --locked --out-dir {{contract_out}}

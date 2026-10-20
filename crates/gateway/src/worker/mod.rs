@@ -25,7 +25,7 @@ use fermah_pay_stellar_chain::authorization::{AuthorizationError, sign_entry_wit
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{
     CHARGE_RECORD_GRACE, ChargeRequest, Custody, DepositIntent, MAX_BATCH, Outcome,
-    PrepaidDeployment, batch_outcomes, charge_record, instance_wasm,
+    PrepaidDeployment, batch_outcomes, charge_record, contract_instance_key, instance_wasm,
 };
 use fermah_pay_stellar_chain::reserve::spendable_stroops;
 use fermah_pay_stellar_chain::rpc::RpcError;
@@ -135,6 +135,10 @@ pub struct Worker<C, K> {
     buyer_restores: Mutex<HashMap<Uuid, (u32, OffsetDateTime)>>,
     /// When the contracts' remaining life was last read.
     ttl_checked_at: Mutex<Option<OffsetDateTime>>,
+    /// The x402 commitment verifier the gateways are configured with. It
+    /// holds no state any deployment's activity extends, so it is kept alive
+    /// here like the ledger contracts.
+    x402_verifier: Option<[u8; 32]>,
     /// The network's base reserve and when it was read. It changes only by
     /// a network vote, and reading it fetches a whole ledger's metadata.
     base_reserve: Mutex<Option<(OffsetDateTime, u32)>>,
@@ -175,6 +179,14 @@ fn deployment(
 
 fn hash32(bytes: Vec<u8>) -> Result<[u8; 32], WorkerError> {
     <[u8; 32]>::try_from(bytes).map_err(|_| WorkerError::Corrupt("identifier is not 32 bytes"))
+}
+
+/// What a life check of one contract did.
+enum Extension {
+    Sent(Uuid),
+    NotNeeded,
+    /// No source account was free to send it; the next check tries again.
+    Busy,
 }
 
 /// What a final submission means for one charge it carried.
@@ -258,8 +270,17 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             set_aside: Mutex::new(HashMap::new()),
             buyer_restores: Mutex::new(HashMap::new()),
             ttl_checked_at: Mutex::new(None),
+            x402_verifier: None,
             base_reserve: Mutex::new(None),
         }
+    }
+
+    /// Keeps the x402 commitment verifier `verifier` alive along with the
+    /// ledger contracts.
+    #[must_use]
+    pub fn with_x402_verifier(mut self, verifier: Option<[u8; 32]>) -> Self {
+        self.x402_verifier = verifier;
+        self
     }
 
     /// Signs withdrawals with `treasury`, for the deployments whose
@@ -474,6 +495,13 @@ impl<C: Chain, K: Clock> Worker<C, K> {
         .map_err(store("read served contracts"))?;
         let chain = self.engine.chain();
         let mut sent = Vec::new();
+        if let Some(verifier) = self.x402_verifier {
+            match self.keep_verifier_alive(verifier).await? {
+                Extension::Sent(id) => sent.push(id),
+                Extension::NotNeeded => {}
+                Extension::Busy => return Ok(sent),
+            }
+        }
         for contract in contracts {
             if sent.len() >= room {
                 break;
@@ -552,6 +580,66 @@ impl<C: Chain, K: Clock> Worker<C, K> {
             sent.push(prepared.id);
         }
         Ok(sent)
+    }
+
+    /// Extends the x402 commitment verifier's instance and code when either
+    /// has fewer than the threshold's ledgers left. A verifier that cannot
+    /// be read is skipped with a warning: the gateway refuses contract
+    /// payers while it is unavailable, and the next check tries again.
+    async fn keep_verifier_alive(&self, verifier: [u8; 32]) -> Result<Extension, WorkerError> {
+        let chain = self.engine.chain();
+        let instance_key = contract_instance_key(verifier);
+        let instance = chain
+            .ledger_entries(std::slice::from_ref(&instance_key))
+            .await
+            .map_err(WorkerError::Chain)?;
+        let Some(wasm) = instance.entries.first().and_then(|entry| instance_wasm(&entry.data))
+        else {
+            tracing::warn!("the x402 commitment verifier cannot be read; skipping its life check");
+            return Ok(Extension::NotNeeded);
+        };
+        let code_key = LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(wasm) });
+        let keys = vec![instance_key.clone(), code_key.clone()];
+        let read = chain.ledger_entries(&keys).await.map_err(WorkerError::Chain)?;
+        let mut shortest = u32::MAX;
+        for entry in &read.entries {
+            let left =
+                entry.live_until_ledger.map_or(0, |until| until.saturating_sub(read.latest_ledger));
+            let part = if entry.key == code_key { "code" } else { "instance" };
+            metrics::gauge!(
+                "pay_stellar_contract_ttl_ledgers",
+                "deployment" => "x402-verifier",
+                "entry" => part
+            )
+            .set(f64::from(left));
+            shortest = shortest.min(left);
+        }
+        let has = |key: &LedgerKey| read.entries.iter().any(|entry| entry.key == *key);
+        if !has(&instance_key) || !has(&code_key) || shortest >= self.settings.ttl_threshold_ledgers
+        {
+            return Ok(Extension::NotNeeded);
+        }
+        let prepared =
+            match self.engine.prepare_extend(keys, self.settings.ttl_extend_to_ledgers).await {
+                Ok(prepared) => prepared,
+                Err(EngineError::SourceBusy { .. } | EngineError::NoFreeSource) => {
+                    return Ok(Extension::Busy);
+                }
+                Err(error) => return Err(error.into()),
+            };
+        let mut conn = self.pool.acquire().await.map_err(store("acquire connection"))?;
+        match self.engine.record(&mut conn, &prepared).await {
+            Ok(_) => {}
+            Err(EngineError::SourceBusy { .. }) => return Ok(Extension::Busy),
+            Err(error) => return Err(error.into()),
+        }
+        tracing::info!(
+            ledgers_left = shortest,
+            extend_to = self.settings.ttl_extend_to_ledgers,
+            submission_id = %prepared.id,
+            "extending the x402 commitment verifier's life"
+        );
+        Ok(Extension::Sent(prepared.id))
     }
 
     /// Charges waiting for a batch, and signed withdrawals waiting to be

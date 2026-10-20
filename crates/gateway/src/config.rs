@@ -31,6 +31,20 @@ pub struct Config {
     #[arg(long, env = "PAY_STELLAR_X402_LISTEN_ADDR")]
     pub x402_listen_addr: Option<SocketAddr>,
 
+    /// The x402 commitment verifier contract (`C...`), deployed from
+    /// `contracts/x402-verifier`, that contract-account buyers authorize
+    /// their commitments against. Without it, x402 serves classic accounts
+    /// only.
+    #[arg(long, env = "PAY_STELLAR_X402_VERIFIER_CONTRACT", value_parser = contract_id)]
+    pub x402_verifier_contract: Option<[u8; 32]>,
+
+    /// A second Stellar RPC endpoint of `network`, run by another provider
+    /// than `PAY_STELLAR_RPC_URL`, that must also accept each
+    /// contract-account payer's x402 authorization. Without it, the
+    /// gateway's own node alone vouches for those payers' consent.
+    #[arg(long, env = "PAY_STELLAR_X402_WITNESS_RPC_URL", requires = "x402_verifier_contract")]
+    pub x402_witness_rpc_url: Option<String>,
+
     /// The one Stellar network this process serves (`stellar:testnet`,
     /// `stellar:pubnet`, or `stellar:local` for a standalone development
     /// network). Keys and deployments of the other network are
@@ -154,4 +168,10 @@ impl Config {
     pub const fn rpc_timeout(&self) -> Duration {
         Duration::from_secs(self.rpc_timeout_secs)
     }
+}
+
+fn contract_id(raw: &str) -> Result<[u8; 32], String> {
+    stellar_strkey::Contract::from_string(raw)
+        .map(|contract| contract.0)
+        .map_err(|_| format!("{raw} is not a contract address (C...)"))
 }

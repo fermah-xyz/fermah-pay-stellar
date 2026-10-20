@@ -124,6 +124,10 @@ struct Config {
     /// Ledgers of life an extension gives them (about 30 days).
     #[arg(long, env = "PAY_STELLAR_TTL_EXTEND_TO_LEDGERS", default_value = "518400")]
     ttl_extend_to_ledgers: u32,
+    /// The x402 commitment verifier (`C...`) the gateways are configured
+    /// with, whose instance and code are extended like a served contract's.
+    #[arg(long, env = "PAY_STELLAR_X402_VERIFIER_CONTRACT", value_parser = contract_id)]
+    x402_verifier_contract: Option<[u8; 32]>,
     /// Seconds between reads of the contracts' remaining life.
     #[arg(long, env = "PAY_STELLAR_TTL_CHECK_SECS", default_value = "600")]
     ttl_check_secs: u64,
@@ -252,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(reserve) = reserve {
         worker = worker.with_reserve(reserve);
     }
+    worker = worker.with_x402_verifier(config.x402_verifier_contract);
     lease::lead(&lease, "worker", shutdown::signal(), |stop| {
         worker.run(
             Duration::from_millis(config.busy_poll_millis),
@@ -262,4 +267,10 @@ async fn main() -> anyhow::Result<()> {
     .await;
     tracing::info!("worker stopped");
     Ok(())
+}
+
+fn contract_id(raw: &str) -> Result<[u8; 32], String> {
+    stellar_strkey::Contract::from_string(raw)
+        .map(|contract| contract.0)
+        .map_err(|_| format!("{raw} is not a contract address (C...)"))
 }

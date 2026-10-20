@@ -187,10 +187,19 @@ enum Command {
         #[arg(long, env = "PAY_STELLAR_E2E_DATABASE_URL", hide_env_values = true)]
         database_url: String,
     },
+    /// Deploy the x402 commitment verifier (WASM, the
+    /// `contracts/x402-verifier` build) unless it is already at its
+    /// address, and record it in the profile: the gateways this tool runs
+    /// then accept contract-account payers on x402.
+    DeployX402Verifier {
+        #[arg(long)]
+        wasm: PathBuf,
+    },
     /// A buyer whose wallet is a contract account: deploy the example
     /// account (WASM), fund it with Circle USDC, then register it, deposit,
     /// charge and withdraw through the gateway API run in this process on
-    /// DATABASE_URL. Writes a `contract-account-buyer` record.
+    /// DATABASE_URL, and, with a recorded x402 verifier, pay through the x402
+    /// conformance harness. Writes a `contract-account-buyer` record.
     ContractAccountBuyer {
         #[arg(long)]
         wasm: PathBuf,
@@ -359,6 +368,11 @@ async fn main() -> anyhow::Result<()> {
         Command::EndToEnd { database_url } => context()?.end_to_end(&database_url).await?,
         Command::RecurringEndToEnd { database_url } => {
             context()?.recurring_end_to_end(&database_url).await?;
+        }
+        Command::DeployX402Verifier { wasm } => {
+            let code =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            context()?.deploy_x402_verifier(&code).await?;
         }
         Command::ContractAccountBuyer { wasm, database_url } => {
             let code =

@@ -36,7 +36,7 @@ use fermah_pay_stellar_gateway::submission::{
     Engine, FeePolicy, Keys, Policy as EnginePolicy, SystemClock,
 };
 use fermah_pay_stellar_gateway::worker::{Settings, Worker};
-use fermah_pay_stellar_gateway::x402::commitment_message;
+use fermah_pay_stellar_gateway::x402::{ContractPayers, commitment_message};
 use fermah_pay_stellar_proto::v1::buyer_service_client::BuyerServiceClient;
 use fermah_pay_stellar_proto::v1::ledger_service_client::LedgerServiceClient;
 use fermah_pay_stellar_proto::v1::{
@@ -302,9 +302,22 @@ impl Context {
         let x402_listener = TcpListener::bind("127.0.0.1:0").await?;
         let x402_addr = x402_listener.local_addr()?;
         let mut x402_stop = stopped.clone();
-        let x402 = tokio::spawn(serve_x402(x402_listener, ledger.clone(), limits, async move {
-            let _ = x402_stop.wait_for(|stop| *stop).await;
-        }));
+        let contract_payers = match self.profile.x402_verifier()? {
+            Some(recorded) => Some(ContractPayers {
+                verifier: super::contract_bytes(&recorded.contract)?,
+                witness: None,
+            }),
+            None => None,
+        };
+        let x402 = tokio::spawn(serve_x402(
+            x402_listener,
+            ledger.clone(),
+            contract_payers,
+            limits,
+            async move {
+                let _ = x402_stop.wait_for(|stop| *stop).await;
+            },
+        ));
         let gateway =
             tokio::spawn(serve(listener, store, self.network, ledger, limits, async move {
                 let _ = gateway_stop.wait_for(|stop| *stop).await;

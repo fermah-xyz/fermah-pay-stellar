@@ -63,7 +63,8 @@ The operator key moves no USDC out of the treasury (that needs the treasury's ke
 
 **Can.** Spend the buyer's own credit at the seller: sign x402 commitments
 and authorize deposits, withdrawals and mandates; move the USDC in the
-buyer's wallet, which the key controls anyway.
+buyer's wallet, which the key controls anyway. For a contract account, the
+same holds of whatever its `__check_auth` accepts.
 
 **Stopped by.**
 - A withdrawal needs the treasury's signature too. The worker gives it only to withdrawals prepared through the seller's API, which needs the seller deployment's API key.
@@ -90,7 +91,7 @@ then refuse it once the transaction is sent.
 - At most two restores per buyer request: a wallet whose own state keeps needing restores gets two, and its request then lapses unsent.
 - An entry is accepted only after the network runs it in simulation, and the worker simulates again before sending.
 - Deposits and withdrawals count against the same per-buyer and per-deployment quotas and fee-account floor as any other.
-- Mandates and x402 do not accept contract accounts.
+- Mandates do not accept contract accounts. A contract account's x402 commitment is only simulated, never sent, so it costs the operator no fee.
 
 **Seen.** `PayStellarFeeBurnHigh`, `PayStellarSubmissionsNotLanding`, and
 fees by kind on the dashboard.
@@ -145,7 +146,7 @@ archived entry must be restored before use.
 
 **Stopped by.**
 - Every write extends what it touches to about 30 days once fewer than about 7 remain.
-- The worker extends the contract's instance and code before they could expire.
+- The worker extends the contract's instance and code before they could expire, and the x402 commitment verifier's when it is configured with it. Until a verifier that was archived anyway is restored, contract-account x402 payers are refused.
 - An archived buyer account or mandate is restored by the network inside the next call that touches it, or the worker sends the restore ([settlement](../architecture/transactions.md#settlement)).
 - Charge records and approvals are temporary by design and need no extension.
 
@@ -182,7 +183,7 @@ costs a fee whatever its amount.
 | Admin keys | pause, change limits, rotate roles, replace the code | two of three keys for any change ([keys](../self-hosting/keys.md)) | `admin_change`, `role_changed` (`PayStellarWarningFinding`), `PayStellarContractCodeChanged`, `code_changed` |
 | Seller API key | admit charges against the deployment's buyers' credit | the buyers' balances, the contract's daily limits, scope to one deployment | `PayStellarChargeVolumeUnusual` |
 | Fee account key | spend its XLM | holds only XLM for fees; signs only fee bumps | `PayStellarFeeAccountLow` |
-| RPC node | answer stale or wrong data, or stop answering | decisions only from ledgers the node reports, absence only after authorizations lapse, independent reads by the observer | `event_gap`, `PayStellarObserverLagging`, `PayStellarNodeStalled`, `PayStellarObserverStalled` |
+| RPC node | answer stale or wrong data, or stop answering; for x402, report a contract account's authorization as accepted when it is not | decisions only from ledgers the node reports, absence only after authorizations lapse, independent reads by the observer; for x402, a second node of another provider (`PAY_STELLAR_X402_WITNESS_RPC_URL`) must accept each contract account's authorization too | `event_gap`, `PayStellarObserverLagging`, `PayStellarNodeStalled`, `PayStellarObserverStalled`; a charge admitted on a forged x402 authorization is in the gateway's records, so the observer does not see it |
 | Database role | change rows its grants allow | the narrowest grants per process, final states that cannot be left, append-only audit tables ([database](../self-hosting/database.md)) | reconciliation findings against the contract |
 
 ## The vault

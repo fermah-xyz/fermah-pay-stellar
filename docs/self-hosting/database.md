@@ -74,6 +74,8 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_NETWORK` | `stellar:testnet`, `stellar:pubnet`, or `stellar:local` for a standalone development network |
 | Gateway | `PAY_STELLAR_LISTEN_ADDR` | listen address, default `127.0.0.1:50051` |
 | Gateway | `PAY_STELLAR_X402_LISTEN_ADDR` | listen address of the [x402 facilitator interface](../api/x402.md) (HTTP); not served when unset |
+| Gateway | `PAY_STELLAR_X402_VERIFIER_CONTRACT` | the [x402 commitment verifier](../api/x402.md#contract-account-payers) (`C...`) contract-account buyers authorize against; without it, x402 serves classic accounts only |
+| Gateway | `PAY_STELLAR_X402_WITNESS_RPC_URL` | a second Stellar RPC endpoint, run by another provider than `PAY_STELLAR_RPC_URL`, that must also accept each contract-account payer's x402 authorization; needs `PAY_STELLAR_X402_VERIFIER_CONTRACT`. Without it, the gateway's own node alone vouches for those payers' consent |
 | Gateway | `PAY_STELLAR_DATABASE_MAX_CONNECTIONS` | pool size, default 16, must be at least 1 |
 | Gateway | `PAY_STELLAR_MAX_CONCURRENT_REQUESTS` | requests processed at once across all connections, default 64; the rest wait |
 | Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |
@@ -98,6 +100,7 @@ must not be able to issue keys.
 | Worker | `PAY_STELLAR_COLD_RESERVE`, `PAY_STELLAR_HOT_TREASURY_FLOOR`, `…_TARGET`, `…_CEILING` | optional [cold reserve](treasury.md): the treasury's USDC above the ceiling is swept there, down to the target; below the floor it needs topping up. Needs the treasury key |
 | Worker | `PAY_STELLAR_FEE_FLOOR_STROOPS` | spendable XLM, in stroops, below which the fee account pays only for finishing work in flight; default `100000000` (10 XLM) |
 | Worker | `PAY_STELLAR_TTL_THRESHOLD_LEDGERS`, `PAY_STELLAR_TTL_EXTEND_TO_LEDGERS`, `PAY_STELLAR_TTL_CHECK_SECS` | a served contract's instance and code are extended to `…EXTEND_TO…` ledgers of life (default 518400, about 30 days) once fewer than `…THRESHOLD…` remain (default 120960, about 7 days), checked every `…CHECK_SECS…` (default 600) |
+| Worker | `PAY_STELLAR_X402_VERIFIER_CONTRACT` | the x402 commitment verifier the gateway is configured with; its instance and code are kept alive like a served contract's |
 | Worker | `PAY_STELLAR_TRANSACTION_VALIDITY_SECS` | a transaction's inclusion window, default 60 |
 | Worker | `PAY_STELLAR_MAX_CLOCK_SKEW_SECS` | largest difference between the host clock and the latest ledger's close time at which transactions are still built, default 20; must be below the validity |
 | Worker | `PAY_STELLAR_INCLUSION_FEE` | lowest inclusion bid per operation, in stroops, default 10000; at least 100 |

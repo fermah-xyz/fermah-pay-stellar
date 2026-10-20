@@ -61,8 +61,9 @@ signing it directly works with any Ed25519 signer.
 
 A buyer's wallet may be a contract account, such as a smart wallet, that
 authorizes through its own `__check_auth`. Deposits, charges and
-withdrawals work as for a classic account; mandates and x402 do not (see
-[recurring charges](recurring.md) and [x402](x402.md)).
+withdrawals work as for a classic account, and x402 commitments are paid
+through a [commitment verifier](x402.md#contract-account-payers); mandates
+do not (see [recurring charges](recurring.md)).
 
 The wallet signs `signature_payload` and puts its credential in the entry's
 `signature`, in whatever form its `__check_auth` takes; for a wallet

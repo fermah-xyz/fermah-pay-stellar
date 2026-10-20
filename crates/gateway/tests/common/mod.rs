@@ -17,6 +17,7 @@ use fermah_pay_stellar_gateway::issuance;
 use fermah_pay_stellar_gateway::ledger::{BuyerCall, LatestLedger, LedgerApi, LedgerPolicy};
 use fermah_pay_stellar_gateway::server::{ServerLimits, serve};
 use fermah_pay_stellar_gateway::store::{Quotas, Store};
+use fermah_pay_stellar_gateway::x402::ContractPayers;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Executor, PgPool};
 use tokio::net::TcpListener;
@@ -28,6 +29,9 @@ pub const AUTHORIZATION_VALIDITY_LEDGERS: u32 = 720;
 pub const CHARGE_VALIDITY_LEDGERS: u32 = 720;
 pub const MIN_MANDATE_PERIOD_SECS: u64 = 60;
 pub const MAX_MANDATE_LEDGERS: u32 = 3_000_000;
+/// The x402 commitment verifier the harness's x402 interface is configured
+/// with.
+pub const X402_VERIFIER: [u8; 32] = [42; 32];
 
 /// The latest ledger the API sees (0 makes every read fail), and the
 /// network's answer to a contract account's authorization.
@@ -36,15 +40,32 @@ pub struct Ledger(Arc<AtomicU32>, Arc<Mutex<Simulations>>);
 
 /// Calls simulated for contract accounts, and how the network answers.
 pub struct Simulations {
-    /// The network's answer to every call.
+    /// The network's answer to every call. An accepted call writes the
+    /// nonce of each entry it carried, as the network does once the call
+    /// requires and accepts it, unless `consumes_authorization` is off.
     pub answer: BuyerCall,
+    /// Off, an accepted call writes no nonce: a contract that never required
+    /// the entries' authorization.
+    pub consumes_authorization: bool,
+    /// The network cannot be reached for a simulation.
+    pub unreachable: bool,
     pub seen: Vec<(AccountAddress, InvokeContractArgs, Vec<SorobanAuthorizationEntry>)>,
 }
 
 impl Default for Simulations {
     fn default() -> Self {
-        Self { answer: BuyerCall::Accepted { resource_fee: 1_000 }, seen: Vec::new() }
+        Self {
+            answer: accepted(1_000),
+            consumes_authorization: true,
+            unreachable: false,
+            seen: Vec::new(),
+        }
     }
+}
+
+/// The network accepts the call at `resource_fee`.
+pub fn accepted(resource_fee: i64) -> BuyerCall {
+    BuyerCall::Accepted { resource_fee, written: Vec::new() }
 }
 
 impl Ledger {
@@ -84,8 +105,25 @@ impl LatestLedger for Ledger {
         auth: Vec<SorobanAuthorizationEntry>,
     ) -> Result<BuyerCall, RpcError> {
         let mut simulations = self.simulations();
+        if simulations.unreachable {
+            return Err(RpcError::Server {
+                method: "simulateTransaction",
+                code: -1,
+                message: "unreachable".to_owned(),
+            });
+        }
+        let written: Vec<_> = if simulations.consumes_authorization {
+            auth.iter().filter_map(fermah_pay_stellar_chain::authorization::nonce_key).collect()
+        } else {
+            Vec::new()
+        };
         simulations.seen.push((source.clone(), call, auth));
-        Ok(simulations.answer.clone())
+        Ok(match simulations.answer.clone() {
+            BuyerCall::Accepted { resource_fee, .. } => {
+                BuyerCall::Accepted { resource_fee, written }
+            }
+            other => other,
+        })
     }
 }
 
@@ -94,12 +132,18 @@ pub struct Harness {
     /// The x402 interface over the same store and network view, called in
     /// process.
     pub x402: axum::Router,
+    /// The same interface configured without a commitment verifier, as a
+    /// gateway that serves classic accounts only.
+    pub x402_classic_only: axum::Router,
     /// What the x402 interface reads as the current unix time.
     pub now: Arc<std::sync::atomic::AtomicI64>,
     pub owner: PgPool,
     pub api: PgPool,
     pub issuer: PgPool,
     pub ledger: Ledger,
+    /// The second node the x402 interface asks about contract-account
+    /// payers.
+    pub witness: Ledger,
     _shutdown: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -126,10 +170,18 @@ pub async fn pool_as(
         .unwrap()
 }
 
+/// Starts the API on a network stub at ledger 1000, with a second stub as
+/// the x402 interface's witness for contract-account payers.
 pub async fn start(opts: PgPoolOptions, connect: PgConnectOptions, network: Network) -> Harness {
     let ledger = Ledger::default();
     ledger.set(1_000);
-    start_with(opts, connect, network, ledger.clone(), ledger).await
+    let witness = Ledger::default();
+    witness.set(1_000);
+    let quotas = Quotas { min_withdrawal: 1, ..Quotas::default() };
+    let api_ledger = ledger.clone();
+    let with_witness = Some(witness.clone());
+    start_inner(opts, connect, network, api_ledger, ledger, quotas, false, with_witness, witness)
+        .await
 }
 
 /// Starts the API with `api_ledger` as its view of the latest ledger;
@@ -170,6 +222,35 @@ pub async fn start_with_options<L: LatestLedger>(
     quotas: Quotas,
     other_destinations: bool,
 ) -> Harness {
+    let unused = Ledger::default();
+    start_inner(
+        opts,
+        connect,
+        network,
+        api_ledger,
+        ledger,
+        quotas,
+        other_destinations,
+        None,
+        unused,
+    )
+    .await
+}
+
+/// As [`start_with_options`], with `witness` as the x402 interface's second
+/// node for contract-account payers, exposed to tests as `witness_handle`.
+#[allow(clippy::too_many_arguments)]
+async fn start_inner<L: LatestLedger>(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+    network: Network,
+    api_ledger: L,
+    ledger: Ledger,
+    quotas: Quotas,
+    other_destinations: bool,
+    witness: Option<L>,
+    witness_handle: Ledger,
+) -> Harness {
     let owner = opts.max_connections(1).connect_with(connect.clone()).await.unwrap();
     let api = pool_as(&connect, "SET ROLE pay_stellar_api", 3).await;
     let issuer = pool_as(&connect, "SET ROLE pay_stellar_issuer", 1).await;
@@ -200,12 +281,30 @@ pub async fn start_with_options<L: LatestLedger>(
     let clock = Arc::clone(&now);
     let x402 = fermah_pay_stellar_gateway::x402::router_with_clock(
         ledger_api.clone(),
+        Some(ContractPayers { verifier: X402_VERIFIER, witness }),
+        Arc::new(move || clock.load(Ordering::SeqCst)),
+    );
+    let clock = Arc::clone(&now);
+    let x402_classic_only = fermah_pay_stellar_gateway::x402::router_with_clock(
+        ledger_api.clone(),
+        None,
         Arc::new(move || clock.load(Ordering::SeqCst)),
     );
     tokio::spawn(serve(listener, store, network, ledger_api, limits, async {
         let _ = stop.await;
     }));
-    Harness { addr, x402, now, owner, api, issuer, ledger, _shutdown: shutdown }
+    Harness {
+        addr,
+        x402,
+        x402_classic_only,
+        now,
+        owner,
+        api,
+        issuer,
+        ledger,
+        witness: witness_handle,
+        _shutdown: shutdown,
+    }
 }
 
 pub struct Tenant {
