@@ -11,12 +11,17 @@ use std::sync::atomic::Ordering;
 
 use axum::body::Body;
 use common::{Harness, Tenant, X402_VERIFIER, authed, start};
+use fermah_pay_stellar_chain::authorization::signature_payload;
 use fermah_pay_stellar_chain::keys::SecretKey;
-use fermah_pay_stellar_chain::prepaid::{x402_commitment_call, x402_commitment_entry};
+use fermah_pay_stellar_chain::network_id;
+use fermah_pay_stellar_chain::prepaid::{
+    x402_commitment_authorization, x402_commitment_call, x402_commitment_entry,
+};
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::sep53;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    BytesM, Limits, ScBytes, ScVal, SorobanAuthorizationEntry, SorobanCredentials, VecM, WriteXdr,
+    BytesM, Limits, ReadXdr, ScBytes, ScVal, SorobanAuthorizationEntry, SorobanCredentials, VecM,
+    WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::ScAddressOf;
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, contract_strkey};
@@ -895,4 +900,145 @@ async fn test_an_unreachable_node_is_reported_and_nothing_is_debited(
     assert_eq!(w.charges().await, 0);
     w.h.ledger.simulations().unreachable = false;
     assert_eq!(w.settle(terms.by_wallet()).await["success"], true);
+}
+
+// ---- prepared commitments
+
+impl World {
+    async fn prepare(&self, body: Value) -> (StatusCode, Value) {
+        self.call("POST", "/commitments", Some(&self.tenant.token), Some(body)).await
+    }
+}
+
+fn prepare_request(terms: &Terms, payer: &str) -> Value {
+    json!({ "paymentRequirements": terms.requirements(), "payer": payer })
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_prepared_commitment_signed_by_the_wallet_verifies_and_settles(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.h.now.store(NOW, Ordering::SeqCst);
+    contract_buyer(&w.h, &w.tenant, 100).await;
+    let terms = Terms::new(&w.pay_to, 30);
+
+    let (status, prepared) = w.prepare(prepare_request(&terms, &wallet().to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert_eq!(w.charges().await, 0, "preparing records nothing");
+    assert_eq!(prepared["validUntil"], (NOW + i64::try_from(TIMEOUT).unwrap()).to_string());
+    assert_eq!(prepared["commitmentVerifier"], contract_strkey(X402_VERIFIER));
+    // The entry is the payer's authorization of exactly the verifier call
+    // over the text returned, valid as long as a deposit's, and the payload
+    // is what that entry's signature covers.
+    let text = prepared["commitmentText"].as_str().unwrap();
+    let issued = Terms {
+        commitment: prepared["commitment"].as_str().unwrap().to_owned(),
+        valid_until: prepared["validUntil"].as_str().unwrap().parse().unwrap(),
+        ..terms.clone()
+    };
+    assert_eq!(text, issued.message(&wallet().to_string()));
+    let mut entry = SorobanAuthorizationEntry::from_xdr_base64(
+        prepared["authorizationEntry"].as_str().unwrap(),
+        Limits::none(),
+    )
+    .unwrap();
+    let SorobanCredentials::AddressV2(creds) = &entry.credentials else {
+        panic!("expected address credentials (V2): {:?}", entry.credentials)
+    };
+    assert_eq!(creds.address, wallet().sc_address());
+    assert_eq!(creds.signature_expiration_ledger, 1_000 + common::AUTHORIZATION_VALIDITY_LEDGERS);
+    assert_eq!(
+        entry.root_invocation,
+        x402_commitment_authorization(X402_VERIFIER, &wallet(), text)
+    );
+    let payload =
+        signature_payload(network_id(Network::Testnet), &entry.credentials, &entry.root_invocation)
+            .unwrap();
+    assert_eq!(prepared["signaturePayload"], hex_lower(&payload));
+
+    // The wallet signs; the facilitator presents it.
+    let SorobanCredentials::AddressV2(creds) = &mut entry.credentials else { unreachable!() };
+    creds.signature = ScVal::Bytes(ScBytes(BytesM::try_from(vec![9_u8; 64]).unwrap()));
+    let request = issued.authorized(&entry);
+    assert_eq!(w.verify(request.clone()).await["isValid"], true);
+    let settled = w.settle(request).await;
+    assert_eq!(settled["success"], true, "{settled}");
+    assert_eq!(settled["transaction"], issued.commitment);
+    assert_eq!(w.wallet_available().await, 70);
+    assert_eq!(w.h.ledger.simulations().seen.last().unwrap().2, vec![entry]);
+
+    // Each call prepares another commitment.
+    let (_, again) = w.prepare(prepare_request(&terms, &wallet().to_string())).await;
+    assert_ne!(again["commitment"], prepared["commitment"]);
+}
+
+#[sqlx::test(migrations = "../../db/migrations")]
+async fn test_a_commitment_is_prepared_only_for_a_contract_buyer_of_these_terms(
+    opts: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let w = world(opts, connect).await;
+    w.h.now.store(NOW, Ordering::SeqCst);
+    contract_buyer(&w.h, &w.tenant, 100).await;
+    let alice = buyer(&w.h, &w.tenant, "alice", 100).await;
+    let terms = Terms::new(&w.pay_to, 30);
+    let error =
+        |reply: (StatusCode, Value)| (reply.0, reply.1["error"].as_str().unwrap().to_owned());
+    let refused = |status: StatusCode, reason: &str| (status, reason.to_owned());
+
+    // The positive control.
+    assert_eq!(w.prepare(prepare_request(&terms, &wallet().to_string())).await.0, StatusCode::OK);
+    // A classic account signs the text itself.
+    assert_eq!(
+        error(w.prepare(prepare_request(&terms, alice.address().as_str())).await),
+        refused(StatusCode::BAD_REQUEST, reason::INVALID_PAYLOAD)
+    );
+    // A contract that is not this seller's buyer.
+    let stranger = ChainAddress::Contract([22; 32]).to_string();
+    assert_eq!(
+        error(w.prepare(prepare_request(&terms, &stranger)).await),
+        refused(StatusCode::BAD_REQUEST, reason::UNKNOWN_PAYER)
+    );
+    // Terms naming another contract, a too distant window, another scheme.
+    let other = Terms { pay_to: contract(8), ..terms.clone() };
+    assert_eq!(
+        error(w.prepare(prepare_request(&other, &wallet().to_string())).await),
+        refused(StatusCode::BAD_REQUEST, reason::INVALID_REQUIREMENTS)
+    );
+    let mut far = prepare_request(&terms, &wallet().to_string());
+    far["validUntil"] = json!((NOW + i64::try_from(TIMEOUT).unwrap() + 1).to_string());
+    assert_eq!(error(w.prepare(far).await), refused(StatusCode::BAD_REQUEST, reason::TOO_FAR));
+    let exact = Terms { scheme: "exact".to_owned(), ..terms.clone() };
+    assert_eq!(
+        error(w.prepare(prepare_request(&exact, &wallet().to_string())).await),
+        refused(StatusCode::BAD_REQUEST, reason::UNSUPPORTED_SCHEME)
+    );
+    // Without a verifier, no contract account can pay.
+    let (status, reply) = w
+        .call_on(
+            &w.h.x402_classic_only,
+            "POST",
+            "/commitments",
+            Some(&w.tenant.token),
+            Some(prepare_request(&terms, &wallet().to_string())),
+        )
+        .await;
+    assert_eq!(
+        (status, reply["error"].as_str().unwrap()),
+        (StatusCode::BAD_REQUEST, reason::CONTRACT_PAYER_UNSUPPORTED)
+    );
+    // An unreachable network, and no key.
+    w.h.ledger.set(0);
+    assert_eq!(
+        error(w.prepare(prepare_request(&terms, &wallet().to_string())).await),
+        refused(StatusCode::SERVICE_UNAVAILABLE, reason::NETWORK_UNAVAILABLE)
+    );
+    w.h.ledger.set(1_000);
+    let (status, _) = w
+        .call("POST", "/commitments", None, Some(prepare_request(&terms, &wallet().to_string())))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(w.charges().await, 0);
 }

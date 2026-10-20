@@ -8,7 +8,8 @@
 //! turns it into a charge (debited at once, settled on-chain in the next
 //! batch) and `/settlements/{commitment}` reports the charge and, once it has
 //! landed, its transaction. The layout of the commitment is specified in
-//! `docs/api/x402.md`.
+//! `docs/api/x402.md`. `/commitments` prepares, for a contract-account
+//! payer, the entry its wallet signs, as the ledger API prepares a deposit's.
 //!
 //! Callers authenticate with the seller deployment's API key, which fixes the
 //! ledger contract and asset every request is checked against.
@@ -22,14 +23,17 @@ use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use fermah_pay_stellar_chain::authorization::{
-    decode_buyer_entry, nonce_key, verify_contract_entry_call,
+    decode_buyer_entry, nonce_key, signature_payload, verify_contract_entry_call,
 };
+use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::x402_commitment_authorization;
 use fermah_pay_stellar_chain::rpc::hex_lower;
 use fermah_pay_stellar_chain::sep53;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    InvokeContractArgs, LedgerKey, SorobanAuthorizationEntry, SorobanAuthorizedFunction,
+    InvokeContractArgs, LedgerKey, Limits, ScVal, SorobanAddressCredentials,
+    SorobanAuthorizationEntry, SorobanAuthorizedFunction, SorobanCredentials, WriteXdr,
 };
+use fermah_pay_stellar_chain::transaction::ScAddressOf;
 use fermah_pay_stellar_domain::{ChainAddress, IdempotencyKey, Network};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -107,6 +111,18 @@ pub struct CommitmentPayload {
     /// is [`commitment_message`].
     #[serde(default)]
     pub authorization_entry: Option<String>,
+}
+
+/// What `/commitments` prepares an entry for: the terms, the contract
+/// account that will sign, and optionally when the commitment lapses.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareRequest {
+    pub payment_requirements: PaymentRequirements,
+    pub payer: String,
+    /// Unix seconds; `maxTimeoutSeconds` from now by default.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -222,6 +238,7 @@ pub fn router_with_clock<L: LatestLedger + 'static>(
         .route("/verify", post(verify::<L>))
         .route("/settle", post(settle::<L>))
         .route("/settlements/{commitment}", get(settlement::<L>))
+        .route("/commitments", post(prepare::<L>))
         .with_state(Arc::new(X402 { ledger, contract_payers, clock }))
 }
 
@@ -285,27 +302,7 @@ impl<L: LatestLedger> X402<L> {
         if payload.accepted != *requirements {
             return Err(reason::INVALID_REQUIREMENTS);
         }
-        let deployment = self
-            .ledger
-            .store()
-            .ledger_binding(scope)
-            .await
-            .map_err(|error| {
-                tracing::error!(error = %error, "reading the ledger binding");
-                reason::UNEXPECTED_VERIFY
-            })?
-            .ok_or(reason::NOT_CONFIGURED)?;
-        let contract = stellar_strkey::Contract(deployment.contract).to_string();
-        let asset = stellar_strkey::Contract(deployment.usdc).to_string();
-        if requirements.pay_to != contract.as_str() || requirements.asset != asset.as_str() {
-            return Err(reason::INVALID_REQUIREMENTS);
-        }
-        let amount = requirements
-            .amount
-            .parse::<i64>()
-            .ok()
-            .filter(|amount| *amount > 0 && requirements.amount == amount.to_string())
-            .ok_or(reason::INVALID_REQUIREMENTS)?;
+        let amount = self.requirements(scope, requirements).await?;
 
         let commitment = &payload.payload;
         let payer: ChainAddress = commitment.payer.parse().map_err(|_| reason::INVALID_PAYLOAD)?;
@@ -369,6 +366,145 @@ impl<L: LatestLedger> X402<L> {
         let key =
             format!("x402:{}", hex_lower(&id)).parse().map_err(|_| reason::INVALID_PAYLOAD)?;
         Ok(Checked { payer, buyer_id, amount, key, valid_until, proof })
+    }
+
+    /// The requirements against the seller's ledger contract and asset, and
+    /// the amount they ask for.
+    async fn requirements(
+        &self,
+        scope: &Scope,
+        requirements: &PaymentRequirements,
+    ) -> Result<i64, &'static str> {
+        if requirements.scheme != SCHEME {
+            return Err(reason::UNSUPPORTED_SCHEME);
+        }
+        if requirements.network != scope.network().caip2() {
+            return Err(reason::INVALID_NETWORK);
+        }
+        let deployment = self
+            .ledger
+            .store()
+            .ledger_binding(scope)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "reading the ledger binding");
+                reason::UNEXPECTED_VERIFY
+            })?
+            .ok_or(reason::NOT_CONFIGURED)?;
+        let contract = stellar_strkey::Contract(deployment.contract).to_string();
+        let asset = stellar_strkey::Contract(deployment.usdc).to_string();
+        if requirements.pay_to != contract.as_str() || requirements.asset != asset.as_str() {
+            return Err(reason::INVALID_REQUIREMENTS);
+        }
+        requirements
+            .amount
+            .parse::<i64>()
+            .ok()
+            .filter(|amount| *amount > 0 && requirements.amount == amount.to_string())
+            .ok_or(reason::INVALID_REQUIREMENTS)
+    }
+
+    /// Prepares the entry a contract-account payer signs for a new
+    /// commitment to these terms: a fresh commitment identifier, the text
+    /// it binds, and the verifier call over it under the payer's address.
+    /// Nothing is recorded; `/verify` and `/settle` check the signed entry
+    /// in full, whoever prepared it.
+    async fn prepare(
+        &self,
+        scope: &Scope,
+        request: &PrepareRequest,
+    ) -> Result<Value, (StatusCode, &'static str)> {
+        let bad = |reason| (StatusCode::BAD_REQUEST, reason);
+        let verifier = self
+            .contract_payers
+            .as_ref()
+            .map(|payers| payers.verifier)
+            .ok_or(bad(reason::CONTRACT_PAYER_UNSUPPORTED))?;
+        let requirements = &request.payment_requirements;
+        self.requirements(scope, requirements).await.map_err(|reason| match reason {
+            reason::UNEXPECTED_VERIFY => (StatusCode::INTERNAL_SERVER_ERROR, reason),
+            other => bad(other),
+        })?;
+        // A classic account signs the commitment's text itself (SEP-53).
+        let payer: ChainAddress =
+            request.payer.parse().map_err(|_| bad(reason::INVALID_PAYLOAD))?;
+        if !matches!(payer, ChainAddress::Contract(_)) {
+            return Err(bad(reason::INVALID_PAYLOAD));
+        }
+        self.ledger
+            .store()
+            .buyer_by_wallet(scope, &payer)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "finding the payer");
+                (StatusCode::INTERNAL_SERVER_ERROR, reason::UNEXPECTED_VERIFY)
+            })?
+            .ok_or(bad(reason::UNKNOWN_PAYER))?;
+        let now = (self.clock)();
+        let valid_until = match &request.valid_until {
+            Some(raw) => raw
+                .parse::<i64>()
+                .ok()
+                .filter(|at| *raw == at.to_string())
+                .ok_or(bad(reason::INVALID_PAYLOAD))?,
+            None => now.saturating_add(
+                i64::try_from(requirements.max_timeout_seconds).unwrap_or(i64::MAX),
+            ),
+        };
+        window(now, valid_until, requirements).map_err(bad)?;
+        let random = |bytes: &mut [u8]| {
+            getrandom::fill(bytes).map_err(|error| {
+                tracing::error!(error = %error, "operating system randomness unavailable");
+                (StatusCode::INTERNAL_SERVER_ERROR, reason::UNEXPECTED_VERIFY)
+            })
+        };
+        let mut id = [0_u8; 32];
+        random(&mut id)?;
+        let mut nonce = [0_u8; 8];
+        random(&mut nonce)?;
+        let commitment = hex_lower(&id);
+        let valid_until = valid_until.to_string();
+        let network = scope.network();
+        let text = commitment_message(
+            network.caip2(),
+            &requirements.asset,
+            &requirements.pay_to,
+            &requirements.amount,
+            &request.payer,
+            &commitment,
+            &valid_until,
+        );
+        let latest = self.ledger.latest_ledger().await.map_err(|error| {
+            tracing::warn!(error = %error, "reading the latest ledger");
+            (StatusCode::SERVICE_UNAVAILABLE, reason::NETWORK_UNAVAILABLE)
+        })?;
+        let expiration_ledger = latest.saturating_add(self.ledger.authorization_validity_ledgers());
+        // `AddressV2` credentials commit the signature to the payer's address
+        // as well as the call, as the ledger API's prepared entries do.
+        let entry = SorobanAuthorizationEntry {
+            credentials: SorobanCredentials::AddressV2(SorobanAddressCredentials {
+                address: payer.sc_address(),
+                nonce: i64::from_le_bytes(nonce),
+                signature_expiration_ledger: expiration_ledger,
+                signature: ScVal::Void,
+            }),
+            root_invocation: x402_commitment_authorization(verifier, &payer, &text),
+        };
+        let unexpected = (StatusCode::INTERNAL_SERVER_ERROR, reason::UNEXPECTED_VERIFY);
+        let payload =
+            signature_payload(network_id(network), &entry.credentials, &entry.root_invocation)
+                .map_err(|_| unexpected)?;
+        let entry = entry.to_xdr_base64(Limits::none()).map_err(|_| unexpected)?;
+        Ok(json!({
+            "payer": request.payer,
+            "commitment": commitment,
+            "validUntil": valid_until,
+            "commitmentText": text,
+            "commitmentVerifier": stellar_strkey::Contract(verifier).to_string().as_str(),
+            "authorizationEntry": entry,
+            "signaturePayload": hex_lower(&payload),
+            "expirationLedger": expiration_ledger,
+        }))
     }
 
     /// Establishes the payer's proof and makes the commitment admissible. A
@@ -641,6 +777,32 @@ async fn settle<L: LatestLedger>(
             "extensions": { "prepaidLedger": settlement_detail(&record, !created) },
         })),
     )
+}
+
+async fn prepare<L: LatestLedger>(
+    State(x402): State<Arc<X402<L>>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    let scope = match scope(&x402, &headers).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let Ok(request) = serde_json::from_value::<PrepareRequest>(body) else {
+        return refused(StatusCode::BAD_REQUEST, reason::INVALID_PAYLOAD);
+    };
+    match x402.prepare(&scope, &request).await {
+        Ok(prepared) => {
+            metrics::counter!("pay_stellar_x402_total", "call" => "prepare", "result" => "prepared")
+                .increment(1);
+            (StatusCode::OK, Json(prepared))
+        }
+        Err((status, reason)) => {
+            metrics::counter!("pay_stellar_x402_total", "call" => "prepare", "result" => reason)
+                .increment(1);
+            refused(status, reason)
+        }
+    }
 }
 
 async fn settlement<L: LatestLedger>(

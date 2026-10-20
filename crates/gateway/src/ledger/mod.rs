@@ -640,6 +640,15 @@ impl<L: LatestLedger> LedgerApi<L> {
         self.network
     }
 
+    /// Ledgers a buyer's authorization stays valid after it is prepared.
+    pub(crate) const fn authorization_validity_ledgers(&self) -> u32 {
+        self.policy.authorization_validity_ledgers
+    }
+
+    pub(crate) async fn latest_ledger(&self) -> Result<u32, RpcError> {
+        self.ledger.latest_ledger().await
+    }
+
     /// The existing deposit under `key`, if the request repeats it exactly.
     fn replay_deposit(
         &self,
