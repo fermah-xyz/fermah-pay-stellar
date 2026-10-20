@@ -19,7 +19,8 @@ use fermah_pay_stellar_chain::prepaid::{Outcome, settled_in, x402_commitment_ent
 use fermah_pay_stellar_chain::rpc::{RpcClient, TransactionStatus, hex_lower, http_client};
 use fermah_pay_stellar_chain::sep53;
 use fermah_pay_stellar_chain::stellar_xdr::{
-    BytesM, Limits, ScBytes, ScVal, SorobanCredentials, WriteXdr,
+    BytesM, Limits, ReadXdr, ScBytes, ScVal, SorobanAuthorizationEntry, SorobanCredentials,
+    WriteXdr,
 };
 use fermah_pay_stellar_domain::{ChainAddress, Network};
 use fermah_pay_stellar_gateway::x402::commitment_message;
@@ -460,6 +461,35 @@ pub async fn run(target: &Target, buyer: &Buyer, rpc: &RpcClient) -> anyhow::Res
         status == 400 && reply["invalidReason"] == "invalid_payload",
     );
 
+    // ---- a contract account's entry prepared by the interface, signed by
+    // the wallet as it is, and accepted
+    if let Buyer::ContractAccount { key, .. } = buyer {
+        let prepare = json!({ "paymentRequirements": requirements(&valid), "payer": payer });
+        let (status, prepared) = h
+            .call("prepare", "POST", "/commitments", Some(&prepare), Some(&key_of(target)))
+            .await?;
+        let signed = (status == 200).then(|| sign_prepared(&prepared, key)).transpose()?.flatten();
+        let presented = signed.map(|entry| {
+            let issued = Terms {
+                commitment: prepared["commitment"].as_str().unwrap_or_default().to_owned(),
+                valid_until: prepared["validUntil"].as_str().unwrap_or_default().to_owned(),
+                ..valid.clone()
+            };
+            body(&issued, &("authorizationEntry", entry))
+        });
+        match presented {
+            Some(request) => {
+                h.present("prepared_entry", "/verify", &request, Expect::Valid, &payer).await?;
+            }
+            None => h.verdict(
+                "prepared_entry",
+                "HTTP 200 from /commitments with an entry and the payload to sign".to_owned(),
+                &json!({ "status": status, "body": prepared }),
+                false,
+            ),
+        }
+    }
+
     // ---- the payment: verify, settle, settle again, reuse
     h.present("verify", "/verify", &request, Expect::Valid, &payer).await?;
     let settled = h.present("settle", "/settle", &request, Expect::Valid, &payer).await?;
@@ -589,6 +619,30 @@ pub async fn run(target: &Target, buyer: &Buyer, rpc: &RpcClient) -> anyhow::Res
         "cases": h.cases,
         "exchange": h.log,
     }))
+}
+
+fn key_of(target: &Target) -> String {
+    target.api_key.to_string()
+}
+
+/// The entry `/commitments` returned, signed by `key` over the payload it
+/// returned, as the example account's `__check_auth` takes it; `None` if the
+/// answer lacks either.
+fn sign_prepared(prepared: &Value, key: &SecretKey) -> anyhow::Result<Option<String>> {
+    let (Some(entry), Some(payload)) = (
+        prepared["authorizationEntry"].as_str(),
+        prepared["signaturePayload"].as_str().and_then(hex_bytes),
+    ) else {
+        return Ok(None);
+    };
+    let mut entry = SorobanAuthorizationEntry::from_xdr_base64(entry, Limits::none())?;
+    let (SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds)) =
+        &mut entry.credentials
+    else {
+        return Ok(None);
+    };
+    creds.signature = ScVal::Bytes(ScBytes(BytesM::try_from(key.sign_raw(&payload).to_vec())?));
+    Ok(Some(entry.to_xdr_base64(Limits::none())?))
 }
 
 fn hex_bytes(text: &str) -> Option<[u8; 32]> {
