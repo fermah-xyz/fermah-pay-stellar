@@ -67,14 +67,18 @@ jobs:
             --label "org.opencontainers.image.revision=$SHA" \
             --cache-from "type=registry,ref=$IMAGE:buildcache" \
             "${tags[@]}" "${output[@]}" .
-      - name: Record the image digest and the vault Wasm hash
+      - name: Record the image digest and the Wasm hashes
         env:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          hash=$(docker run --rm --entrypoint sha256sum "$IMAGE:$SHA" \
-            /usr/local/share/fermah-pay-stellar/fermah_pay_stellar_vault.wasm | cut -d' ' -f1)
-          echo "Image \`$IMAGE:$SHA\`, vault Wasm sha256 \`$hash\`" >> "$GITHUB_STEP_SUMMARY"
+          hash() {
+            docker run --rm --entrypoint sha256sum "$IMAGE:$SHA" \
+              "/usr/local/share/fermah-pay-stellar/$1" | cut -d' ' -f1
+          }
+          vault=$(hash fermah_pay_stellar_vault.wasm)
+          verifier=$(hash fermah_pay_stellar_x402_verifier.wasm)
+          echo "Image \`$IMAGE:$SHA\`, vault Wasm sha256 \`$vault\`, x402 verifier Wasm sha256 \`$verifier\`" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$PUBLISH" == true ]]; then
             digest=$(docker buildx imagetools inspect "$IMAGE:$SHA" --format '{{json .Manifest.Digest}}')
             echo "Published as \`$IMAGE@${digest//\"/}\`" >> "$GITHUB_STEP_SUMMARY"

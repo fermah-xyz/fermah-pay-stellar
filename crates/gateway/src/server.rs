@@ -55,10 +55,11 @@ const X402_BODY_LIMIT: usize = 16 * 1024;
 pub async fn serve_x402<L: LatestLedger + 'static>(
     listener: TcpListener,
     ledger: LedgerApi<L>,
+    contract_payers: Option<crate::x402::ContractPayers<L>>,
     limits: ServerLimits,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = crate::x402::router(ledger)
+    let app = crate::x402::router(ledger, contract_payers)
         .layer(axum::extract::DefaultBodyLimit::max(X402_BODY_LIMIT))
         .layer(
             tower::ServiceBuilder::new()

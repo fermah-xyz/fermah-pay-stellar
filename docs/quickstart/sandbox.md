@@ -93,6 +93,10 @@ HTTPS: `GET /supported`, which needs no key, and `POST /verify`,
 curl https://pay-sandbox.fermah.xyz/supported
 ```
 
+Buyers whose wallet is a contract account, such as a passkey smart wallet,
+pay by authorizing the commitment against the verifier `/supported` names
+([contract-account payers](../api/x402.md#contract-account-payers)).
+
 ## Sandbox rules
 
 - **Testnet only.** USDC is Circle's testnet USDC; more is available from

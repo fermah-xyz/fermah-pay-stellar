@@ -41,6 +41,14 @@ pub struct VaultDeployment {
     pub launch_limits: Option<(i128, i128)>,
 }
 
+/// The x402 commitment verifier the profile's gateways are configured
+/// with, recorded when it is deployed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct X402Verifier {
+    pub contract: String,
+    pub wasm_sha256: String,
+}
+
 impl Profile {
     /// Opens the profile in `dir`, creating it readable by its owner only:
     /// it holds keys.
@@ -112,5 +120,21 @@ impl Profile {
             bail!("no vault recorded in {}; run deploy-vault first", self.dir.display());
         }
         Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+    }
+
+    pub fn save_x402_verifier(&self, verifier: &X402Verifier) -> anyhow::Result<()> {
+        let path = self.dir.join("x402-verifier.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(verifier)?)
+            .with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The recorded verifier, if one was deployed: without it, a gateway
+    /// serves x402 to classic accounts only.
+    pub fn x402_verifier(&self) -> anyhow::Result<Option<X402Verifier>> {
+        let path = self.dir.join("x402-verifier.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&std::fs::read(&path)?)?))
     }
 }

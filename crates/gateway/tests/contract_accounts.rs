@@ -160,7 +160,7 @@ async fn test_a_contract_account_deposit_is_accepted_only_when_the_network_accep
     assert_refused(&status, Code::InvalidArgument, "authorization_refused");
 
     // The same request, the network accepting.
-    h.ledger.simulations().answer = BuyerCall::Accepted { resource_fee: 1_000 };
+    h.ledger.simulations().answer = common::accepted(1_000);
     let signed = with_credential(&entry, credential());
     let deposit = ledger(&h)
         .await
@@ -199,16 +199,8 @@ async fn test_only_the_buyers_part_of_a_failed_simulation_refuses_the_entry(
     let (t, buyer_id) = setup(&h).await;
     let cases = [
         // The wallet's code would cost the operator too much.
-        (
-            "costly",
-            BuyerCall::Accepted { resource_fee: DEFAULT_MAX_BUYER_RESOURCE_FEE + 1 },
-            Some("wallet_too_costly"),
-        ),
-        (
-            "at-the-bound",
-            BuyerCall::Accepted { resource_fee: DEFAULT_MAX_BUYER_RESOURCE_FEE },
-            None,
-        ),
+        ("costly", common::accepted(DEFAULT_MAX_BUYER_RESOURCE_FEE + 1), Some("wallet_too_costly")),
+        ("at-the-bound", common::accepted(DEFAULT_MAX_BUYER_RESOURCE_FEE), None),
         // The call's own failure, not the buyer's authorization: stored, and
         // the worker decides, as for a classic account.
         ("short", BuyerCall::Refused("HostError: Error(Contract, #10)".to_owned()), None),

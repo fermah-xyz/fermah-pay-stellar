@@ -1,0 +1,19 @@
+[package]
+name = "fermah-pay-stellar-x402-verifier"
+description = "A stateless Soroban contract a contract-account buyer authorizes an x402 commitment against, so the gateway can check the authorization through the account's own __check_auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "28.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "28.0.0", features = ["testutils"] }

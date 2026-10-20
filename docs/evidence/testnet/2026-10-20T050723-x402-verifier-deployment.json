@@ -1,0 +1,42 @@
+{
+  "contract": "CDUBU6FLN57Q53LNRRKNTSGIBYHZAPTR25H2ZIA7OYYCYB5JDYZJLV37",
+  "criterion": "x402-verifier-deployment",
+  "deployment": {
+    "create": {
+      "fee_charged_stroops": 87468,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+      "inner_transaction_hash": "c4af5b7f8f41503d027d60940c5bc28e3dc5c21c0618d1018265e03c89006245",
+      "ledger": 5289849,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/6497699b34c299bf38110e47be6fabcb4fb3a71cadf355cd5f5a0001a640173a",
+      "resources": {
+        "disk_read_bytes": 0,
+        "footprint_read_only": 1,
+        "footprint_read_write": 1,
+        "instructions": 535160,
+        "write_bytes": 104
+      },
+      "transaction_hash": "6497699b34c299bf38110e47be6fabcb4fb3a71cadf355cd5f5a0001a640173a"
+    },
+    "upload": {
+      "fee_charged_stroops": 6687567,
+      "fee_source": "GAEWHLXR7HW2ZXN4QVXAI27O5JQPAU5KLDV6N6F3VMB5WONTTC5YKOPD",
+      "inner_source": "GAY74NED4W4HGWLCHZL2T4B4L45UFR5HMRQEIYV7MN3X6YPMVLVE5COP",
+      "inner_transaction_hash": "b295fd70117571d4fc9a8a88a9ae4694f85dd51564c0b50c42ab2ee5d71274ae",
+      "ledger": 5289848,
+      "public_explorer_url": "https://stellar.expert/explorer/testnet/tx/235a652e384836bf1179ec5dc68d7c47a1283421f3fd465541c5817144aea837",
+      "resources": {
+        "disk_read_bytes": 0,
+        "footprint_read_only": 0,
+        "footprint_read_write": 1,
+        "instructions": 1660334,
+        "write_bytes": 768
+      },
+      "transaction_hash": "235a652e384836bf1179ec5dc68d7c47a1283421f3fd465541c5817144aea837"
+    }
+  },
+  "expected": "the x402 commitment verifier runs the given Wasm at the address derived from the deployer and the Wasm's hash",
+  "network": "stellar:testnet",
+  "recorded_at": "2026-10-20T05:07:23.986524563Z",
+  "wasm_sha256": "4ccb75373315340955cf38832bbc90da69032ff825724a85b6ccd38a6ccfc76a"
+}

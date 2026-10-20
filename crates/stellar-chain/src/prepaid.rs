@@ -17,7 +17,8 @@ use stellar_xdr::{
     BytesM, ContractDataDurability, ContractDataEntry, ContractEvent, ContractEventBody,
     ContractExecutable, ContractId, Hash, Int128Parts, InvokeContractArgs, LedgerEntryData,
     LedgerKey, LedgerKeyContractData, ScAddress, ScBytes, ScContractInstance, ScMap, ScMapEntry,
-    ScSymbol, ScVal, ScVec, SorobanAuthorizedFunction, SorobanAuthorizedInvocation, StringM,
+    ScString, ScSymbol, ScVal, ScVec, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    SorobanAuthorizedFunction, SorobanAuthorizedInvocation, SorobanCredentials, StringM,
     TransactionMeta, VecM,
 };
 
@@ -799,6 +800,66 @@ pub fn usdc_transfer_authorization(
     amount: i128,
 ) -> SorobanAuthorizedInvocation {
     invocation(usdc_transfer_call(usdc, from, to, amount), vec![])
+}
+
+/// The call a contract-account buyer authorizes to pay an x402 commitment:
+/// the commitment verifier's `commit(payer, commitment)`, where `commitment`
+/// is the commitment's full text. The gateway simulates it with the buyer's
+/// entry; it is never sent.
+#[must_use]
+pub fn x402_commitment_call(
+    verifier: [u8; 32],
+    payer: &impl ScAddressOf,
+    commitment: &str,
+) -> InvokeContractArgs {
+    let text = ScVal::String(ScString(
+        StringM::try_from(commitment)
+            .expect("invariant: a commitment's text is a few hundred bytes"),
+    ));
+    call(verifier, "commit", vec![account_val(payer), text])
+}
+
+/// What the buyer signs for [`x402_commitment_call`]: that call alone.
+#[must_use]
+pub fn x402_commitment_authorization(
+    verifier: [u8; 32],
+    payer: &impl ScAddressOf,
+    commitment: &str,
+) -> SorobanAuthorizedInvocation {
+    invocation(x402_commitment_call(verifier, payer, commitment), vec![])
+}
+
+/// Ledger key of `contract`'s instance entry, present once it is deployed.
+#[must_use]
+pub fn contract_instance_key(contract: [u8; 32]) -> LedgerKey {
+    LedgerKey::ContractData(LedgerKeyContractData {
+        contract: ScAddress::Contract(ContractId(Hash(contract))),
+        key: ScVal::LedgerKeyContractInstance,
+        durability: ContractDataDurability::Persistent,
+    })
+}
+
+/// The unsigned entry a contract-account buyer signs for an x402
+/// commitment: [`x402_commitment_authorization`] under the buyer's address,
+/// with a `nonce` of its choosing and the last ledger the signature is
+/// valid in. Its signature is whatever the account's `__check_auth` takes.
+#[must_use]
+pub fn x402_commitment_entry(
+    verifier: [u8; 32],
+    payer: &impl ScAddressOf,
+    commitment: &str,
+    nonce: i64,
+    signature_expiration_ledger: u32,
+) -> SorobanAuthorizationEntry {
+    SorobanAuthorizationEntry {
+        credentials: SorobanCredentials::Address(SorobanAddressCredentials {
+            address: payer.sc_address(),
+            nonce,
+            signature_expiration_ledger,
+            signature: ScVal::Void,
+        }),
+        root_invocation: x402_commitment_authorization(verifier, payer, commitment),
+    }
 }
 
 /// The USDC `owner` holds, as the asset contract `usdc` reports it; works

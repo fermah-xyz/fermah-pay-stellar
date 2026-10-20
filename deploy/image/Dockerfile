@@ -33,6 +33,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         --bin fermah-pay-stellar-try \
     && stellar contract build --package fermah-pay-stellar-vault --profile contract --locked \
         --out-dir /out/wasm \
+    && stellar contract build --package fermah-pay-stellar-x402-verifier --profile contract \
+        --locked --out-dir /out/wasm \
     && mkdir -p /out/bin \
     && for bin in gateway worker observer admin contract testnet try; do \
         cp "target/release/fermah-pay-stellar-$bin" /out/bin/; done
@@ -42,6 +44,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/bin/ /usr/local/bin/
-COPY --from=build /out/wasm/fermah_pay_stellar_vault.wasm /usr/local/share/fermah-pay-stellar/
+COPY --from=build /out/wasm/fermah_pay_stellar_vault.wasm \
+    /out/wasm/fermah_pay_stellar_x402_verifier.wasm /usr/local/share/fermah-pay-stellar/
 USER 65534:65534
 ENTRYPOINT ["fermah-pay-stellar-try"]

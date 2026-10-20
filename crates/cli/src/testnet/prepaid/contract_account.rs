@@ -2,7 +2,9 @@
 //! testnet: the example account contract is deployed and funded with Circle
 //! USDC, then registered, deposits, is charged and withdraws to itself. A
 //! deposit signed by another key is refused by the gateway, which asks the
-//! network.
+//! network. With an x402 commitment verifier recorded in the profile, the
+//! wallet then pays through the x402 conformance harness, as a contract
+//! account.
 
 use anyhow::{Context as _, ensure};
 use fermah_pay_stellar_chain::keys::SecretKey;
@@ -33,12 +35,15 @@ use super::{
     receipt_json, unix_now,
 };
 use crate::testnet::evidence::{self, tx_url};
+use crate::x402_conformance::{self, Buyer, Target};
 
 /// 0.5 USDC into the wallet, 0.3 deposited, 0.1 charged, 0.15 withdrawn.
 const FUNDED: i128 = 5_000_000;
 const DEPOSIT: i64 = 3_000_000;
 const CHARGE: i64 = 1_000_000;
 const WITHDRAWAL: i64 = 1_500_000;
+/// What the x402 conformance harness pays, once.
+const X402_PAYMENT: i64 = 50_000;
 
 /// `entry` carrying `key`'s signature of `payload_hex`, the payload the API
 /// reports, as the example account's `__check_auth` takes it.
@@ -142,20 +147,50 @@ impl Context {
             self.stack(database_url, "contract-account", sources, Quotas::default()).await?;
         let outcome =
             self.contract_account_flow(&stack.endpoint, &stack.token, &wallet, &key).await;
+        let x402 = match (&outcome, self.profile.x402_verifier()?) {
+            (Ok(_), Some(_)) => {
+                let target = Target {
+                    endpoint: stack.x402_endpoint.clone(),
+                    api_key: zeroize::Zeroizing::new(stack.token.to_string()),
+                    network: self.network,
+                    pay_to: stack.contract.clone(),
+                    asset: usdc::contract_strkey(stack.pinned.usdc),
+                    settlement_timeout: std::time::Duration::from_secs(300),
+                };
+                let buyer = Buyer::ContractAccount {
+                    wallet: id,
+                    key: SecretKey::from_strkey(&key.to_strkey())?,
+                };
+                Some(x402_conformance::run(&target, &buyer, &self.rpc).await)
+            }
+            _ => None,
+        };
         stack.stop().await;
         let flow = outcome?;
+        let mut x402 = x402.transpose()?;
+        if let Some(record) = &mut x402 {
+            // The interface ran on this machine for the run; the address it
+            // listened on says nothing about the deployment.
+            record["endpoint"] = json!("in-process gateway");
+            ensure!(
+                record["passed"] == true,
+                "x402 as a contract account failed: {}",
+                record["failed_cases"]
+            );
+        }
+        let paid_through_x402 = if x402.is_some() { X402_PAYMENT } else { 0 };
         let end = (usdc_of(wallet.clone()).await?, xlm_of(wallet.clone()).await?);
         let expected_usdc = FUNDED - i128::from(DEPOSIT) + i128::from(WITHDRAWAL);
         ensure!(end == (expected_usdc, 0), "the wallet holds {end:?} at the end");
         let credit = self.contract_balance(&submitter, &pinned, &wallet).await?;
         ensure!(
-            credit == i128::from(DEPOSIT - CHARGE - WITHDRAWAL),
+            credit == i128::from(DEPOSIT - CHARGE - WITHDRAWAL - paid_through_x402),
             "the contract credits the wallet {credit}"
         );
 
         let record = json!({
             "criterion": "contract-account-buyer",
-            "expected": "a buyer whose wallet is a contract account deposits, is charged and withdraws through the gateway API, authorizing with its own __check_auth; a deposit signed by another key is refused by the gateway after the network refuses it in simulation",
+            "expected": "a buyer whose wallet is a contract account deposits, is charged and withdraws through the gateway API, authorizing with its own __check_auth; a deposit signed by another key is refused by the gateway after the network refuses it in simulation; with an x402 verifier, it pays an x402 commitment the same way and the charge lands on-chain",
             "wallet": {
                 "address": wallet.to_string(),
                 "kind": "contract account authorized by one Ed25519 key (contracts/example-account)",
@@ -165,6 +200,7 @@ impl Context {
                 "funded_with_circle_usdc": receipt_json(&funded),
             },
             "flow": flow,
+            "x402": x402,
             "observed": {
                 "wallet_usdc_before": start.0.to_string(),
                 "wallet_usdc_after": end.0.to_string(),

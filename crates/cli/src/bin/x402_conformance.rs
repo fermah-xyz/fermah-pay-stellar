@@ -3,7 +3,9 @@
 //! and response with a verdict per case. Exits non-zero if any case fails.
 //!
 //! The buyer must be registered with the seller deployment and hold a small
-//! available balance (a few tenths of a cent are enough).
+//! available balance (a few tenths of a cent are enough). With
+//! `--buyer-contract`, the buyer is that contract account, authorized by the
+//! key in `--buyer-key-file` as `contracts/example-account` is.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -13,7 +15,7 @@ use clap::Parser;
 use fermah_pay_stellar_chain::keys::SecretKey;
 use fermah_pay_stellar_chain::rpc::RpcClient;
 use fermah_pay_stellar_chain::usdc::{asset_contract_id, circle_usdc, contract_strkey};
-use fermah_pay_stellar_cli::x402_conformance::{Target, run};
+use fermah_pay_stellar_cli::x402_conformance::{Buyer, Target, run};
 use fermah_pay_stellar_domain::Network;
 
 #[derive(Debug, Parser)]
@@ -44,6 +46,10 @@ struct Cli {
     /// File holding the buyer's secret seed (`S...`).
     #[arg(long)]
     buyer_key_file: PathBuf,
+    /// The buyer's contract account (`C...`), authorized by the key in
+    /// `--buyer-key-file`; the buyer is that key's classic account if unset.
+    #[arg(long)]
+    buyer_contract: Option<String>,
     /// Seconds to wait for the settlement to land on-chain.
     #[arg(long, default_value = "300")]
     settlement_timeout_secs: u64,
@@ -57,7 +63,16 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let seed = std::fs::read_to_string(&cli.buyer_key_file)
         .with_context(|| format!("reading {}", cli.buyer_key_file.display()))?;
-    let buyer = SecretKey::from_strkey(seed.trim()).context("the buyer key file")?;
+    let key = SecretKey::from_strkey(seed.trim()).context("the buyer key file")?;
+    let buyer = match cli.buyer_contract {
+        Some(contract) => Buyer::ContractAccount {
+            wallet: stellar_strkey::Contract::from_string(&contract)
+                .context("--buyer-contract is not a contract address")?
+                .0,
+            key,
+        },
+        None => Buyer::Account(key),
+    };
     let rpc = RpcClient::new(&cli.rpc_url, Duration::from_secs(30))?;
     rpc.verify_network(cli.network).await.context("checking the RPC network")?;
     let asset = cli.asset.unwrap_or_else(|| {

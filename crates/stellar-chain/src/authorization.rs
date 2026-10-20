@@ -7,8 +7,8 @@
 
 use stellar_xdr::{
     BytesM, Hash, HashIdPreimage, HashIdPreimageSorobanAuthorization,
-    HashIdPreimageSorobanAuthorizationWithAddress, Limits, ScAddress, ScBytes, ScMap, ScMapEntry,
-    ScSymbol, ScVal, ScVec, SorobanAddressCredentials, SorobanAuthorizationEntry,
+    HashIdPreimageSorobanAuthorizationWithAddress, Limits, ReadXdr, ScAddress, ScBytes, ScMap,
+    ScMapEntry, ScSymbol, ScVal, ScVec, SorobanAddressCredentials, SorobanAuthorizationEntry,
     SorobanAuthorizedInvocation, SorobanCredentials, VecM, WriteXdr,
 };
 
@@ -18,6 +18,24 @@ use fermah_pay_stellar_domain::AccountAddress;
 
 use crate::keys::SecretKey;
 use crate::transaction::ScAddressOf;
+
+/// Most bytes, and nesting levels, a signed entry a buyer returns may
+/// decode to. Far above any real entry, whose signature is at most a few
+/// hundred bytes, and far below what the decoder would otherwise allocate
+/// from a length prefix the entry itself declares.
+pub const MAX_ENTRY_BYTES: usize = 16 * 1024;
+const MAX_ENTRY_DEPTH: u32 = 64;
+
+/// Decodes an authorization entry a buyer returned, base64 of its XDR,
+/// within [`MAX_ENTRY_BYTES`]: the decoder allocates what a length prefix
+/// declares before reading it, so an unbounded decode of a few bytes could
+/// ask for gigabytes.
+pub fn decode_buyer_entry(base64: &str) -> Result<SorobanAuthorizationEntry, stellar_xdr::Error> {
+    SorobanAuthorizationEntry::from_xdr_base64(
+        base64,
+        Limits { depth: MAX_ENTRY_DEPTH, len: MAX_ENTRY_BYTES },
+    )
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AuthorizationError {
@@ -275,15 +293,40 @@ pub fn verify_contract_entry(
     verify_entry_terms(entry, &signer, invocation, current_ledger, max_validity_ledgers).map(|_| ())
 }
 
-/// The checks every returned entry passes whoever signs it: address
-/// credentials for `signer`, the prepared invocation, and an expiration
-/// that is live but not beyond `max_validity_ledgers` from now.
-fn verify_entry_terms<'a>(
+/// The ledger entry the network writes when it consumes `entry`, its signer's
+/// nonce: present in a call's written footprint only if the signer's
+/// authorization was required by the call and accepted.
+#[must_use]
+pub fn nonce_key(entry: &SorobanAuthorizationEntry) -> Option<stellar_xdr::LedgerKey> {
+    let (SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds)) =
+        &entry.credentials
+    else {
+        return None;
+    };
+    Some(stellar_xdr::LedgerKey::ContractData(stellar_xdr::LedgerKeyContractData {
+        contract: creds.address.clone(),
+        key: ScVal::LedgerKeyNonce(stellar_xdr::ScNonceKey { nonce: creds.nonce }),
+        durability: stellar_xdr::ContractDataDurability::Temporary,
+    }))
+}
+
+/// [`verify_contract_entry`] without its expiration window, for an entry
+/// that is only ever simulated, never sent: the network judges whether it is
+/// still live when it runs it, and how long it stays valid grants nothing.
+pub fn verify_contract_entry_call(
+    entry: &SorobanAuthorizationEntry,
+    contract: &[u8; 32],
+    invocation: &SorobanAuthorizedInvocation,
+) -> Result<(), SignedEntryRefusal> {
+    let signer = ScAddress::Contract(stellar_xdr::ContractId(stellar_xdr::Hash(*contract)));
+    entry_credentials(entry, &signer, invocation).map(|_| ())
+}
+
+/// Address credentials for `signer` over exactly `invocation`.
+fn entry_credentials<'a>(
     entry: &'a SorobanAuthorizationEntry,
     signer: &ScAddress,
     invocation: &SorobanAuthorizedInvocation,
-    current_ledger: u32,
-    max_validity_ledgers: u32,
 ) -> Result<&'a SorobanAddressCredentials, SignedEntryRefusal> {
     let creds = match &entry.credentials {
         SorobanCredentials::Address(creds) | SorobanCredentials::AddressV2(creds) => creds,
@@ -297,6 +340,20 @@ fn verify_entry_terms<'a>(
     if entry.root_invocation != *invocation {
         return Err(SignedEntryRefusal::InvocationMismatch);
     }
+    Ok(creds)
+}
+
+/// The checks every returned entry passes whoever signs it: address
+/// credentials for `signer`, the prepared invocation, and an expiration
+/// that is live but not beyond `max_validity_ledgers` from now.
+fn verify_entry_terms<'a>(
+    entry: &'a SorobanAuthorizationEntry,
+    signer: &ScAddress,
+    invocation: &SorobanAuthorizedInvocation,
+    current_ledger: u32,
+    max_validity_ledgers: u32,
+) -> Result<&'a SorobanAddressCredentials, SignedEntryRefusal> {
+    let creds = entry_credentials(entry, signer, invocation)?;
     let expiration = creds.signature_expiration_ledger;
     if expiration < current_ledger {
         return Err(SignedEntryRefusal::Expired { expiration, current: current_ledger });
@@ -339,6 +396,33 @@ mod tests {
 
     use super::*;
     use crate::transaction::account_id;
+
+    #[test]
+    fn test_a_buyer_entry_declaring_a_huge_length_is_refused_before_allocating() {
+        use base64::Engine as _;
+        // Address credentials for a contract, then a signature declared as
+        // bytes of length u32::MAX, followed by eight bytes: 92 characters
+        // of base64 that an unbounded decode answers by allocating 4 GiB.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1_u32.to_be_bytes());
+        raw.extend_from_slice(&1_u32.to_be_bytes());
+        raw.extend_from_slice(&[21; 32]);
+        raw.extend_from_slice(&7_i64.to_be_bytes());
+        raw.extend_from_slice(&5_000_u32.to_be_bytes());
+        raw.extend_from_slice(&13_u32.to_be_bytes());
+        raw.extend_from_slice(&u32::MAX.to_be_bytes());
+        raw.extend_from_slice(&[0; 8]);
+        let hostile = base64::engine::general_purpose::STANDARD.encode(&raw);
+        assert_eq!(hostile.len(), 92);
+        assert!(matches!(
+            decode_buyer_entry(&hostile),
+            Err(stellar_xdr::Error::LengthLimitExceeded)
+        ));
+        // The positive control: a real entry decodes.
+        let account = SecretKey::generate().unwrap();
+        let real = entry(&account, true).to_xdr_base64(Limits::none()).unwrap();
+        assert_eq!(decode_buyer_entry(&real).unwrap(), entry(&account, true));
+    }
 
     #[test]
     fn test_co_signers_signatures_are_attached_only_if_each_verifies() {

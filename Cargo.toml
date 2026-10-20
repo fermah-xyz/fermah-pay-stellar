@@ -9,6 +9,7 @@ members = [
     "contracts/prepaid",
     "contracts/example-account",
     "contracts/vault",
+    "contracts/x402-verifier",
 ]
 
 [workspace.package]

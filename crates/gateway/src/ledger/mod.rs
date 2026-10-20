@@ -18,13 +18,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 use fermah_pay_stellar_chain::authorization::{
-    SignedEntryRefusal, signature_payload, verify_contract_entry, verify_signed_entry,
+    SignedEntryRefusal, decode_buyer_entry, signature_payload, verify_contract_entry,
+    verify_signed_entry,
 };
 use fermah_pay_stellar_chain::network_id;
 use fermah_pay_stellar_chain::prepaid::{DepositIntent, PrepaidDeployment};
 use fermah_pay_stellar_chain::rpc::{AuthMode, RpcClient, RpcError, SimulationOutcome, hex_lower};
 use fermah_pay_stellar_chain::stellar_xdr::{
-    InvokeContractArgs, Limits, ReadXdr, ScVal, SorobanAddressCredentials,
+    InvokeContractArgs, LedgerKey, Limits, ScVal, SorobanAddressCredentials,
     SorobanAuthorizationEntry, SorobanAuthorizedFunction, SorobanCredentials, WriteXdr,
 };
 use fermah_pay_stellar_chain::transaction::ScAddressOf;
@@ -83,8 +84,9 @@ pub trait LatestLedger: Send + Sync + 'static {
 /// What the network answered to a simulated buyer call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuyerCall {
-    /// It would succeed, at this resource fee in stroops.
-    Accepted { resource_fee: i64 },
+    /// It would succeed, at this resource fee in stroops, writing the
+    /// `written` entries.
+    Accepted { resource_fee: i64, written: Vec<LedgerKey> },
     /// It would fail, for the network's reason.
     Refused(String),
     /// Archived state must be restored before the call can run at all.
@@ -116,9 +118,10 @@ impl LatestLedger for RpcClient {
         auth: Vec<SorobanAuthorizationEntry>,
     ) -> Result<BuyerCall, RpcError> {
         Ok(match self.simulate_call(source, call, auth, AuthMode::Enforce).await? {
-            SimulationOutcome::Succeeded(simulation) => {
-                BuyerCall::Accepted { resource_fee: simulation.min_resource_fee }
-            }
+            SimulationOutcome::Succeeded(simulation) => BuyerCall::Accepted {
+                resource_fee: simulation.min_resource_fee,
+                written: simulation.transaction_data.resources.footprint.read_write.to_vec(),
+            },
             SimulationOutcome::Failed { error, .. } => BuyerCall::Refused(error),
             SimulationOutcome::RestoreRequired { .. } => BuyerCall::RestoreRequired,
         })
@@ -228,7 +231,7 @@ fn random<const N: usize>() -> Result<[u8; N], Status> {
 }
 
 fn decode_entry(xdr: &str) -> Option<SorobanAuthorizationEntry> {
-    SorobanAuthorizationEntry::from_xdr_base64(xdr, Limits::none()).ok()
+    decode_buyer_entry(xdr).ok()
 }
 
 /// `entry` with its signature cleared: what the buyer agreed to, which must
@@ -318,24 +321,21 @@ impl<L: LatestLedger> LedgerApi<L> {
             .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?;
         let mut auth = vec![signed.clone()];
         auth.extend(treasury_entries(&deployment));
-        // Sent from the co-signer, whose authorization rides on the source
-        // account: the treasury, or a vault's operator.
-        let source = match deployment.treasury() {
-            Some(treasury) => treasury.clone(),
-            None => self
-                .store
-                .ledger_operator(scope)
-                .await
-                .map_err(|e| EntryRefusal::Failed(internal(&e)))?
-                .ok_or(EntryRefusal::Network(Refusal::LedgerNotConfigured))?,
-        };
+        let source =
+            self.simulation_source(scope, &deployment).await.map_err(|failure| match failure {
+                SimulationFailure::NotConfigured => {
+                    EntryRefusal::Network(Refusal::LedgerNotConfigured)
+                }
+                SimulationFailure::Store(e) => EntryRefusal::Failed(internal(&e)),
+                SimulationFailure::Network(e) => EntryRefusal::Failed(network_unavailable(&e)),
+            })?;
         let answer = self
             .ledger
             .simulate_buyer_call(&source, call.clone(), auth)
             .await
             .map_err(|e| EntryRefusal::Failed(network_unavailable(&e)))?;
         match answer {
-            BuyerCall::Accepted { resource_fee }
+            BuyerCall::Accepted { resource_fee, .. }
                 if resource_fee > self.policy.max_buyer_resource_fee =>
             {
                 tracing::info!(resource_fee, "a contract account's call costs too much");
@@ -354,6 +354,58 @@ impl<L: LatestLedger> LedgerApi<L> {
             }
             BuyerCall::Accepted { .. } | BuyerCall::RestoreRequired => Ok(()),
         }
+    }
+}
+
+/// Why a simulation of a buyer's call could not be asked of the network.
+pub(crate) enum SimulationFailure {
+    NotConfigured,
+    Store(StoreError),
+    Network(RpcError),
+}
+
+impl<L: LatestLedger> LedgerApi<L> {
+    /// The account a buyer's call is simulated from: the deployment's
+    /// co-signer, whose authorization rides on the source account, the
+    /// treasury or a vault's operator.
+    async fn simulation_source(
+        &self,
+        scope: &Scope,
+        deployment: &PrepaidDeployment,
+    ) -> Result<AccountAddress, SimulationFailure> {
+        match deployment.treasury() {
+            Some(treasury) => Ok(treasury.clone()),
+            None => self
+                .store
+                .ledger_operator(scope)
+                .await
+                .map_err(SimulationFailure::Store)?
+                .ok_or(SimulationFailure::NotConfigured),
+        }
+    }
+
+    /// Simulates `call` with a contract account's signed `entry` as its only
+    /// authorization, in enforcing mode, so the network runs the account's
+    /// `__check_auth`: on `node`, or on the API's own when `None`. Nothing is
+    /// sent.
+    pub(crate) async fn simulate_contract_entry(
+        &self,
+        scope: &Scope,
+        call: InvokeContractArgs,
+        entry: SorobanAuthorizationEntry,
+        node: Option<&L>,
+    ) -> Result<BuyerCall, SimulationFailure> {
+        let deployment = self
+            .store
+            .ledger_binding(scope)
+            .await
+            .map_err(SimulationFailure::Store)?
+            .ok_or(SimulationFailure::NotConfigured)?;
+        let source = self.simulation_source(scope, &deployment).await?;
+        node.unwrap_or(&*self.ledger)
+            .simulate_buyer_call(&source, call, vec![entry])
+            .await
+            .map_err(SimulationFailure::Network)
     }
 }
 
