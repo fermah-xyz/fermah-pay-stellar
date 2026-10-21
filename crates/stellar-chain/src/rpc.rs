@@ -56,6 +56,33 @@ pub enum RpcClientError {
 pub struct RpcClient {
     http: reqwest::Client,
     url: Arc<str>,
+    /// Each request's timeout.
+    request_timeout: Duration,
+    /// How long a read may take, retries included: an attempt starts only
+    /// if it would end within this even if it timed out.
+    retry_budget: Duration,
+}
+
+/// Most attempts one read makes.
+const READ_ATTEMPTS: u32 = 3;
+
+/// The only method that changes anything on the network. A transaction is
+/// resent, if at all, by the submission logic that knows its state, never
+/// by the transport.
+const SEND_TRANSACTION: &str = "sendTransaction";
+
+/// Whether `error` says nothing about the request itself: the node did not
+/// answer in time, the connection failed, or the node or a proxy in front
+/// of it was overloaded or down. A JSON-RPC error or an undecodable answer is
+/// the node's actual answer and is never retried.
+fn transient(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_request()
+        || error.is_body()
+        || error.status().is_some_and(|status| {
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +326,14 @@ impl RpcClient {
             .timeout(request_timeout)
             .build()
             .map_err(RpcClientError::Build)?;
-        Ok(Self { http, url: Arc::from(url) })
+        Ok(Self {
+            http,
+            url: Arc::from(url),
+            request_timeout,
+            // Room for one timed-out request and one more, so the read that
+            // most often fails, a node stalling once, is answered.
+            retry_budget: request_timeout.saturating_mul(2).saturating_add(Duration::from_secs(1)),
+        })
     }
 
     /// Fails unless the endpoint serves `expected`, so a misconfigured URL
@@ -651,10 +685,44 @@ impl RpcClient {
         })))
     }
 
+    /// Calls `method`. A read that fails in transit is tried again, up to
+    /// [`READ_ATTEMPTS`] times, after a short pause, as long as the attempt
+    /// would end within the retry budget: public nodes drop or stall a share
+    /// of requests, and a read repeated is the same read. A read therefore
+    /// never takes longer than the budget, twice the request timeout and a
+    /// second. `sendTransaction` is never repeated here.
     async fn call<T: DeserializeOwned>(
         &self,
         method: &'static str,
         params: serde_json::Value,
+    ) -> Result<T, RpcError> {
+        let body =
+            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let started = std::time::Instant::now();
+        let mut attempt = 1;
+        loop {
+            let pause = Duration::from_millis(250 * u64::from(attempt));
+            match self.attempt(method, &body).await {
+                Err(RpcError::Transport { source, .. })
+                    if method != SEND_TRANSACTION
+                        && transient(&source)
+                        && attempt < READ_ATTEMPTS
+                        && started.elapsed() + pause + self.request_timeout
+                            <= self.retry_budget =>
+                {
+                    tracing::debug!(method, attempt, error = %source, "retrying an RPC read");
+                    tokio::time::sleep(pause).await;
+                    attempt += 1;
+                }
+                outcome => return outcome,
+            }
+        }
+    }
+
+    async fn attempt<T: DeserializeOwned>(
+        &self,
+        method: &'static str,
+        body: &serde_json::Value,
     ) -> Result<T, RpcError> {
         #[derive(Deserialize)]
         struct Envelope<T> {
@@ -666,12 +734,10 @@ impl RpcClient {
             code: i64,
             message: String,
         }
-        let body =
-            serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
         let response = self
             .http
             .post(&*self.url)
-            .json(&body)
+            .json(body)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -822,6 +888,137 @@ pub fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a scripted node does with one request.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        Status(u16),
+        Json(&'static str),
+        /// Holds the request past any client timeout.
+        Stall,
+    }
+
+    /// A node on this host answering its `n`th request with `script[n]`,
+    /// or the script's last reply once it runs out; returns its URL and the
+    /// count of requests it received.
+    async fn node(script: Vec<Reply>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                let reply = script[index.min(script.len() - 1)];
+                tokio::spawn(async move {
+                    // The request: headers, then the body its length announces.
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    loop {
+                        let read = stream.read(&mut chunk).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let (status, body) = match reply {
+                        Reply::Status(status) => (status, String::new()),
+                        Reply::Json(body) => (200, body.to_owned()),
+                        Reply::Stall => {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            return;
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    /// A healthy node at ledger 42, as `getHealth` answers.
+    const LATEST: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"status":"healthy","latestLedger":42,"oldestLedger":1,"ledgerRetentionWindow":120960}}"#;
+
+    fn seen(count: &std::sync::atomic::AtomicUsize) -> usize {
+        count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn test_a_read_that_fails_in_transit_is_answered_on_a_later_attempt() {
+        let (url, count) = node(vec![Reply::Status(503), Reply::Stall, Reply::Json(LATEST)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        assert_eq!(client.get_latest_ledger().await.unwrap(), 42);
+        assert_eq!(seen(&count), 3);
+        // The positive control: a node that answers is asked once.
+        let (url, count) = node(vec![Reply::Json(LATEST)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        assert_eq!(client.get_latest_ledger().await.unwrap(), 42);
+        assert_eq!(seen(&count), 1);
+    }
+
+    #[tokio::test]
+    async fn test_a_transaction_is_never_resent_by_the_transport() {
+        let (url, count) = node(vec![Reply::Status(503), Reply::Json(LATEST)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        let sent = client.call::<serde_json::Value>(SEND_TRANSACTION, serde_json::json!({})).await;
+        assert!(
+            matches!(sent, Err(RpcError::Transport { method: SEND_TRANSACTION, .. })),
+            "{sent:?}"
+        );
+        assert_eq!(seen(&count), 1);
+    }
+
+    #[tokio::test]
+    async fn test_the_nodes_own_answer_is_not_retried() {
+        let refusal =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"start ledger too old"}}"#;
+        let (url, count) = node(vec![Reply::Json(refusal), Reply::Json(LATEST)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        let answer = client.get_latest_ledger().await;
+        assert!(matches!(answer, Err(RpcError::Server { code: -32600, .. })), "{answer:?}");
+        assert_eq!(seen(&count), 1);
+        // A request the node calls malformed is no transient failure either.
+        let (url, count) = node(vec![Reply::Status(400), Reply::Json(LATEST)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        assert!(client.get_latest_ledger().await.is_err());
+        assert_eq!(seen(&count), 1);
+    }
+
+    #[tokio::test]
+    async fn test_a_read_stops_after_its_attempts_or_its_budget() {
+        let (url, count) = node(vec![Reply::Status(503)]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        let answer = client.get_latest_ledger().await;
+        assert!(matches!(answer, Err(RpcError::Transport { .. })), "{answer:?}");
+        assert_eq!(seen(&count), READ_ATTEMPTS as usize);
+        // Each stalled attempt uses a whole timeout: after two, a third could
+        // not end within the budget, so none starts, and the read ends within
+        // it.
+        let (url, count) = node(vec![Reply::Stall]).await;
+        let client = RpcClient::new(&url, Duration::from_millis(500)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(client.get_latest_ledger().await.is_err());
+        assert_eq!(seen(&count), 2);
+        assert!(started.elapsed() <= client.retry_budget, "{:?}", started.elapsed());
+    }
 
     #[test]
     fn test_plain_http_is_accepted_only_for_this_host() {

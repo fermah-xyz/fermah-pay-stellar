@@ -25,6 +25,7 @@ stellar-strkey.workspace = true
 stellar-xdr.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
