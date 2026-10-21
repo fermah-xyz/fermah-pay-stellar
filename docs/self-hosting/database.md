@@ -80,7 +80,7 @@ must not be able to issue keys.
 | Gateway | `PAY_STELLAR_MAX_CONCURRENT_REQUESTS` | requests processed at once across all connections, default 64; the rest wait |
 | Gateway | `PAY_STELLAR_REQUEST_TIMEOUT_SECS` | a request still running after this is cancelled, default 30 |
 | Gateway | `PAY_STELLAR_RPC_URL` | Stellar RPC endpoint of the network; checked at startup (network passphrase, and protocol 27 or later). Must be `https` unless it points at this host |
-| Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10 |
+| Gateway | `PAY_STELLAR_RPC_TIMEOUT_SECS` | per-request RPC timeout, default 10. A read that times out or fails in transit (a dropped connection, HTTP 429 or 5xx) is retried, up to three attempts, within twice the timeout and a second; a transaction is never resent this way |
 | Gateway | `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` | ledgers a charge may wait for settlement before it is refunded, default 720 (about an hour), at most 17280 |
 | Gateway | `PAY_STELLAR_VAULT_EVENTS_STALE_LEDGERS` | vault deployments: ledgers the worker's reading of the contract's events may lag the network before charges are refused, default 2880 (about four hours). With `PAY_STELLAR_CHARGE_VALIDITY_LEDGERS` it must stay below the vault's notice of 18720 ledgers, or the gateway refuses to start |
 | Gateway | `PAY_STELLAR_MAX_NEW_BUYERS_PER_DAY`, `PAY_STELLAR_MAX_DEPOSITS_PER_BUYER_PER_DAY`, `PAY_STELLAR_MAX_WITHDRAWALS_PER_BUYER_PER_DAY`, `PAY_STELLAR_MIN_WITHDRAWAL` | [quotas](../api/ledger.md#quotas) against requests that each cost the operator fees: new buyers per deployment (default 1000), deposits (10) and withdrawals (5) per buyer, each per 24 hours, and the smallest withdrawal (100000, 0.01 USDC) |

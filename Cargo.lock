@@ -1638,6 +1638,7 @@ dependencies = [
  "stellar-xdr",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "webpki-roots",
  "zeroize",
 ]
