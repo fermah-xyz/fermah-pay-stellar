@@ -170,19 +170,19 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    let deadline = tokio::time::Instant::now() + limit;
-    let mut pause = Duration::from_secs(1);
-    loop {
-        let value = read().await?;
-        if done(&value) {
-            return Ok(value);
+    tokio::time::timeout(limit, async {
+        let mut pause = Duration::from_secs(1);
+        loop {
+            let value = read().await?;
+            if done(&value) {
+                return Ok(value);
+            }
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(Duration::from_secs(5));
         }
-        if tokio::time::Instant::now() + pause > deadline {
-            bail!("{what} did not settle within {limit:?}");
-        }
-        tokio::time::sleep(pause).await;
-        pause = (pause * 2).min(Duration::from_secs(5));
-    }
+    })
+    .await
+    .with_context(|| format!("{what} did not settle within {limit:?}"))?
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -384,6 +384,71 @@ mod tests {
     use fermah_pay_stellar_chain::stellar_xdr::SorobanCredentials;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_times_out_an_unresponsive_read() {
+        let limit = Duration::from_millis(20);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for("the deposit", limit, std::future::pending::<anyhow::Result<()>>, |_| true),
+        )
+        .await
+        .expect("wait_for did not enforce its deadline");
+        assert_eq!(result.unwrap_err().to_string(), "the deposit did not settle within 20ms");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_does_not_accept_a_result_after_the_deadline() {
+        let result = wait_for(
+            "the charge",
+            Duration::from_millis(20),
+            || async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(true)
+            },
+            |done| *done,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "the charge did not settle within 20ms");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_returns_a_completed_read_and_preserves_read_errors() {
+        assert_eq!(
+            wait_for("the deposit", Duration::from_secs(1), || async { Ok(42) }, |_| true)
+                .await
+                .unwrap(),
+            42
+        );
+        let result = wait_for(
+            "the deposit",
+            Duration::from_secs(1),
+            || async { Err::<(), _>(anyhow::anyhow!("read failed")) },
+            |_| true,
+        )
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "read failed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_wait_for_polls_again_after_the_backoff() {
+        let started = tokio::time::Instant::now();
+        let mut reads = 0;
+        let value = wait_for(
+            "the deposit",
+            Duration::from_secs(10),
+            || {
+                reads += 1;
+                std::future::ready(Ok(reads))
+            },
+            |value| *value == 3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 3);
+        assert_eq!(reads, 3);
+        assert_eq!(started.elapsed(), Duration::from_secs(3));
+    }
 
     fn entry(deployment: &PrepaidDeployment, intent: &DepositIntent) -> SorobanAuthorizationEntry {
         SorobanAuthorizationEntry {
