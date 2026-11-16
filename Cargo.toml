@@ -46,15 +46,15 @@ hex = "0.4.3"
 http = "1.5.0"
 proptest = "1.11.0"
 prost = "0.14.4"
-protox = "0.9.1"
+protox = "0.10.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls-no-provider", "http2"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "macros", "migrate", "uuid", "time"] }
-stellar-strkey = "0.0.18"
-stellar-xdr = { version = "28.0.0", default-features = false, features = ["std", "base64"] }
+stellar-strkey = "1.0.0"
+stellar-xdr = { version = "30.0.0", default-features = false, features = ["std", "base64"] }
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["formatting"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "time", "net"] }
